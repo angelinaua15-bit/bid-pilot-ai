@@ -8,6 +8,7 @@ import { LoadingState } from '@/components/shared/LoadingState';
 import { EmptyState } from '@/components/shared/EmptyState';
 import type { Project, NavTab } from '@/types';
 import { cn } from '@/lib/utils';
+import { safeText } from '@/lib/safe-text';
 
 const CATEGORIES = ['All', 'Telegram bots', 'AI agents', 'Websites', 'Automation', 'E-commerce'];
 
@@ -56,17 +57,10 @@ export function ProjectsScreen({ onNavigate }: ProjectsScreenProps) {
     'E-commerce':    ['магазин', 'ecommerce', 'shopify', 'woo'],
   };
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const safe = (v: any): string => {
-    if (typeof v === 'string') return v.toLowerCase();
-    if (Array.isArray(v)) return v.map(String).join(' ').toLowerCase();
-    return String(v ?? '').toLowerCase();
-  };
-
   const filtered = projects.filter((p) => {
-    const title       = safe(p.title);
-    const description = safe(p.description);
-    const category    = safe(p.category);
+    const title       = safeText(p.title);
+    const description = safeText(p.description);
+    const category    = safeText(p.category);
     const q           = search.toLowerCase();
 
     const matchSearch =
