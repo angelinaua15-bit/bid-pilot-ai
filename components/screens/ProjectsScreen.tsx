@@ -56,51 +56,29 @@ export function ProjectsScreen({ onNavigate }: ProjectsScreenProps) {
     'E-commerce':    ['магазин', 'ecommerce', 'shopify', 'woo'],
   };
 
-  const filtered = projects.filter((p) => {
-    const matchSearch =
-      !search ||
-      p.title.toLowerCase().includes(search.toLowerCase()) ||
-      p.description.toLowerCase().includes(search.toLowerCase()) ||
-     const safe = (v: any) =>
-  typeof v === 'string'
-    ? v.toLowerCase()
-    : Array.isArray(v)
-    ? v.join(' ').toLowerCase()
-    : String(v || '').toLowerCase()
+  const safe = (v: any): string => {
+  if (typeof v === 'string') return v.toLowerCase()
+
+  if (Array.isArray(v)) {
+    return v.join(' ').toLowerCase()
+  }
+
+  if (v === null || v === undefined) {
+    return ''
+  }
+
+  return String(v).toLowerCase()
+}
 
 const filtered = projects.filter((p) => {
-  const title = safe(p.title)
-  const description = safe(p.description)
-  const category = safe(p.category)
-
   const matchSearch =
     !search ||
-    title.includes(search.toLowerCase()) ||
-    description.includes(search.toLowerCase()) ||
-    category.includes(search.toLowerCase())
+    safe(p.title).includes(search.toLowerCase()) ||
+    safe(p.description).includes(search.toLowerCase()) ||
+    safe(p.category).includes(search.toLowerCase())
 
-  const matchCat =
-    activeCategory === 'All' ||
-    (CATEGORY_MAP[activeCategory] ?? []).some((kw) =>
-      `${title} ${description} ${category}`.includes(
-        kw.toLowerCase()
-      )
-    )
-
-  const matchNew = !onlyNew || p.isNew
-
-  return matchSearch && matchCat && matchNew
+  return matchSearch
 })
-  
-    const matchCat =
-      activeCategory === 'All' ||
-      (CATEGORY_MAP[activeCategory] ?? []).some((kw) =>
-        `${p.title} ${p.description} ${p.category}`.toLowerCase().includes(kw)
-      );
-
-    const matchNew = !onlyNew || p.isNew;
-    return matchSearch && matchCat && matchNew;
-  });
 
   return (
     <div className="flex flex-col h-dvh">
