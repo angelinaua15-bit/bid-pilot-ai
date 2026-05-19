@@ -1,0 +1,33 @@
+# Dependencies — reinstalled during build
+node_modules
+
+# Next.js build output — rebuilt during Docker build
+.next
+
+# Local environment files — secrets must come from Railway Variables
+.env*.local
+.env.local
+.env
+
+# Playwright session — must be injected at runtime via Railway volume or env var
+storageState.json
+
+# Dev tooling
+.git
+.gitignore
+.eslintrc*
+*.md
+README*
+
+# OS artefacts
+.DS_Store
+Thumbs.db
+
+# Vercel/v0 internals
+.vercel
+.v0-trash
+.snowflake
+__v0_*
+
+# Temporary screenshots written by playwright-browser.service.ts
+/tmp
