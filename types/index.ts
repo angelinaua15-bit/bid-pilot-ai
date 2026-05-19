@@ -261,4 +261,4 @@ export interface PortfolioItem {
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-export type NavTab = 'home' | 'projects' | 'settings' | 'logs' | 'history';
+export type NavTab = 'home' | 'projects' | 'settings' | 'logs' | 'history' | 'profile';

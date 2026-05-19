@@ -40,6 +40,23 @@ export async function POST(req: NextRequest) {
   const { searchParams } = new URL(req.url);
   const action = searchParams.get('action');
 
+  if (action === 'logout') {
+    try {
+      const res = await fetch(`${config.worker.url}/connect/freelancehunt/logout`, {
+        method: 'POST',
+        headers: workerHeaders(),
+        signal: AbortSignal.timeout(8_000),
+      });
+      const data = await res.json();
+      return NextResponse.json(data, { status: res.status });
+    } catch (err) {
+      return NextResponse.json(
+        { ok: false, error: err instanceof Error ? err.message : 'Worker unreachable' },
+        { status: 502 }
+      );
+    }
+  }
+
   if (action === 'save') {
     const { sessionId } = await req.json().catch(() => ({}));
     if (!sessionId) {
