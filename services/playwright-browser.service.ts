@@ -77,6 +77,10 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
   const storageStatePath = path.resolve(cwd, 'storageState.json');
   const exists = fs.existsSync(storageStatePath);
 
+  console.log('cwd:', cwd);
+  console.log('storageStatePath:', storageStatePath);
+  console.log('storageState exists:', exists);
+
   log('info', `[Playwright] getContext — cwd: ${cwd}`);
   log('info', `[Playwright] getContext — storageStatePath: ${storageStatePath}`);
   log('info', `[Playwright] getContext — fs.existsSync(storageStatePath): ${exists}`);
@@ -105,6 +109,9 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
     _browser = null;
 
     const resolvedStorageState = path.resolve(process.cwd(), 'storageState.json');
+    console.log('cwd:', process.cwd());
+    console.log('storageStatePath:', resolvedStorageState);
+    console.log('storageState exists:', fs.existsSync(resolvedStorageState));
     log('info', `[Playwright] Loading session — resolved path: ${resolvedStorageState}`);
     log('info', `[Playwright] Session file exists: ${fs.existsSync(resolvedStorageState)}`);
 
