@@ -7,7 +7,7 @@ const nextConfig = {
     unoptimized: true,
   },
   // Keep Node.js-only packages out of the client bundle
-  serverExternalPackages: ['openai'],
+  serverExternalPackages: ['openai', 'playwright', 'playwright-core'],
 }
 
 export default nextConfig

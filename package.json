@@ -7,6 +7,7 @@
     "build": "next build",
     "start": "next start",
     "lint": "eslint .",
+    "login:freelancehunt": "tsx scripts/login-freelancehunt.ts",
     "worker": "tsx worker/index.ts",
     "worker:start": "tsx worker/server.ts"
   },
@@ -45,7 +46,6 @@
     "autoprefixer": "^10.4.20",
     "class-variance-authority": "^0.7.1",
     "clsx": "^2.1.1",
-    "dotenv": "^16.5.0",
     "cmdk": "1.1.1",
     "date-fns": "4.1.0",
     "dotenv": "^17.4.2",
@@ -55,6 +55,7 @@
     "next": "16.2.4",
     "next-themes": "^0.4.6",
     "openai": "^6.34.0",
+    "playwright": "^1.60.0",
     "react": "^19",
     "react-day-picker": "9.13.2",
     "react-dom": "^19",
