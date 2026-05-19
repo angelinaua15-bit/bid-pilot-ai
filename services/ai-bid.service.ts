@@ -13,6 +13,18 @@
 import type { Project, GeneratedBid, CompanyProfile } from '@/types';
 import { companyProfile as defaultProfile } from '@/lib/mock-data';
 
+/**
+ * Safely convert any project field value to a lowercase string.
+ * Handles: string | string[] | object | null | undefined.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const safe = (v: any): string => {
+  if (typeof v === 'string') return v.toLowerCase();
+  if (Array.isArray(v)) return v.map(String).join(' ').toLowerCase();
+  if (v && typeof v === 'object') return JSON.stringify(v).toLowerCase();
+  return '';
+};
+
 // ─── Error class exposed to callers ──────────────────────────────────────────
 
 /** Thrown only when the caller wants to distinguish quota exhaustion from other errors. */
@@ -123,10 +135,16 @@ ${profile.description}
 }
 
 function buildBidPrompt(project: Project): string {
-  return `Проєкт: ${project.title}
-Опис: ${project.description.slice(0, 600)}
+  const skillsList = Array.isArray(project.skills)
+    ? project.skills.map(String).join(', ')
+    : safe(project.skills);
+  const description = typeof project.description === 'string'
+    ? project.description.slice(0, 600)
+    : safe(project.description).slice(0, 600);
+  return `Проєкт: ${safe(project.title) || project.title}
+Опис: ${description}
 Бюджет: ${project.budget}–${project.budgetMax ?? project.budget} ${project.currency}
-Навички: ${project.skills.join(', ')}
+Навички: ${skillsList}
 Конкуренти: ${project.bidsCount} заявок вже є
 
 Згенеруй заявку та запитання до замовника (1-2 уточнюючих питання).`;
@@ -135,11 +153,12 @@ function buildBidPrompt(project: Project): string {
 // ─── Template fallback bid builder ───────────────────────────────────────────
 
 function buildTemplateBid(project: Project, profile: CompanyProfile): GeneratedBid {
-  const category = project.category?.toLowerCase() ?? '';
+  const category = safe(project.category);
+  const skillsText = safe(project.skills);
   const bidText =
     MOCK_BIDS[
       Object.keys(MOCK_BIDS).find(
-        (k) => category.includes(k) || project.skills.some((s) => s.toLowerCase().includes(k))
+        (k) => category.includes(k) || skillsText.includes(k)
       ) ?? 'default'
     ] ?? MOCK_BIDS.default;
 

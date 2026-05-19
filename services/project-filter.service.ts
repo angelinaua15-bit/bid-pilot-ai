@@ -6,6 +6,18 @@
 
 import type { Project, AutoBidSettings, FreelancerCategory } from '@/types';
 
+/**
+ * Safely convert any project field value to a lowercase string.
+ * Handles: string | string[] | object | null | undefined.
+ */
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+const safe = (v: any): string => {
+  if (typeof v === 'string') return v.toLowerCase();
+  if (Array.isArray(v)) return v.map(String).join(' ').toLowerCase();
+  if (v && typeof v === 'object') return JSON.stringify(v).toLowerCase();
+  return '';
+};
+
 // Category → keywords map for relevance matching
 const CATEGORY_KEYWORDS: Record<FreelancerCategory, string[]> = {
   websites:       ['сайт', 'лендінг', 'next.js', 'react', 'vue', 'верстка', 'wordpress', 'web'],
@@ -34,8 +46,12 @@ export function computeMatchScore(
   project: Project,
   allowedCategories: FreelancerCategory[]
 ): number {
-  const haystack = `${project.title} ${project.description} ${project.skills.join(' ')} ${project.category}`
-    .toLowerCase();
+  const haystack = [
+    safe(project.title),
+    safe(project.description),
+    safe(project.skills),
+    safe(project.category),
+  ].join(' ');
 
   let hits = 0;
   let totalKeywords = 0;
@@ -89,9 +105,9 @@ export function filterProject(
   }
 
   // Blocked keywords
-  const haystack = `${project.title} ${project.description}`.toLowerCase();
+  const haystack = `${safe(project.title)} ${safe(project.description)}`;
   for (const kw of settings.blockedKeywords) {
-    if (kw.trim() && haystack.includes(kw.toLowerCase().trim())) {
+    if (kw.trim() && haystack.includes(safe(kw).trim())) {
       return { passed: false, reason: `Заблоковане слово: "${kw}"` };
     }
   }
