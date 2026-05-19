@@ -35,7 +35,7 @@ if (!SECRET) {
 
 // ─── Auto-loop state ───────────────────────────────────────────────────────────
 // Runs a bid cycle every AUTO_LOOP_INTERVAL_MS when auto-bid is enabled.
-const AUTO_LOOP_INTERVAL_MS = Number(process.env.AUTO_LOOP_INTERVAL_MS || 60_000) // default: 1 min
+const AUTO_LOOP_INTERVAL_MS = Number(process.env.AUTO_LOOP_INTERVAL_MS || 20_000) // default: 20s (range: 15–30s)
 let autoLoopTimer: ReturnType<typeof setInterval> | null = null
 let autoLoopEnabled = false
 let lastCheckedAt: string | null = null
@@ -218,7 +218,7 @@ async function runAutoLoop() {
 
     const chatId = process.env.TELEGRAM_CHAT_ID ? Number(process.env.TELEGRAM_CHAT_ID) : undefined
 
-    const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true)
+    const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true, processedProjectIds)
 
     cycleCounters.submitted = Number(result.bidsSubmitted ?? cycleCounters.submitted)
     cycleCounters.skipped   = Number(result.bidsSkipped   ?? cycleCounters.skipped)

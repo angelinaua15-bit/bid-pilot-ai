@@ -109,7 +109,9 @@ export async function runAutoBidCycle(
   settings: AutoBidSettings,
   telegramChatId?: number,
   externalStepLog?: StepLogFn,
-  forceRun = true
+  forceRun = true,
+  /** Cross-cycle dedup: project IDs already bid in this worker process */
+  globalProcessedIds?: Set<string>
 ): Promise<AutoBidRunResult> {
   const chatId: number | undefined = telegramChatId ?? config.telegram.chatId ?? undefined;
   const logs: AutoBidLog[] = [];
@@ -146,33 +148,45 @@ export async function runAutoBidCycle(
   });
 
   // ── Pre-flight ──────────────────────────────────────────────────────────────
-  if (!isMockMode && !apiToken) {
-    log(logs, 'error',
-      'PRE-FLIGHT FAILED: FREELANCEHUNT_TOKEN is not set. ' +
-      'Add FREELANCEHUNT_TOKEN to your .env.local or environment variables.'
-    );
-    errors++;
-    return { logs, bidsSubmitted, bidsSkipped, errors };
-  }
-
   if (isMockMode) {
-    log(logs, 'warning', '[Pre-flight] Auth mode: MOCK (FREELANCEHUNT_MOCK=1) — no real API calls');
+    log(logs, 'warning', '[Pre-flight] Auth mode: MOCK (FREELANCEHUNT_MOCK=1) — no real browser automation');
   } else {
-    log(logs, 'info', '[Pre-flight] Auth mode: REST API (FREELANCEHUNT_TOKEN set)');
-
-    // Validate token against Freelancehunt API
+    // Verify Playwright session: open /my/ and confirm we are not on the login page
     try {
-      const { validateFreelancehuntToken } = await import('./freelancehunt.service');
-      const validation = await validateFreelancehuntToken(apiToken);
-      if (!validation.valid) {
-        log(logs, 'error', '[Pre-flight] FREELANCEHUNT_TOKEN is invalid or expired. Aborting cycle.');
+      const { verifySession, sessionExists, resolveSessionPath } = await import('./playwright-browser.service');
+
+      if (!sessionExists()) {
+        log(logs, 'error',
+          '[Pre-flight] FAILED: storageState.json not found. ' +
+          'Run: npm run login:freelancehunt to save your session.'
+        );
         errors++;
         return { logs, bidsSubmitted, bidsSkipped, errors };
       }
-      log(logs, 'success', `[Pre-flight] Freelancehunt API connected — account: ${validation.username ?? 'unknown'}`);
+
+      log(logs, 'info', `[Pre-flight] Session file found: ${resolveSessionPath()}`);
+
+      const sessionLog = (level: 'info' | 'success' | 'warning' | 'error', msg: string) => {
+        log(logs, level, msg);
+        externalStepLog?.(level, msg);
+      };
+
+      const verification = await verifySession(sessionLog);
+      if (!verification.valid) {
+        log(logs, 'error',
+          `[Pre-flight] Session verification FAILED — ${verification.reason}. ` +
+          'Re-run: npm run login:freelancehunt to refresh your session.'
+        );
+        errors++;
+        return { logs, bidsSubmitted, bidsSkipped, errors };
+      }
+
+      log(logs, 'success',
+        `[Pre-flight] Session valid — logged in as: ${verification.username ?? 'unknown'}. Starting auto-bid.`
+      );
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
-      log(logs, 'error', `[Pre-flight] API validation failed: ${msg}`);
+      log(logs, 'error', `[Pre-flight] Session check error: ${msg}`);
       errors++;
       return { logs, bidsSubmitted, bidsSkipped, errors };
     }
@@ -245,6 +259,21 @@ export async function runAutoBidCycle(
     const projectTitle = project.title ?? project.projectUrl ?? `project-${i + 1}`;
     const projectUrl   = project.projectUrl ?? '';
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
+
+    // Cross-cycle dedup: skip if already submitted in this worker process run
+    if (
+      globalProcessedIds?.has(project.id) ||
+      (numericId && globalProcessedIds?.has(numericId)) ||
+      alreadyBidIds.has(project.id) ||
+      (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))
+    ) {
+      log(logs, 'info',
+        `[${i + 1}/${filtered.length}] SKIP (already processed): "${projectTitle}"`,
+        { projectId: project.id, projectTitle }
+      );
+      bidsSkipped++;
+      continue;
+    }
 
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Processing: "${projectTitle}" — ${projectUrl}`,
@@ -343,6 +372,10 @@ export async function runAutoBidCycle(
       if (result.success) {
         alreadyBidIds.add(project.id);
         if (project.freelancehuntId) alreadyBidIds.add(project.freelancehuntId);
+        // Also record in cross-cycle global set
+        globalProcessedIds?.add(project.id);
+        if (project.freelancehuntId) globalProcessedIds?.add(project.freelancehuntId);
+        if (numericId) globalProcessedIds?.add(numericId);
         incrementDailyCount('bids');
         bidsSubmitted++;
 

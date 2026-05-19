@@ -2,26 +2,20 @@
  * services/playwright-browser.service.ts
  *
  * Bid submission via Playwright browser automation.
- * Used because POST /v2/projects/{id}/bids was removed (410 Gone) in API v2.
+ * POST /v2/projects/{id}/bids was removed (410 Gone) from the Freelancehunt API.
  *
  * Flow:
- *   1. Launch headless Chromium with saved storageState (authenticated session)
- *   2. Navigate to the project page
- *   3. Detect if bid already submitted, project closed, or form unavailable
- *   4. Click the "Apply" / bid button to open the form
- *   5. Fill proposal text, budget amount, deadline days
- *   6. Submit and verify success confirmation
- *   7. Take screenshot on any failure for debugging
- *
- * Authentication: storageState.json saved by `npm run login:freelancehunt`
- *
- * Every step is logged via logFn so the orchestrator can surface real-time
- * progress in the Logs screen and Telegram notifications.
+ *   1. Load storageState.json (authenticated session) — fail fast if missing
+ *   2. Reuse a persistent BrowserContext across all bids in one cycle
+ *   3. Verify session by navigating to /my/ — if redirected to /login mark EXPIRED
+ *   4. For each project: navigate, detect state, fill form, submit, confirm
+ *   5. Log every step: session loaded, logged in, project parsed, bid submitted/failed
+ *   6. Take a /tmp screenshot on any failure
  */
 
 import path from 'path';
 import fs from 'fs';
-import type { Browser, BrowserContext, Page } from 'playwright';
+import type { Browser, BrowserContext } from 'playwright';
 
 export type BidLogLevel = 'info' | 'success' | 'warning' | 'error';
 export type BidLogFn = (level: BidLogLevel, message: string) => void;
@@ -31,19 +25,19 @@ const noop: BidLogFn = () => {};
 // ─── Session resolution ───────────────────────────────────────────────────────
 
 const SESSION_SEARCH_PATHS = [
-  // Railway / production: next to the worker binary
-  path.resolve(process.cwd(), 'storageState.json'),
-  // Local dev: project root
-  path.resolve(process.cwd(), '..', 'storageState.json'),
-  // Explicit env override
   ...(process.env.FREELANCEHUNT_SESSION_PATH ? [process.env.FREELANCEHUNT_SESSION_PATH] : []),
-  // /tmp for container environments
+  path.resolve(process.cwd(), 'storageState.json'),
+  path.resolve(process.cwd(), '..', 'storageState.json'),
   '/tmp/storageState.json',
 ];
 
 export function resolveSessionPath(): string | null {
   for (const p of SESSION_SEARCH_PATHS) {
-    if (fs.existsSync(p)) return p;
+    try {
+      if (fs.existsSync(p)) return p;
+    } catch {
+      // ignore permission errors
+    }
   }
   return null;
 }
@@ -52,40 +46,138 @@ export function sessionExists(): boolean {
   return resolveSessionPath() !== null;
 }
 
-// ─── Browser lifecycle ────────────────────────────────────────────────────────
+// ─── Persistent browser + context (reused across bids in one worker process) ──
 
 let _browser: Browser | null = null;
+let _context: BrowserContext | null = null;
+let _sessionPath: string | null = null; // track which session is loaded
 
-async function getBrowser(log: BidLogFn): Promise<Browser> {
-  if (_browser && _browser.isConnected()) return _browser;
+async function getContext(log: BidLogFn): Promise<BrowserContext> {
+  const sessionPath = resolveSessionPath();
+  if (!sessionPath) {
+    throw new Error(
+      `SESSION_MISSING: storageState.json not found. ` +
+      `Searched: ${SESSION_SEARCH_PATHS.join(', ')}. ` +
+      `Run: npm run login:freelancehunt`
+    );
+  }
 
-  log('info', '[Playwright] Launching headless Chromium...');
-  const { chromium } = await import('playwright');
+  // Re-create context if session file changed or browser disconnected
+  const sessionChanged = _sessionPath !== sessionPath;
+  if (_browser && !_browser.isConnected()) {
+    _browser = null;
+    _context = null;
+  }
 
-  _browser = await chromium.launch({
-    headless: true,
-    args: [
-      '--no-sandbox',
-      '--disable-setuid-sandbox',
-      '--disable-dev-shm-usage',
-      '--disable-gpu',
-      '--no-first-run',
-      '--no-zygote',
-    ],
-  });
+  if (!_browser || !_context || sessionChanged) {
+    // Close stale context/browser first
+    await _context?.close().catch(() => {});
+    await _browser?.close().catch(() => {});
+    _context = null;
+    _browser = null;
 
-  log('info', '[Playwright] Browser launched');
-  return _browser;
+    log('info', `[Playwright] Session file: ${sessionPath}`);
+
+    const { chromium } = await import('playwright');
+    _browser = await chromium.launch({
+      headless: process.env.NODE_ENV !== 'development',
+      args: [
+        '--no-sandbox',
+        '--disable-setuid-sandbox',
+        '--disable-dev-shm-usage',
+        '--disable-gpu',
+        '--no-first-run',
+        '--no-zygote',
+        '--single-process',
+      ],
+    });
+
+    _context = await _browser.newContext({
+      storageState: sessionPath,
+      userAgent:
+        'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
+        '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'uk-UA',
+      viewport: { width: 1280, height: 900 },
+    });
+
+    _sessionPath = sessionPath;
+    log('info', '[Playwright] Session loaded — browser context created');
+  }
+
+  return _context;
 }
 
 export async function closeBrowser(): Promise<void> {
-  if (_browser) {
-    await _browser.close().catch(() => {});
-    _browser = null;
+  await _context?.close().catch(() => {});
+  await _browser?.close().catch(() => {});
+  _context = null;
+  _browser = null;
+  _sessionPath = null;
+}
+
+// ─── Session verification ─────────────────────────────────────────────────────
+
+export interface SessionVerifyResult {
+  valid: boolean;
+  username?: string;
+  reason?: string;
+}
+
+/**
+ * Opens freelancehunt.com/my/ with the saved session and checks for redirect.
+ * If the page ends up at /login, the session is expired.
+ */
+export async function verifySession(log: BidLogFn = noop): Promise<SessionVerifyResult> {
+  log('info', '[Playwright] Verifying session — opening freelancehunt.com/my/');
+
+  let context: BrowserContext;
+  try {
+    context = await getContext(log);
+  } catch (err) {
+    const reason = err instanceof Error ? err.message : String(err);
+    log('error', `[Playwright] Cannot verify session: ${reason}`);
+    return { valid: false, reason };
+  }
+
+  const page = await context.newPage();
+  try {
+    await page.goto('https://freelancehunt.com/my/', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+
+    const finalUrl = page.url();
+
+    if (finalUrl.includes('/login') || finalUrl.includes('/auth')) {
+      log('error', '[Playwright] Session EXPIRED — redirected to login page');
+      return { valid: false, reason: 'SESSION_EXPIRED: redirected to login page' };
+    }
+
+    // Extract username
+    const username = await page.evaluate(() => {
+      const selectors = [
+        '.header-user-name',
+        '[class*="username"]',
+        '[class*="user-name"]',
+        'nav .name',
+        '[data-user-name]',
+      ];
+      for (const sel of selectors) {
+        const el = document.querySelector(sel);
+        if (el?.textContent?.trim()) return el.textContent.trim();
+      }
+      return '';
+    }).catch(() => '');
+
+    log('success', `[Playwright] Logged in successfully — user: ${username || 'unknown'}`);
+    return { valid: true, username: username || 'authenticated' };
+  } finally {
+    await page.close().catch(() => {});
   }
 }
 
-// ─── Main bid submission ──────────────────────────────────────────────────────
+// ─── Bid submission ───────────────────────────────────────────────────────────
 
 export interface PlaywrightBidOptions {
   projectUrl: string;
@@ -94,7 +186,6 @@ export interface PlaywrightBidOptions {
   days: number;
   currency?: string;
   logFn?: BidLogFn;
-  screenshotDir?: string;
 }
 
 export interface PlaywrightBidResult {
@@ -108,52 +199,37 @@ export async function submitBidViaPlaywright(
   opts: PlaywrightBidOptions
 ): Promise<PlaywrightBidResult> {
   const log = opts.logFn ?? noop;
-  const screenshotDir = opts.screenshotDir ?? '/tmp';
+  const screenshotPath = `/tmp/fh-bid-${Date.now()}.png`;
 
-  // ── 1. Validate session ────────────────────────────────────────────────────
-  const sessionPath = resolveSessionPath();
-  if (!sessionPath) {
-    const searched = SESSION_SEARCH_PATHS.join(', ');
-    throw new Error(
-      `FORM_NOT_FOUND: No storageState.json session file found. ` +
-      `Searched: ${searched}. Run: npm run login:freelancehunt`
-    );
-  }
-  log('info', `[Playwright] Session file: ${sessionPath}`);
-
-  // ── 2. Launch browser + context ────────────────────────────────────────────
-  const browser = await getBrowser(log);
-  const context: BrowserContext = await browser.newContext({
-    storageState: sessionPath,
-    userAgent:
-      'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
-      '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-    locale: 'uk-UA',
-    viewport: { width: 1280, height: 900 },
-  });
-  const page: Page = await context.newPage();
-
-  const screenshotPath = path.join(
-    screenshotDir,
-    `fh-bid-${Date.now()}.png`
-  );
+  // ── 1. Get shared context (loads session once per process) ─────────────────
+  const context = await getContext(log);
+  const page = await context.newPage();
 
   try {
-    // ── 3. Navigate to project page ──────────────────────────────────────────
-    log('info', `[Playwright] Navigating to: ${opts.projectUrl}`);
+    // ── 2. Navigate to project page ──────────────────────────────────────────
+    log('info', `[Playwright] Project parsed — navigating to: ${opts.projectUrl}`);
     await page.goto(opts.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
-    log('info', `[Playwright] Page title: ${await page.title()}`);
 
-    // ── 4. Detect unavailable states ─────────────────────────────────────────
-    const pageText = await page.evaluate(() => document.body.innerText.slice(0, 2000));
+    const finalUrl = page.url();
+
+    // Session expired mid-cycle
+    if (finalUrl.includes('/login') || finalUrl.includes('/auth')) {
+      _context = null; // force context re-creation on next bid
+      throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
+    }
+
+    log('info', `[Playwright] Page loaded: ${await page.title()}`);
+
+    // ── 3. Detect unavailable states ─────────────────────────────────────────
+    const pageText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
 
     const closedPhrases = [
       'проект закрито', 'проект виконано', 'project is closed',
       'project completed', 'завершено', 'виконано',
     ];
     for (const phrase of closedPhrases) {
-      if (pageText.toLowerCase().includes(phrase)) {
-        throw new Error(`PROJECT_CLOSED: Page text contains "${phrase}"`);
+      if (pageText.includes(phrase)) {
+        throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
       }
     }
 
@@ -162,25 +238,22 @@ export async function submitBidViaPlaywright(
       'ваша заявка', 'заявку подано', 'відгук надіслано',
     ];
     for (const phrase of alreadyPhrases) {
-      if (pageText.toLowerCase().includes(phrase)) {
-        throw new Error(`ALREADY_BID: Page text contains "${phrase}"`);
+      if (pageText.includes(phrase)) {
+        throw new Error(`ALREADY_BID: "${phrase}" found on page`);
       }
     }
 
-    // ── 5. Find and click the bid/apply button ───────────────────────────────
+    // ── 4. Find and click the bid/apply button ───────────────────────────────
     log('info', '[Playwright] Looking for bid button...');
 
     const bidButtonSelectors = [
-      // Ukrainian UI
       'button:has-text("Відгукнутись")',
       'button:has-text("Подати заявку")',
       'a:has-text("Відгукнутись")',
       'a:has-text("Подати заявку")',
-      // English UI fallback
       'button:has-text("Apply")',
       'button:has-text("Place bid")',
       'a:has-text("Apply")',
-      // Generic class selectors
       '.bid-button',
       '[data-action="bid"]',
       '.js-bid-form-open',
@@ -189,32 +262,37 @@ export async function submitBidViaPlaywright(
 
     let bidButtonClicked = false;
     for (const sel of bidButtonSelectors) {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 1_500 }).catch(() => false)) {
-        log('info', `[Playwright] Clicking bid button: "${sel}"`);
-        await btn.click();
-        bidButtonClicked = true;
-        break;
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 1_500 })) {
+          log('info', `[Playwright] Clicking bid button: "${sel}"`);
+          await btn.click();
+          bidButtonClicked = true;
+          break;
+        }
+      } catch {
+        // try next selector
       }
     }
 
     if (!bidButtonClicked) {
-      // Form might already be visible inline — check for it before failing
-      const formVisible = await page.locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="опис"], textarea[placeholder*="пропоз"]')
+      // Form might already be visible inline
+      const inlineFormVisible = await page
+        .locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="пропоз"]')
         .first()
         .isVisible({ timeout: 2_000 })
         .catch(() => false);
 
-      if (!formVisible) {
+      if (!inlineFormVisible) {
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
         throw new Error(
-          `FORM_NOT_FOUND: Could not find bid button or inline form on ${opts.projectUrl}. Screenshot: ${screenshotPath}`
+          `FORM_NOT_FOUND: No bid button or inline form found on ${opts.projectUrl}. Screenshot: ${screenshotPath}`
         );
       }
-      log('info', '[Playwright] Bid form is already visible inline');
+      log('info', '[Playwright] Bid form already visible inline');
     }
 
-    // ── 6. Wait for bid form to appear ───────────────────────────────────────
+    // ── 5. Wait for bid form ─────────────────────────────────────────────────
     log('info', '[Playwright] Waiting for bid form...');
 
     const textareaSelectors = [
@@ -233,29 +311,31 @@ export async function submitBidViaPlaywright(
 
     let textarea = null;
     for (const sel of textareaSelectors) {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 3_000 }).catch(() => false)) {
-        textarea = el;
-        log('info', `[Playwright] Found textarea: "${sel}"`);
-        break;
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 3_000 })) {
+          textarea = el;
+          log('info', `[Playwright] Textarea found: "${sel}"`);
+          break;
+        }
+      } catch {
+        // try next
       }
     }
 
     if (!textarea) {
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
       throw new Error(
-        `FORM_NOT_FOUND: Bid form textarea not found after clicking button. Screenshot: ${screenshotPath}`
+        `FORM_NOT_FOUND: Textarea not visible after clicking bid button. Screenshot: ${screenshotPath}`
       );
     }
 
-    // ── 7. Fill proposal text ────────────────────────────────────────────────
-    log('info', `[Playwright] Filling proposal text (${opts.text.length} chars)`);
+    // ── 6. Fill proposal text ────────────────────────────────────────────────
+    log('info', `[Playwright] Filling proposal — ${opts.text.length} chars`);
     await textarea.fill(opts.text);
 
-    // ── 8. Fill budget ────────────────────────────────────────────────────────
+    // ── 7. Fill budget ────────────────────────────────────────────────────────
     const budgetAmount = Math.max(1, Math.round(opts.budget));
-    log('info', `[Playwright] Filling budget: ${budgetAmount}`);
-
     const budgetSelectors = [
       'input[name="amount"]',
       'input[name="budget"]',
@@ -270,23 +350,25 @@ export async function submitBidViaPlaywright(
 
     let budgetFilled = false;
     for (const sel of budgetSelectors) {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1_500 }).catch(() => false)) {
-        await el.fill(String(budgetAmount));
-        log('info', `[Playwright] Budget filled via "${sel}"`);
-        budgetFilled = true;
-        break;
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 1_500 })) {
+          await el.fill(String(budgetAmount));
+          log('info', `[Playwright] Budget ${budgetAmount} filled via "${sel}"`);
+          budgetFilled = true;
+          break;
+        }
+      } catch {
+        // try next
       }
     }
 
     if (!budgetFilled) {
-      log('warning', '[Playwright] Budget field not found — skipping budget fill');
+      log('warning', '[Playwright] Budget field not found — continuing without budget');
     }
 
-    // ── 9. Fill deadline days ─────────────────────────────────────────────────
+    // ── 8. Fill deadline days ─────────────────────────────────────────────────
     const daysAmount = Math.max(1, Math.round(opts.days));
-    log('info', `[Playwright] Filling deadline: ${daysAmount} days`);
-
     const daysSelectors = [
       'input[name="days"]',
       'input[name="deadline"]',
@@ -298,20 +380,24 @@ export async function submitBidViaPlaywright(
 
     let daysFilled = false;
     for (const sel of daysSelectors) {
-      const el = page.locator(sel).first();
-      if (await el.isVisible({ timeout: 1_500 }).catch(() => false)) {
-        await el.fill(String(daysAmount));
-        log('info', `[Playwright] Days filled via "${sel}"`);
-        daysFilled = true;
-        break;
+      try {
+        const el = page.locator(sel).first();
+        if (await el.isVisible({ timeout: 1_500 })) {
+          await el.fill(String(daysAmount));
+          log('info', `[Playwright] Deadline ${daysAmount}d filled via "${sel}"`);
+          daysFilled = true;
+          break;
+        }
+      } catch {
+        // try next
       }
     }
 
     if (!daysFilled) {
-      log('warning', '[Playwright] Deadline field not found — skipping days fill');
+      log('warning', '[Playwright] Deadline field not found — continuing without days');
     }
 
-    // ── 10. Submit the form ───────────────────────────────────────────────────
+    // ── 9. Submit form ────────────────────────────────────────────────────────
     log('info', '[Playwright] Submitting bid form...');
 
     const submitSelectors = [
@@ -324,74 +410,50 @@ export async function submitBidViaPlaywright(
       'form.bid button[type="submit"]',
       '.modal button[type="submit"]',
       '[role="dialog"] button[type="submit"]',
-      // Fallback: any submit button in the form
       'button[type="submit"]',
     ];
 
     let submitted = false;
     for (const sel of submitSelectors) {
-      const btn = page.locator(sel).first();
-      if (await btn.isVisible({ timeout: 1_500 }).catch(() => false)) {
-        log('info', `[Playwright] Clicking submit button: "${sel}"`);
-        await btn.click();
-        submitted = true;
-        break;
+      try {
+        const btn = page.locator(sel).first();
+        if (await btn.isVisible({ timeout: 1_500 })) {
+          log('info', `[Playwright] Clicking submit: "${sel}"`);
+          await btn.click();
+          submitted = true;
+          break;
+        }
+      } catch {
+        // try next
       }
     }
 
     if (!submitted) {
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      throw new Error(
-        `FORM_NOT_FOUND: Submit button not found. Screenshot: ${screenshotPath}`
-      );
+      throw new Error(`FORM_NOT_FOUND: Submit button not found. Screenshot: ${screenshotPath}`);
     }
 
-    // ── 11. Wait for navigation / success confirmation ────────────────────────
-    log('info', '[Playwright] Waiting for post-submit response...');
-
-    // Wait briefly for page update
+    // ── 10. Confirm success ───────────────────────────────────────────────────
     await page.waitForTimeout(3_000);
 
-    const postSubmitText = await page.evaluate(() => document.body.innerText.slice(0, 3000));
-    log('info', `[Playwright] Post-submit page text (first 300 chars): ${postSubmitText.slice(0, 300)}`);
+    const postText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
 
-    // Check for error indicators
-    const errorPhrases = [
-      'помилка', 'error', 'невірно', 'не вдалось', 'failed',
-      'invalid', 'required', "обов'язков",
-    ];
-    for (const phrase of errorPhrases) {
-      if (postSubmitText.toLowerCase().includes(phrase)) {
-        // Could be a validation message — take screenshot for review
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-        log('warning', `[Playwright] Possible error on page after submit: "${phrase}". Screenshot: ${screenshotPath}`);
-        // Don't throw yet — check for success too
-      }
-    }
-
-    // Check for success indicators
     const successPhrases = [
       'заявку подано', 'відгук надіслано', 'ваша заявка',
-      'bid submitted', 'application sent', 'дякуємо',
-      'успішно', 'success',
+      'bid submitted', 'application sent', 'дякуємо', 'успішно', 'success',
     ];
-    let confirmed = false;
-    for (const phrase of successPhrases) {
-      if (postSubmitText.toLowerCase().includes(phrase)) {
-        log('success', `[Playwright] Success confirmed by page text: "${phrase}"`);
-        confirmed = true;
-        break;
-      }
-    }
+
+    let confirmed = successPhrases.some((p) => postText.includes(p));
 
     if (!confirmed) {
-      // Form may have closed / redirected — check if textarea is gone (typical success)
-      const textareaGone = !(await page.locator('textarea[name="comment"], textarea[name="body"]')
+      // Form closed = implicit success
+      const formGone = !(await page
+        .locator('textarea[name="comment"], textarea[name="body"]')
         .first()
         .isVisible({ timeout: 1_000 })
         .catch(() => false));
 
-      if (textareaGone) {
+      if (formGone) {
         log('info', '[Playwright] Form closed after submit — treating as success');
         confirmed = true;
       }
@@ -400,26 +462,21 @@ export async function submitBidViaPlaywright(
     if (!confirmed) {
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
       throw new Error(
-        `FORM_NOT_FOUND: Could not confirm bid was submitted. ` +
-        `No success indicator found. Screenshot: ${screenshotPath}`
+        `FORM_NOT_FOUND: No success indicator after submit. Screenshot: ${screenshotPath}`
       );
     }
 
-    log('success', `[Playwright] Bid submitted successfully on ${opts.projectUrl}`);
+    log('success', `[Playwright] Bid submitted successfully — ${opts.projectUrl}`);
     return { success: true, strategy: 'playwright' };
 
   } catch (err) {
-    // Save screenshot for any unexpected error
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-    const errMsg = err instanceof Error ? err.message : String(err);
-
-    // Attach screenshot path to the error for upstream logging
-    const enriched = new Error(errMsg) as Error & { screenshotPath: string };
+    const msg = err instanceof Error ? err.message : String(err);
+    const enriched = new Error(msg) as Error & { screenshotPath: string };
     enriched.screenshotPath = screenshotPath;
     throw enriched;
-
   } finally {
     await page.close().catch(() => {});
-    await context.close().catch(() => {});
+    // Context stays open — reused for next bid
   }
 }
