@@ -1,0 +1,427 @@
+{
+  "cookies": [
+    {
+      "name": "_ga",
+      "value": "GA1.1.2103709236.1779202868",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1813762937.467316,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "CLID",
+      "value": "254f27cafcc84f2793b8c9572648f8a6.20260519.20270519",
+      "domain": "www.clarity.ms",
+      "path": "/",
+      "expires": 1810738870.060319,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "IDE",
+      "value": "AHWqTUkvN_k59cq5tDxKZ0j8ODd4w1bnjfvondLaNJpam_Uifg8n3fVjXiRTyNL4",
+      "domain": ".doubleclick.net",
+      "path": "/",
+      "expires": 1813762870.236618,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "cookieyes-consent",
+      "value": "consentid:WjVPOElVT2lHbzhwdXh6ZmIzS3YwTkRWYkY3dTBmdEE,consent:yes,action:no,necessary:yes,functional:yes,analytics:yes,performance:yes,advertisement:yes,other:yes",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1810738937,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Strict"
+    },
+    {
+      "name": "_clck",
+      "value": "1syr0zy%5E2%5Eg66%5E0%5E2330",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1810738870,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "MUID",
+      "value": "36EECB0A0B626AEA2E94DC540A4A6B01",
+      "domain": ".bing.com",
+      "path": "/",
+      "expires": 1812898872.1046,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "MR",
+      "value": "0",
+      "domain": ".c.bing.com",
+      "path": "/",
+      "expires": 1779807672.104667,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "SRM_B",
+      "value": "36EECB0A0B626AEA2E94DC540A4A6B01",
+      "domain": ".c.bing.com",
+      "path": "/",
+      "expires": 1812898872.104698,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "SM",
+      "value": "C",
+      "domain": ".c.clarity.ms",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "MUID",
+      "value": "36EECB0A0B626AEA2E94DC540A4A6B01",
+      "domain": ".clarity.ms",
+      "path": "/",
+      "expires": 1812898871.197123,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "MR",
+      "value": "0",
+      "domain": ".c.clarity.ms",
+      "path": "/",
+      "expires": 1779807671.197171,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "ANONCHK",
+      "value": "0",
+      "domain": ".c.clarity.ms",
+      "path": "/",
+      "expires": 1779203471.197199,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "device-source",
+      "value": "https://freelancehunt.com/ua",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1810738873.489318,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "device-referrer",
+      "value": "https://freelancehunt.com/login",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1810738873.489704,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_fbp",
+      "value": "fb.1.1779202875168.470360162947427750",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1786978937,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "__Host-GAPS",
+      "value": "1:CjpRk_y_2V9pyzKAzO9aidqV7pWcbA:675CEGTnY01FUtD7",
+      "domain": "accounts.google.com",
+      "path": "/",
+      "expires": 1813762912.545634,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "OTZ",
+      "value": "8614982_44_48_123900_44_436380",
+      "domain": "accounts.google.com",
+      "path": "/",
+      "expires": 1781794913,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "NID",
+      "value": "531=FeZmISPthpLFFLS6NUWZhhVKzcrjPWS-e9IqO5eME4dPFG1cmv2BJ0pjsrVp40nwaj2oio3HGcSDmYM0CWUvaMeR0pETo_7mu1Df6EIe9TugGUmF4AlurGoJsj8kOWieGDqAbHCEUuafIDgic3YwCg6eNWC5VA6MD6G7SuEmgveLEz7t64eX-hL-bfXdnYw7PaGH2g",
+      "domain": ".google.com",
+      "path": "/",
+      "expires": 1795014113.427322,
+      "httpOnly": true,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_gcl_au",
+      "value": "1.1.1303445110.1779202868.1428088562.1779202893.1779202936",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1786978868,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "pid3",
+      "value": "7ynfx6KX3iIR30IO0W5OIg%3D%3D",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1794754936.93314,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "sid2",
+      "value": "1a9c407491b7ab063224f19f947b06fed0ff1e610df59462",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": -1,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rmt2",
+      "value": "eyJ0eXAiOiJKV1QiLCJhbGciOiJIUzI1NiJ9.eyJsb2dpbiI6IkFuZ2VsaW5hXzE1MDMyIiwicmVtZW1iZXJfbWVfa2V5IjoxNjc0ODMwMDYxLCJpc19hdXRoZW50aWNhdGVkX2J5XzJmYSI6ZmFsc2UsImV4cCI6MTc4MDQxMjUzNn0.f5r6d1qWCMhqUq8T02PMI6qQYO7h0MdJpLZG0vsTJ4k",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1780412536.933406,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rmp",
+      "value": "Angelina_15032",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1781622136.933445,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "rmfn",
+      "value": "Anhelina",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1781622136.933476,
+      "httpOnly": true,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "user_data.sha256_email_address",
+      "value": "7ce63f15e1a35ae2d5ac1a8231e190d8fd2ec19b363f3035e7c55459cd772a46",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1779206536.933505,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "user_data.sha256_phone_number",
+      "value": "cd7f5e8e0635fa423abb63bf718bb172f83be8d7fb5ffc05258cf1a56de9a67f",
+      "domain": "freelancehunt.com",
+      "path": "/",
+      "expires": 1779206536.933539,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_ga_D5VKDWKRBW",
+      "value": "GS2.1.s1779202867$o1$g1$t1779202937$j60$l1$h834015651$dDptp5qUbwyHS9rQwQVibh5Z3dF-VblrSyg",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1813762937.718937,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_clsk",
+      "value": "1wqendy%5E1779202938033%5E7%5E1%5Ep.clarity.ms%2Fcollect",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1779289338,
+      "httpOnly": false,
+      "secure": false,
+      "sameSite": "Lax"
+    },
+    {
+      "name": "_BEAMER_FILTER_BY_URL_jBFAZxmY547",
+      "value": "false",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1779204090,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_BEAMER_USER_ID_jBFAZxmY547",
+      "value": "021832e2-ca06-4b76-85bf-5976b65a6f8e",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1805122943,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_BEAMER_FIRST_VISIT_jBFAZxmY547",
+      "value": "2026-05-19T15:02:18.070Z",
+      "domain": ".freelancehunt.com",
+      "path": "/",
+      "expires": 1805122938,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    },
+    {
+      "name": "_BEAMER_USER_ID_jBFAZxmY547",
+      "value": "021832e2-ca06-4b76-85bf-5976b65a6f8e",
+      "domain": "updates.freelancehunt.com",
+      "path": "/",
+      "expires": 1805122943,
+      "httpOnly": false,
+      "secure": true,
+      "sameSite": "None"
+    }
+  ],
+  "origins": [
+    {
+      "origin": "https://freelancehunt.com",
+      "localStorage": [
+        {
+          "name": "amplitude.engagement.ENGAGEMENT_07db749806_DEFAULT_USER_PROVIDER",
+          "value": "{\"first_seen\":\"1779202875.229\"}"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-visit-start-time",
+          "value": "1779202873489"
+        },
+        {
+          "name": "user_data.sha256_phone_number",
+          "value": "cd7f5e8e0635fa423abb63bf718bb172f83be8d7fb5ffc05258cf1a56de9a67f"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-UndeliveredMessages",
+          "value": "{}"
+        },
+        {
+          "name": "amplitude.engagement.07db74980679c4f4e121f631192c96d3-resourceCenter",
+          "value": "{\"visible\":false,\"minimized\":false,\"scrollPosition\":0,\"query\":null,\"isAdditionalResourcesExpanded\":true}"
+        },
+        {
+          "name": "_gcl_ls",
+          "value": "{\"schema\":\"gcl\",\"version\":1,\"gcl_ctr\":{\"value\":{\"value\":5,\"timeouts\":0,\"errors\":0,\"eopCount\":0,\"creationTimeMs\":1779202937111},\"expires\":1786978937111},\"gtg_load_status\":{\"status\":2,\"expires\":1779289270571}}"
+        },
+        {
+          "name": "_BEAMER_USER_ID_jBFAZxmY547",
+          "value": "021832e2-ca06-4b76-85bf-5976b65a6f8e"
+        },
+        {
+          "name": "user_data.sha256_email_address",
+          "value": "7ce63f15e1a35ae2d5ac1a8231e190d8fd2ec19b363f3035e7c55459cd772a46"
+        },
+        {
+          "name": "_BEAMER_FIRST_VISIT_jBFAZxmY547",
+          "value": "2026-05-19T15:02:18.070Z"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-device-referrer",
+          "value": "\"https://freelancehunt.com/login\""
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-page-views",
+          "value": "1"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-visits-count",
+          "value": "1"
+        },
+        {
+          "name": "pid3",
+          "value": "7ynfx6KX3iIR30IO0W5OIg=="
+        },
+        {
+          "name": "amplitude.engagement.eus.07db74.user_id:1318772",
+          "value": "{\"ampIdToken\":\"Wj73QAaphcVaPvfB1I2Bs8IqfjNjhjtx\",\"nudgeInteractions\":{}}"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-knowledge-base-state",
+          "value": "{\"articleId\":null,\"searchValue\":\"\"}"
+        },
+        {
+          "name": "amp_device_id",
+          "value": "6deca5d4-b74d-4513-a082-60e65d66dbc7"
+        },
+        {
+          "name": "hc-visitor-hash",
+          "value": "\"030d18b9d07257a560d14aed9f7f7ff5f0ed4d97\""
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-visit-end-time",
+          "value": "1779204673489"
+        },
+        {
+          "name": "bugsnag-anonymous-id",
+          "value": "cmpcrgcbt00003b6yhjlf5x9o"
+        },
+        {
+          "name": "amplitude.engagement.eus.07db74.device_id:6deca5d4-b74d-4513-a082-60e65d66dbc7",
+          "value": "{\"nudgeInteractions\":{}}"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-device-source",
+          "value": "\"https://freelancehunt.com/ua\""
+        },
+        {
+          "name": "_BEAMER_FILTER_BY_URL_jBFAZxmY547",
+          "value": "false"
+        },
+        {
+          "name": "helpcrunch.com-freelancehunt-1-widget-window-state",
+          "value": "\"helpcrunch-state-start-screen\""
+        },
+        {
+          "name": "_BEAMER_HEADER_COLOR_jBFAZxmY547",
+          "value": "#00ae5a"
+        }
+      ]
+    }
+  ]
+}
