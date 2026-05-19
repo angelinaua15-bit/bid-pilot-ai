@@ -275,21 +275,62 @@ export async function runAutoBidCycle(
     }
 
     // ── 5. Submit bid via REST API ────────────────────────────────────────────
+    const bidTarget = numericId || projectUrl;
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Submitting bid via API — project ${numericId}: ${projectUrl}`,
       { projectId: project.id, projectTitle, meta: { projectUrl } }
     );
 
-    try {
-      if (!projectUrl && !numericId) throw new Error('Project URL/ID is empty — cannot submit bid');
+    // Parse days from deadline string: "14 днів" → 14, "21 день" → 21
+    const daysRaw = parseInt(String(bid.deadline ?? '14'), 10);
+    const days    = isNaN(daysRaw) || daysRaw <= 0 ? 14 : daysRaw;
 
-      const result = await sendFreelancehuntBid(apiToken, projectUrl || numericId, {
-        text:     bid.text ?? '',
-        budget:   bid.price ?? 0,
-        days:     parseInt(String(bid.deadline)) || 14,
-        currency: project.currency ?? 'UAH',
-        logFn:    stepLog,
-      });
+    // Budget must be > 0 — use project budget as floor if AI returned 0
+    const budgetAmount = (bid.price ?? 0) > 0
+      ? bid.price
+      : project.budget > 0
+        ? project.budget
+        : 500;
+
+    log(logs, 'info',
+      `[${i + 1}/${filtered.length}] Bid payload — budget: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | text length: ${(bid.text ?? '').length}`,
+      { projectId: project.id, projectTitle }
+    );
+
+    try {
+      if (!bidTarget) throw new Error('Project URL/ID is empty — cannot submit bid');
+
+      // Retry on network/5xx errors only (not on 4xx API rejections)
+      let result: Awaited<ReturnType<typeof sendFreelancehuntBid>> | undefined;
+      const MAX_RETRIES = 2;
+      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+        try {
+          result = await sendFreelancehuntBid(apiToken, bidTarget, {
+            text:     bid.text ?? '',
+            budget:   budgetAmount!,
+            days,
+            currency: project.currency ?? 'UAH',
+            logFn:    stepLog,
+          });
+          break; // success
+        } catch (retryErr) {
+          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
+          // 4xx errors → don't retry, re-throw immediately
+          const is4xx = retryMsg.startsWith('ALREADY_BID:') ||
+                        retryMsg.startsWith('PROJECT_CLOSED:') ||
+                        retryMsg.startsWith('INVALID_TOKEN:') ||
+                        retryMsg.startsWith('FORBIDDEN:') ||
+                        retryMsg.startsWith('NOT_FOUND:') ||
+                        retryMsg.startsWith('API_ERROR_4');
+          if (is4xx || attempt === MAX_RETRIES) throw retryErr;
+          log(logs, 'warning',
+            `[${i + 1}/${filtered.length}] Network error (attempt ${attempt}/${MAX_RETRIES}), retrying: ${retryMsg}`,
+            { projectId: project.id, projectTitle }
+          );
+          await sleep(2000 * attempt);
+        }
+      }
+      if (!result) throw new Error('sendFreelancehuntBid returned no result after retries');
 
       if (result.success) {
         alreadyBidIds.add(project.id);
@@ -361,6 +402,19 @@ export async function runAutoBidCycle(
         { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
       );
       errors++;
+
+      // Telegram error notification (send but don't block the cycle)
+      if (chatId) {
+        const errMsg = [
+          '<b>Bid failed</b>',
+          '',
+          `<b>Project:</b> ${projectTitle}`,
+          `<b>Error:</b> ${msg.slice(0, 300)}`,
+          projectUrl ? `<a href="${projectUrl}">View project</a>` : '',
+        ].filter(Boolean).join('\n');
+        await sendTelegramMessage(chatId, errMsg, { parseMode: 'HTML', disableWebPagePreview: true }).catch(() => {});
+      }
+
       continue;
     }
 
