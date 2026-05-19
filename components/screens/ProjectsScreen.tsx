@@ -61,8 +61,37 @@ export function ProjectsScreen({ onNavigate }: ProjectsScreenProps) {
       !search ||
       p.title.toLowerCase().includes(search.toLowerCase()) ||
       p.description.toLowerCase().includes(search.toLowerCase()) ||
-      p.category.toLowerCase().includes(search.toLowerCase());
+     const safe = (v: any) =>
+  typeof v === 'string'
+    ? v.toLowerCase()
+    : Array.isArray(v)
+    ? v.join(' ').toLowerCase()
+    : String(v || '').toLowerCase()
 
+const filtered = projects.filter((p) => {
+  const title = safe(p.title)
+  const description = safe(p.description)
+  const category = safe(p.category)
+
+  const matchSearch =
+    !search ||
+    title.includes(search.toLowerCase()) ||
+    description.includes(search.toLowerCase()) ||
+    category.includes(search.toLowerCase())
+
+  const matchCat =
+    activeCategory === 'All' ||
+    (CATEGORY_MAP[activeCategory] ?? []).some((kw) =>
+      `${title} ${description} ${category}`.includes(
+        kw.toLowerCase()
+      )
+    )
+
+  const matchNew = !onlyNew || p.isNew
+
+  return matchSearch && matchCat && matchNew
+})
+  
     const matchCat =
       activeCategory === 'All' ||
       (CATEGORY_MAP[activeCategory] ?? []).some((kw) =>
