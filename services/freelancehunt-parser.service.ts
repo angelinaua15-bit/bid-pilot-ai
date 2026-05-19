@@ -15,18 +15,10 @@ import { mockProjects } from '@/lib/mock-data';
 
 const USE_MOCK = Boolean(process.env.FREELANCEHUNT_MOCK);
 
-// In-memory cache of seen project IDs between cycle runs (per process).
-// Cleared every hour so fresh projects are always fetched when the API returns them again.
-const seenProjectIds = new Set<string>();
-let _lastCacheClear = Date.now();
-const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
-
-function maybeResetCache(): void {
-  if (Date.now() - _lastCacheClear > CACHE_TTL_MS) {
-    seenProjectIds.clear();
-    _lastCacheClear = Date.now();
-  }
-}
+// No seenProjectIds cache — every cycle returns all fetched projects.
+// Dedup is handled by the Freelancehunt API itself (422 ALREADY_BID on re-submit).
+// A local cache was causing all projects to appear as "seen" after the first cycle,
+// resulting in 0 submissions on every subsequent run.
 
 export type StepLogFn = (
   level: 'info' | 'success' | 'warning' | 'error',
@@ -59,7 +51,6 @@ export async function parseNewProjects(
   logFn?: StepLogFn
 ): Promise<ParseResult> {
   const log: StepLogFn = logFn ?? (() => {});
-  maybeResetCache(); // Reset hourly so we always detect fresh projects
   let allProjects: Project[];
   let source: ParseResult['source'];
 
@@ -105,34 +96,20 @@ export async function parseNewProjects(
     log('success', `[Parser] REST API returned ${allProjects.length} projects`);
   }
 
-  // Detect new projects (not yet seen in this process run).
-  const newProjects = allProjects.filter((p) => {
-    const fhId = p.freelancehuntId ?? p.id;
-    if (seenProjectIds.has(fhId)) return false;
-    seenProjectIds.add(fhId);
-    return true;
-  });
+  // All fetched projects are treated as candidates — no local dedup.
+  // The Freelancehunt API returns 422 ALREADY_BID if a bid was already submitted,
+  // which the orchestrator catches and counts as a skip with the exact API reason.
+  const allWithNew = allProjects.map((p) => ({ ...p, isNew: true }));
 
-  const allWithNew = allProjects.map((p) => ({
-    ...p,
-    isNew: newProjects.some((n) => n.id === p.id),
-  }));
-
-  log('info', `[Parser] ${allProjects.length} total, ${newProjects.length} new (source: ${source})`);
+  log('info', `[Parser] ${allProjects.length} projects fetched — all passed to bid loop (source: ${source})`);
 
   return {
     allProjects: allWithNew,
-    newProjects,
+    newProjects: allWithNew,
     totalFetched: allProjects.length,
-    newCount: newProjects.length,
+    newCount: allProjects.length,
     source,
   };
 }
 
-export function resetSeenProjects(): void {
-  seenProjectIds.clear();
-}
-
-export function markProjectsSeen(ids: string[]): void {
-  for (const id of ids) seenProjectIds.add(id);
-}
+// resetSeenProjects / markProjectsSeen removed — no local cache exists.

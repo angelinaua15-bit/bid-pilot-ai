@@ -217,7 +217,18 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
       level,
       message: message || '(no message)',
       meta,
-    })
+    };
+    const log = addLog(safeEntry);
+    cycleLogs.push(log);
+
+    // Live counters are updated from regex only for mid-cycle progress display.
+    // Authoritative final values come from result.bidsSubmitted/Skipped/errors below.
+    const m = safeEntry.message;
+    if (/projects? fetched|projects? queued/i.test(m)) {
+      const match = m.match(/(\d+) project/);
+      if (match) cycleCounters.parsed = Number(match[1]);
+    }
+  };
 
     cycleLogs.push(log)
 

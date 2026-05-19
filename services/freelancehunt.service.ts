@@ -33,14 +33,34 @@ async function fhFetch<T = unknown>(
   if (res.status === 401) throw new Error('INVALID_TOKEN: Freelancehunt token is invalid or expired');
   if (res.status === 403) throw new Error('FORBIDDEN: Access denied');
   if (res.status === 404) throw new Error('NOT_FOUND: Resource not found');
-  if (res.status === 422) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`VALIDATION_ERROR: ${body}`);
-  }
   if (res.status === 429) throw new Error('RATE_LIMITED: Too many requests');
+
   if (!res.ok) {
-    const body = await res.text().catch(() => '');
-    throw new Error(`Freelancehunt API ${res.status}: ${body}`);
+    const text = await res.text().catch(() => '');
+    // Try to extract a structured error message from the JSON body
+    let reason = text;
+    try {
+      const parsed = JSON.parse(text);
+      // Freelancehunt error shape: { errors: [{ title, detail }] }
+      const errs = parsed?.errors as Array<{ title?: string; detail?: string }> | undefined;
+      if (Array.isArray(errs) && errs.length > 0) {
+        reason = errs.map((e) => [e.title, e.detail].filter(Boolean).join(': ')).join('; ');
+        // Detect "already applied" so the caller can classify it as a skip
+        const lower = reason.toLowerCase();
+        if (lower.includes('already') || lower.includes('вже') || lower.includes('duplicate')) {
+          throw new Error(`ALREADY_BID: ${reason}`);
+        }
+        if (lower.includes('closed') || lower.includes('закрит')) {
+          throw new Error(`PROJECT_CLOSED: ${reason}`);
+        }
+      }
+    } catch (parseErr) {
+      // Re-throw if it was one of our own typed errors
+      if (parseErr instanceof Error && (parseErr.message.startsWith('ALREADY_BID:') || parseErr.message.startsWith('PROJECT_CLOSED:'))) {
+        throw parseErr;
+      }
+    }
+    throw new Error(`API_ERROR_${res.status}: ${reason}`);
   }
 
   return res.json() as Promise<T>;
@@ -217,6 +237,8 @@ export async function sendFreelancehuntBid(
     is_hidden: false,
   };
 
+  log('info', `[API] POST /v2/projects/${numericId}/bids — payload: ${JSON.stringify(body)}`);
+
   const response = await fhFetch<{
     data?: { id: number; attributes?: { status?: { name: string } } };
     errors?: Array<{ title: string; detail?: string }>;
@@ -228,6 +250,8 @@ export async function sendFreelancehuntBid(
       body: JSON.stringify(body),
     }
   );
+
+  log('info', `[API] Raw response: ${JSON.stringify(response)}`);
 
   const bidId = response.data?.id ? String(response.data.id) : undefined;
   log('success', `[API] Bid submitted successfully — bidId: ${bidId ?? 'unknown'}`);

@@ -25,6 +25,10 @@ import { companyProfile } from '@/lib/mock-data';
 import { config } from '@/lib/config';
 import { saveBid, appendLog as persistLog } from '@/lib/db';
 
+// NOTE: project-filter.service is intentionally NOT used here.
+// All category, budget, keyword, match-score, and working-hours filters are
+// disabled. Only the in-session duplicate check (alreadyBidIds) is applied.
+
 export interface AutoBidRunResult {
   logs: AutoBidLog[];
   bidsSubmitted: number;
@@ -186,10 +190,8 @@ export async function runAutoBidCycle(
   // ── 1. Parse projects from API ──────────────────────────────────────────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
-    parseResult = await parseNewProjects(apiToken, {
-      categories: settings.allowedCategories,
-      budgetMin: settings.minBudget,
-    }, stepLog);
+    // No category or budget filters — fetch all projects from the API
+    parseResult = await parseNewProjects(apiToken, {}, stepLog);
 
     log(logs, 'info',
       `Found ${parseResult.totalFetched} projects total, ${parseResult.newCount} new (source: ${parseResult.source})`,
@@ -218,38 +220,24 @@ export async function runAutoBidCycle(
     return { logs, bidsSubmitted, bidsSkipped, errors };
   }
 
-  // ── 2. Filter projects ──────────────────────────────────────────────────────
-  const filtered: Array<Project & { matchScore?: number }> = [];
-  const { filterProject, computeMatchScore } = await import('./project-filter.service');
+  // ── 2. No filters — attempt bid on every project returned by the API ─────────
+  // No category, budget, keyword, match-score, session-duplicate, or any other
+  // filter is applied here. Every project in parseResult.newProjects goes
+  // directly to the bid submission step.
+  const filtered: Array<Project & { matchScore?: number }> = parseResult.newProjects.map(
+    (p) => ({ ...p, matchScore: 100 })
+  );
 
-  for (const project of parseResult.newProjects) {
-    const result = filterProject(project, settings, alreadyBidIds);
-    if (result.passed) {
-      filtered.push({
-        ...project,
-        matchScore: result.matchScore ?? computeMatchScore(project, settings.allowedCategories),
-      });
-    } else {
-      log(logs, 'warning', `[Filter] SKIP "${project.title ?? project.projectUrl}": ${result.reason}`, {
-        projectId: project.id,
-        meta: { projectUrl: project.projectUrl, reason: result.reason },
-      });
-      bidsSkipped++;
-    }
-  }
-
-  if (filtered.length === 0) {
-    log(logs, 'info', `No projects passed the filter (${bidsSkipped} skipped). Cycle complete.`);
-    return { logs, bidsSubmitted, bidsSkipped, errors };
-  }
-
-  log(logs, 'info', `${filtered.length} project(s) will be processed`, { meta: { count: filtered.length } });
+  log(logs, 'info', `${filtered.length} project(s) queued — submitting bid to all`, {
+    meta: { count: filtered.length },
+  });
 
   // ── 3. Process each project ─────────────────────────────────────────────────
   for (let i = 0; i < filtered.length; i++) {
     const project = filtered[i];
 
-    if (getDailyCount('bids') >= settings.dailyLimit) {
+    const dailyLimit = settings.dailyLimit > 0 ? settings.dailyLimit : Infinity;
+    if (getDailyCount('bids') >= dailyLimit) {
       log(logs, 'warning', `Daily bid limit reached (${settings.dailyLimit}). Stopping.`);
       break;
     }
@@ -347,28 +335,32 @@ export async function runAutoBidCycle(
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
 
-      // ALREADY_BID / PROJECT_CLOSED / VALIDATION_ERROR = skip, non-fatal
-      const isSkippable =
+      // ALREADY_BID / PROJECT_CLOSED = truly skip (API confirmed cannot bid)
+      // Everything else = real failure → errors counter, NOT bidsSkipped
+      const isApiSkip =
         msg.startsWith('ALREADY_BID:') ||
         msg.startsWith('PROJECT_CLOSED:') ||
-        msg.startsWith('VALIDATION_ERROR:') ||
-        msg.includes('already placed');
+        msg.toLowerCase().includes('already placed') ||
+        msg.toLowerCase().includes('already applied');
 
-      if (isSkippable) {
+      if (isApiSkip) {
         log(logs, 'warning',
-          `[${i + 1}/${filtered.length}] SKIP: "${projectTitle}" — ${msg.slice(0, 160)}`,
+          `[${i + 1}/${filtered.length}] SKIP (API reason): "${projectTitle}" — ${msg.slice(0, 200)}`,
           { projectId: project.id, projectTitle, meta: { projectUrl, reason: msg } }
         );
         bidsSkipped++;
+        // Mark as seen so we don't retry this project
+        alreadyBidIds.add(project.id);
+        if (project.freelancehuntId) alreadyBidIds.add(project.freelancehuntId);
         continue;
       }
 
+      // All other errors: log full API response, count as failure, continue to next project
       log(logs, 'error',
-        `[${i + 1}/${filtered.length}] FAILED: "${projectTitle}" — ${msg}`,
-        { projectId: project.id, projectTitle, meta: { projectUrl } }
+        `[${i + 1}/${filtered.length}] BID FAILED: "${projectTitle}" — ${msg}`,
+        { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
       );
       errors++;
-      bidsSkipped++;
       continue;
     }
 
