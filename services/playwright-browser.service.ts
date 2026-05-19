@@ -239,34 +239,14 @@ export async function submitBidViaPlaywright(
     // ── 3. Click bid button ───────────────────────────────────────────────────
     log('info', '[Playwright] Looking for bid button...');
 
-    const bidButtonSelectors = [
-      'button:has-text("Відгукнутись")',
-      'button:has-text("Подати заявку")',
-      'a:has-text("Відгукнутись")',
-      'a:has-text("Подати заявку")',
-      'button:has-text("Apply")',
-      'button:has-text("Place bid")',
-      'a:has-text("Apply")',
-      '.bid-button',
-      '[data-action="bid"]',
-      '.js-bid-form-open',
-      '.send-bid',
-    ];
+    const bidButton = page.locator(
+      'a[href*="/bid"], button:has-text("Подати заявку"), button:has-text("Сделать ставку")'
+    ).first();
 
-    let bidButtonClicked = false;
-    for (const sel of bidButtonSelectors) {
-      try {
-        const btn = page.locator(sel).first();
-        if (await btn.isVisible({ timeout: 1_500 })) {
-          log('info', `[Playwright] Clicking bid button: "${sel}"`);
-          await btn.click();
-          bidButtonClicked = true;
-          break;
-        }
-      } catch { /* try next */ }
-    }
-
-    if (!bidButtonClicked) {
+    try {
+      await bidButton.waitFor({ timeout: 15_000 });
+    } catch {
+      // Button not found — check if form is already inline before failing
       const inlineFormVisible = await page
         .locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="пропоз"]')
         .first()
@@ -277,7 +257,12 @@ export async function submitBidViaPlaywright(
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
         throw new Error(`FORM_NOT_FOUND: No bid button or inline form found on ${opts.projectUrl}. Screenshot: ${screenshotPath}`);
       }
-      log('info', '[Playwright] Bid form already visible inline');
+      log('info', '[Playwright] Bid form already visible inline — skipping button click');
+    }
+
+    if (await bidButton.isVisible().catch(() => false)) {
+      log('info', '[Playwright] Clicking bid button');
+      await bidButton.click();
     }
 
     // ── 4. Wait for textarea ──────────────────────────────────────────────────
