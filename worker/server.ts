@@ -143,20 +143,23 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
 }
 
 async function handleStatus(res: http.ServerResponse) {
-  const tokenSet = Boolean(process.env.FREELANCEHUNT_TOKEN)
+  const { sessionExists, resolveSessionPath } = await import('../services/playwright-browser.service')
+  const sessionFound = sessionExists()
+  const sessionPath = resolveSessionPath()
 
   return json(res, 200, {
     ok: true,
     service: 'bid-pilot-worker',
-    version: '2.0.0',
+    version: '3.0.0',
     uptime: process.uptime(),
     cycleRunning,
     stopRequested,
     counters: { ...cycleCounters },
     freelancehunt: {
-      connected: tokenSet,
-      authMode: 'api_token',
-      error: tokenSet ? undefined : 'FREELANCEHUNT_TOKEN is not set',
+      connected: sessionFound,
+      authMode: 'playwright_session',
+      sessionPath: sessionPath ?? null,
+      error: sessionFound ? undefined : 'storageState.json not found. Run: npm run login:freelancehunt',
     },
     openai: {
       configured: Boolean(process.env.OPENAI_API_KEY),
@@ -374,62 +377,7 @@ async function handleGetProjects(url: URL, res: http.ServerResponse) {
   }
 }
 
-async function handleSendBid(req: http.IncomingMessage, res: http.ServerResponse) {
-  const token = process.env.FREELANCEHUNT_TOKEN || ''
 
-  if (!token) {
-    return json(res, 503, {
-      ok: false,
-      error: 'FREELANCEHUNT_TOKEN is not set',
-    })
-  }
-
-  try {
-    const body = await readBody(req)
-
-    const projectUrl = String(body.projectUrl || '')
-    const text = String(body.text || '')
-    const budget = Number(body.budget || 0)
-    const days = Number(body.days || 14)
-
-    if (!projectUrl || !text) {
-      return json(res, 400, {
-        ok: false,
-        error: 'projectUrl and text are required',
-      })
-    }
-
-    const { sendFreelancehuntBid } = await import('../services/freelancehunt.service')
-
-    const result = await sendFreelancehuntBid(token, projectUrl, {
-      text,
-      budget,
-      days,
-    })
-
-    addLog({
-      level: 'success',
-      message: `Bid submitted via /send-bid — bidId: ${result.bidId ?? 'unknown'}`,
-      meta: {
-        projectUrl,
-        bidId: result.bidId,
-      },
-    })
-
-    return json(res, 200, {
-      ok: true,
-      bidId: result.bidId,
-      result,
-    })
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-
-    return json(res, 500, {
-      ok: false,
-      error: message,
-    })
-  }
-}
 
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://localhost:${PORT}`)
@@ -487,10 +435,6 @@ const server = http.createServer(async (req, res) => {
       return await handleGetProjects(url, res)
     }
 
-    if (method === 'POST' && pathname === '/send-bid') {
-      return await handleSendBid(req, res)
-    }
-
     return json(res, 404, {
       ok: false,
       error: `Unknown route: ${method} ${pathname}`,
@@ -512,19 +456,21 @@ server.listen(PORT, '0.0.0.0', () => {
   console.log('[worker] Railway/public URL should point to this service')
   console.log('[worker] Waiting for requests...\n')
 
-  addLog({
-    level: process.env.FREELANCEHUNT_TOKEN ? 'success' : 'warning',
-    message: process.env.FREELANCEHUNT_TOKEN
-      ? 'FREELANCEHUNT_TOKEN loaded — REST API mode active'
-      : 'FREELANCEHUNT_TOKEN not set',
-  })
+  // Check Playwright session at startup
+  import('../services/playwright-browser.service').then(({ sessionExists, resolveSessionPath }) => {
+    const found = sessionExists()
+    addLog({
+      level: found ? 'success' : 'warning',
+      message: found
+        ? `Playwright session loaded — ${resolveSessionPath()}`
+        : 'storageState.json not found. Run: npm run login:freelancehunt',
+    })
+  }).catch(() => {})
 
   if (!process.env.OPENAI_API_KEY) {
-    addLog({
-      level: 'warning',
-      message: 'OPENAI_API_KEY not set — will use template bids',
-    })
+    addLog({ level: 'warning', message: 'OPENAI_API_KEY not set — will use template bids' })
   }
+
 })
 
 process.on('SIGINT', () => {

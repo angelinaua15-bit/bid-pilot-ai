@@ -239,24 +239,12 @@ export async function fetchFreelancehuntProject(
 // ─── Bid submission ───────────────────────────────────────────────────────────
 
 /**
- * Submit a bid via the Freelancehunt REST API.
+ * @deprecated
+ * POST /v2/projects/{id}/bids was removed from the Freelancehunt API (410 Gone).
+ * Bid submission must be done via Playwright browser automation.
+ * Use submitBidViaPlaywright() from services/playwright-browser.service.ts instead.
  *
- * Endpoint: POST /v2/projects/{project_id}/bids
- *
- * Payload shape (from Freelancehunt API docs):
- *   {
- *     "days":       number,           // integer, required
- *     "safe_type":  "employer",       // who holds the safe payment, required
- *     "budget": {
- *       "amount":   number,           // integer UAH/USD/EUR, required
- *       "currency": "UAH"|"USD"|"EUR" // required
- *     },
- *     "comment":    string,           // proposal text, required
- *     "is_hidden":  boolean           // hide bid from other freelancers
- *   }
- *
- * Returns { success: true, bidId } ONLY when API responds 2xx with data.id.
- * Never returns fake success.
+ * This function always throws API_GONE_410 so callers fail fast and clearly.
  */
 export async function sendFreelancehuntBid(
   token: string,
@@ -269,157 +257,13 @@ export async function sendFreelancehuntBid(
     logFn?: (level: string, message: string, meta?: Record<string, unknown>) => void;
   }
 ): Promise<{ success: boolean; bidId?: string; strategy?: string }> {
-  const logRaw = bid.logFn ?? (() => {});
-  // Wrap so we can call log(level, message) without the meta arg
-  const log: LogFn = (level, message) => logRaw(level, message);
+  // Suppress unused-variable warnings for the deprecated signature
+  void token; void projectIdOrUrl; void bid;
 
-  // ── 1. Resolve numeric project ID ─────────────────────────────────────────
-  let numericId: string;
-
-  if (projectIdOrUrl.startsWith('http')) {
-    // URL formats:
-    //   https://freelancehunt.com/project/some-slug/12345.html
-    //   https://freelancehunt.com/project/12345.html
-    //   https://freelancehunt.com/project/12345
-    const match = projectIdOrUrl.match(/\/(\d{4,})(?:\.html)?(?:[/?#]|$)/);
-    if (match) {
-      numericId = match[1];
-    } else {
-      // Last-resort: largest digit sequence in the URL
-      const allDigits = projectIdOrUrl.match(/\d{4,}/g);
-      if (!allDigits) {
-        throw new Error(`INVALID_URL: Cannot extract project ID from URL: ${projectIdOrUrl}`);
-      }
-      numericId = allDigits[allDigits.length - 1];
-    }
-  } else if (projectIdOrUrl.startsWith('fh_')) {
-    numericId = projectIdOrUrl.slice(3);
-  } else {
-    numericId = projectIdOrUrl;
-  }
-
-  if (!numericId || isNaN(Number(numericId))) {
-    throw new Error(`INVALID_ID: Resolved project ID "${numericId}" is not a valid number (from: ${projectIdOrUrl})`);
-  }
-
-  log('info', `[Bid] Project ID resolved: ${numericId} (from: ${projectIdOrUrl})`);
-
-  // ── 2. Build + validate payload ───────────────────────────────────────────
-  // budget.amount must be a positive integer
-  const amount = Math.max(1, Math.round(bid.budget > 0 ? bid.budget : 500));
-  // days must be a positive integer
-  const days = Math.max(1, Math.round(bid.days > 0 ? bid.days : 14));
-  // comment must be non-empty
-  const comment = (bid.text ?? '').trim() || 'Привіт! Готові взятись за ваш проєкт. Обговоримо деталі?';
-  const currency = (bid.currency ?? 'UAH').toUpperCase();
-
-  const payload = {
-    days,
-    safe_type: 'employer' as const,
-    budget: {
-      amount,
-      currency,
-    },
-    comment,
-    is_hidden: false,
-  };
-
-  log('info', `[Bid] Payload: ${JSON.stringify(payload)}`);
-  log('info', `[Bid] Proposal (first 200 chars): ${comment.slice(0, 200)}`);
-
-  // ── 3. POST /v2/projects/{id}/bids ────────────────────────────────────────
-  const endpoint = `/projects/${numericId}/bids`;
-  log('info', `[Bid] POST ${BASE_URL}${endpoint}`);
-
-  // Use raw fetch here (not fhFetch) so we capture status + body before any parsing
-  const res = await fetch(`${BASE_URL}${endpoint}`, {
-    method: 'POST',
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-    },
-    body: JSON.stringify(payload),
-  });
-
-  const rawBody = await res.text().catch(() => '');
-
-  log('info', `[Bid] Response status: ${res.status} ${res.statusText}`);
-  log('info', `[Bid] Response body: ${rawBody}`);
-
-  // ── 4. Handle non-2xx ────────────────────────────────────────────────────
-  if (!res.ok) {
-    let reason = rawBody || `HTTP ${res.status}`;
-
-    try {
-      const parsed = JSON.parse(rawBody) as {
-        errors?: Array<{ title?: string; detail?: string; code?: string }>;
-        message?: string;
-      };
-
-      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-        reason = parsed.errors
-          .map((e) => [e.title, e.detail].filter(Boolean).join(': '))
-          .join('; ');
-      } else if (parsed.message) {
-        reason = parsed.message;
-      }
-    } catch {
-      // use raw body
-    }
-
-    log('error', `[Bid] FAILED — HTTP ${res.status}: ${reason}`);
-
-    const lowerReason = reason.toLowerCase();
-
-    if (
-      lowerReason.includes('already') ||
-      lowerReason.includes('вже') ||
-      lowerReason.includes('duplicate') ||
-      lowerReason.includes('bid exists')
-    ) {
-      throw new Error(`ALREADY_BID: ${reason}`);
-    }
-    if (lowerReason.includes('closed') || lowerReason.includes('закрит')) {
-      throw new Error(`PROJECT_CLOSED: ${reason}`);
-    }
-    if (res.status === 401) throw new Error(`INVALID_TOKEN: ${reason}`);
-    if (res.status === 403) throw new Error(`FORBIDDEN: ${reason}`);
-    if (res.status === 404) throw new Error(`NOT_FOUND: Project ${numericId} not found`);
-    if (res.status === 429) throw new Error(`RATE_LIMITED: ${reason}`);
-
-    throw new Error(`API_ERROR_${res.status}: ${reason}`);
-  }
-
-  // ── 5. Parse success response ─────────────────────────────────────────────
-  let responseData: { data?: { id?: number; attributes?: { status?: { name?: string } } } } = {};
-  try {
-    responseData = JSON.parse(rawBody);
-  } catch {
-    log('error', `[Bid] Success but could not parse response JSON: ${rawBody.slice(0, 200)}`);
-    // The bid was accepted (2xx) — treat as success even if body is unexpected
-    return { success: true, bidId: undefined, strategy: 'api' };
-  }
-
-  const bidId = responseData.data?.id ? String(responseData.data.id) : undefined;
-  const bidStatus = responseData.data?.attributes?.status?.name ?? 'unknown';
-
-  log('success', `[Bid] SUCCESS — bidId: ${bidId ?? 'unknown'} | status: ${bidStatus}`);
-
-  if (!bidId) {
-    log('error', `[Bid] WARNING: API returned 2xx but no bid ID in response. Full body: ${rawBody}`);
-  }
-
-  return { success: true, bidId, strategy: 'api' };
+  throw new Error(
+    'API_GONE_410: POST /v2/projects/{id}/bids is no longer available (Freelancehunt deprecated this endpoint). ' +
+    'Use submitBidViaPlaywright() from services/playwright-browser.service.ts instead.'
+  );
 }
 
-/** Alias kept for call-site compatibility */
-export async function createBid(
-  token: string,
-  projectUrl: string,
-  text: string,
-  price: number,
-  deadline: number
-): Promise<{ success: boolean; bidId?: string }> {
-  return sendFreelancehuntBid(token, projectUrl, { text, budget: price, days: deadline });
-}
+

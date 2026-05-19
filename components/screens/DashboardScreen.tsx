@@ -304,23 +304,27 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             <div className="glass-card rounded-2xl p-4 border border-yellow-500/20 bg-yellow-500/5">
               <p className="text-xs font-semibold text-yellow-400 mb-2">Automation worker not configured</p>
               <p className="text-[11px] text-muted-foreground mb-3 leading-relaxed">
-                The worker handles bid automation via the Freelancehunt REST API. No browser needed.
+                Bids are submitted via Playwright browser automation (the Freelancehunt REST API for bid submission was removed). A saved session is required.
               </p>
               <div className="flex flex-col gap-1.5">
                 <div className="flex items-start gap-2">
                   <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">1</span>
-                  <p className="text-[11px] text-muted-foreground">Add your Freelancehunt API token to <code className="font-mono text-foreground">.env.local</code>:<br />
-                    <code className="font-mono text-foreground">FREELANCEHUNT_TOKEN=your_token</code>
+                  <p className="text-[11px] text-muted-foreground">Save your Freelancehunt session (run once locally):<br />
+                    <code className="font-mono text-foreground">npm run login:freelancehunt</code>
                   </p>
                 </div>
                 <div className="flex items-start gap-2">
                   <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">2</span>
+                  <p className="text-[11px] text-muted-foreground">Copy <code className="font-mono text-foreground">storageState.json</code> to the Railway deployment root (or set <code className="font-mono text-foreground">FREELANCEHUNT_SESSION_PATH</code>).</p>
+                </div>
+                <div className="flex items-start gap-2">
+                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">3</span>
                   <p className="text-[11px] text-muted-foreground">Start the worker:<br />
                     <code className="font-mono text-foreground">npm run worker:start</code>
                   </p>
                 </div>
                 <div className="flex items-start gap-2">
-                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">3</span>
+                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">4</span>
                   <p className="text-[11px] text-muted-foreground">Set in Vercel env vars:<br />
                     <code className="font-mono text-foreground">AUTOMATION_WORKER_URL=http://YOUR_IP:3001</code><br />
                     <code className="font-mono text-foreground">AUTOMATION_SECRET=your-secret</code>

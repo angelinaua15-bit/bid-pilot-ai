@@ -19,7 +19,7 @@ import type { AutoBidSettings, AutoBidLog, Project } from '@/types';
 import type { StepLogFn } from './freelancehunt-parser.service';
 import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
-import { sendFreelancehuntBid } from './freelancehunt.service';
+import { submitBidViaPlaywright } from './playwright-browser.service';
 import { sendTelegramMessage } from './telegram.service';
 import { companyProfile } from '@/lib/mock-data';
 import { config } from '@/lib/config';
@@ -274,10 +274,20 @@ export async function runAutoBidCycle(
       );
     }
 
-    // ── 5. Submit bid via REST API ────────────────────────────────────────────
-    const bidTarget = numericId || projectUrl;
+    // ── 5. Submit bid via Playwright browser automation ───────────────────────
+    // POST /v2/projects/{id}/bids was removed (410 Gone) from the Freelancehunt API.
+    // We now submit bids by automating the website with Playwright.
+    if (!projectUrl) {
+      log(logs, 'error',
+        `[${i + 1}/${filtered.length}] SKIP: "${projectTitle}" — project URL is empty, cannot open in browser`,
+        { projectId: project.id, projectTitle }
+      );
+      errors++;
+      continue;
+    }
+
     log(logs, 'info',
-      `[${i + 1}/${filtered.length}] Submitting bid via API — project ${numericId}: ${projectUrl}`,
+      `[${i + 1}/${filtered.length}] Opening browser for: "${projectTitle}" — ${projectUrl}`,
       { projectId: project.id, projectTitle, meta: { projectUrl } }
     );
 
@@ -293,19 +303,18 @@ export async function runAutoBidCycle(
         : 500;
 
     log(logs, 'info',
-      `[${i + 1}/${filtered.length}] Bid payload — budget: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | text length: ${(bid.text ?? '').length}`,
+      `[${i + 1}/${filtered.length}] Bid details — budget: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | proposal: ${(bid.text ?? '').length} chars`,
       { projectId: project.id, projectTitle }
     );
 
     try {
-      if (!bidTarget) throw new Error('Project URL/ID is empty — cannot submit bid');
-
-      // Retry on network/5xx errors only (not on 4xx API rejections)
-      let result: Awaited<ReturnType<typeof sendFreelancehuntBid>> | undefined;
+      // Retry on browser/network errors only — not on FORM_NOT_FOUND / ALREADY_BID / PROJECT_CLOSED
+      let result: Awaited<ReturnType<typeof submitBidViaPlaywright>> | undefined;
       const MAX_RETRIES = 2;
       for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
         try {
-          result = await sendFreelancehuntBid(apiToken, bidTarget, {
+          result = await submitBidViaPlaywright({
+            projectUrl,
             text:     bid.text ?? '',
             budget:   budgetAmount!,
             days,
@@ -315,22 +324,21 @@ export async function runAutoBidCycle(
           break; // success
         } catch (retryErr) {
           const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          // 4xx errors → don't retry, re-throw immediately
-          const is4xx = retryMsg.startsWith('ALREADY_BID:') ||
-                        retryMsg.startsWith('PROJECT_CLOSED:') ||
-                        retryMsg.startsWith('INVALID_TOKEN:') ||
-                        retryMsg.startsWith('FORBIDDEN:') ||
-                        retryMsg.startsWith('NOT_FOUND:') ||
-                        retryMsg.startsWith('API_ERROR_4');
-          if (is4xx || attempt === MAX_RETRIES) throw retryErr;
+          // Non-retryable errors — re-throw immediately
+          const isNonRetryable =
+            retryMsg.startsWith('ALREADY_BID:') ||
+            retryMsg.startsWith('PROJECT_CLOSED:') ||
+            retryMsg.startsWith('FORM_NOT_FOUND:') ||
+            retryMsg.startsWith('INVALID_ID:');
+          if (isNonRetryable || attempt === MAX_RETRIES) throw retryErr;
           log(logs, 'warning',
-            `[${i + 1}/${filtered.length}] Network error (attempt ${attempt}/${MAX_RETRIES}), retrying: ${retryMsg}`,
+            `[${i + 1}/${filtered.length}] Browser error (attempt ${attempt}/${MAX_RETRIES}), retrying in 5s: ${retryMsg}`,
             { projectId: project.id, projectTitle }
           );
-          await sleep(2000 * attempt);
+          await sleep(5000);
         }
       }
-      if (!result) throw new Error('sendFreelancehuntBid returned no result after retries');
+      if (!result) throw new Error('submitBidViaPlaywright returned no result after retries');
 
       if (result.success) {
         alreadyBidIds.add(project.id);
@@ -346,10 +354,10 @@ export async function runAutoBidCycle(
         });
 
         log(logs, 'success',
-          `BID SENT [${i + 1}/${filtered.length}] — bidId: ${result.bidId ?? 'unknown'} | "${projectTitle}"`,
+          `BID SENT [${i + 1}/${filtered.length}] — via ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | "${projectTitle}"`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: bid.price, deadline: bid.deadline, matchScore: project.matchScore, projectUrl },
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy },
           }
         );
 
