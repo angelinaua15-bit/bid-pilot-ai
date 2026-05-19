@@ -4,9 +4,6 @@ import http from 'http'
 import fs from 'fs'
 import path from 'path'
 import { URL } from 'url'
-
-// ─── Load .env.local ─────────────────────────────────────────────
-
 const envPath = path.resolve(__dirname, '..', '.env.local')
 
 if (fs.existsSync(envPath)) {
@@ -28,8 +25,6 @@ if (fs.existsSync(envPath)) {
   console.log(`[worker] Loaded env from ${envPath}`)
 }
 
-// ─── Config ──────────────────────────────────────────────────────
-
 const PORT = Number(process.env.PORT || process.env.WORKER_PORT || 8080)
 const SECRET = process.env.AUTOMATION_SECRET || ''
 
@@ -37,8 +32,6 @@ if (!SECRET) {
   console.error('[worker] AUTOMATION_SECRET is not set. Set it in Railway Variables.')
   process.exit(1)
 }
-
-// ─── Types ───────────────────────────────────────────────────────
 
 interface LogEntry {
   id: string
@@ -50,12 +43,34 @@ interface LogEntry {
   meta?: Record<string, unknown>
 }
 
-// ─── Logs ────────────────────────────────────────────────────────
-
 const logStore: LogEntry[] = []
 const MAX_LOGS = 500
 
-function addLog(entry: Omit<LogEntry, 'id' | 'timestamp'> & { id?: string; timestamp?: string }) {
+const cycleCounters = {
+  parsed: 0,
+  submitted: 0,
+  skipped: 0,
+  failed: 0,
+  lastReset: new Date().toISOString(),
+}
+
+let stopRequested = false
+let cycleRunning = false
+
+function resetCycleCounters() {
+  cycleCounters.parsed = 0
+  cycleCounters.submitted = 0
+  cycleCounters.skipped = 0
+  cycleCounters.failed = 0
+  cycleCounters.lastReset = new Date().toISOString()
+}
+
+function addLog(
+  entry: Omit<LogEntry, 'id' | 'timestamp'> & {
+    id?: string
+    timestamp?: string
+  }
+) {
   const message =
     typeof entry.message === 'string' && entry.message.trim() !== ''
       ? entry.message
@@ -64,7 +79,7 @@ function addLog(entry: Omit<LogEntry, 'id' | 'timestamp'> & { id?: string; times
         : '(empty message)'
 
   const log: LogEntry = {
-    id: entry.id ?? `log_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`,
+    id: entry.id ?? `log_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`,
     timestamp: entry.timestamp ?? new Date().toISOString(),
     level: entry.level ?? 'info',
     message,
@@ -87,29 +102,6 @@ function addLog(entry: Omit<LogEntry, 'id' | 'timestamp'> & { id?: string; times
   process.stdout.write(`[worker] ${prefix} ${log.message}\n`)
   return log
 }
-
-// ─── Counters ────────────────────────────────────────────────────
-
-const cycleCounters = {
-  parsed: 0,
-  submitted: 0,
-  skipped: 0,
-  failed: 0,
-  lastReset: new Date().toISOString(),
-}
-
-function resetCycleCounters() {
-  cycleCounters.parsed = 0
-  cycleCounters.submitted = 0
-  cycleCounters.skipped = 0
-  cycleCounters.failed = 0
-  cycleCounters.lastReset = new Date().toISOString()
-}
-
-let stopRequested = false
-let cycleRunning = false
-
-// ─── Helpers ─────────────────────────────────────────────────────
 
 function json(res: http.ServerResponse, statusCode: number, body: unknown) {
   const payload = JSON.stringify(body)
@@ -149,8 +141,6 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
     })
   })
 }
-
-// ─── Routes ──────────────────────────────────────────────────────
 
 async function handleStatus(res: http.ServerResponse) {
   const tokenSet = Boolean(process.env.FREELANCEHUNT_TOKEN)
@@ -201,7 +191,10 @@ async function handleSettingsDebug(res: http.ServerResponse) {
 
 async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerResponse) {
   if (cycleRunning) {
-    return json(res, 409, { ok: false, error: 'A cycle is already running' })
+    return json(res, 409, {
+      ok: false,
+      error: 'A cycle is already running',
+    })
   }
 
   const body = await readBody(req)
@@ -212,34 +205,37 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
 
   const cycleLogs: LogEntry[] = []
 
-  const stepLog = (level: LogEntry['level'], message: string, meta?: Record<string, unknown>) => {
+  const stepLog = (
+    level: LogEntry['level'],
+    message: string,
+    meta?: Record<string, unknown>
+  ) => {
     const log = addLog({
       level,
       message: message || '(no message)',
       meta,
-    };
-    const log = addLog(safeEntry);
-    cycleLogs.push(log);
-
-    // Live counters are updated from regex only for mid-cycle progress display.
-    // Authoritative final values come from result.bidsSubmitted/Skipped/errors below.
-    const m = safeEntry.message;
-    if (/projects? fetched|projects? queued/i.test(m)) {
-      const match = m.match(/(\d+) project/);
-      if (match) cycleCounters.parsed = Number(match[1]);
-    }
-  };
+    })
 
     cycleLogs.push(log)
 
     const msg = log.message
 
-    if (/BID SENT|SUBMITTED/i.test(msg)) cycleCounters.submitted++
-    if (/SKIP|ALREADY|CLOSED|VALIDATION/i.test(msg)) cycleCounters.skipped++
-    if (/FAILED|ERROR/i.test(msg)) cycleCounters.failed++
+    if (/BID SENT|SUBMITTED|BID SUBMITTED/i.test(msg)) {
+      cycleCounters.submitted++
+    }
+
+    if (/SKIP|SKIPPED|ALREADY|CLOSED|VALIDATION/i.test(msg)) {
+      cycleCounters.skipped++
+    }
+
+    if (/FAILED|ERROR/i.test(msg)) {
+      cycleCounters.failed++
+    }
 
     const match = msg.match(/(\d+)\s+project/i)
-    if (match) cycleCounters.parsed = Number(match[1])
+    if (match) {
+      cycleCounters.parsed = Number(match[1])
+    }
   }
 
   try {
@@ -247,6 +243,7 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
     const { getSettings } = await import('../lib/db')
 
     const dbSettings = await getSettings()
+
     const bodySettings =
       body.settings && typeof body.settings === 'object'
         ? (body.settings as Record<string, unknown>)
@@ -260,16 +257,20 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
 
     addLog({
       level: 'info',
-      message: `[Worker] Starting cycle — enabled=true | forceRun=true | dailyLimit=${(settings as Record<string, unknown>).dailyLimit ?? 20}`,
+      message: `[Worker] Starting cycle — enabled=true | forceRun=true | dailyLimit=${
+        (settings as Record<string, unknown>).dailyLimit ?? 20
+      }`,
     })
 
-    const chatId = process.env.TELEGRAM_CHAT_ID ? Number(process.env.TELEGRAM_CHAT_ID) : undefined
+    const chatId = process.env.TELEGRAM_CHAT_ID
+      ? Number(process.env.TELEGRAM_CHAT_ID)
+      : undefined
 
     const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true)
 
-    cycleCounters.submitted = result.bidsSubmitted ?? cycleCounters.submitted
-    cycleCounters.skipped = result.bidsSkipped ?? cycleCounters.skipped
-    cycleCounters.failed = result.errors ?? cycleCounters.failed
+    cycleCounters.submitted = Number(result.bidsSubmitted ?? cycleCounters.submitted)
+    cycleCounters.skipped = Number(result.bidsSkipped ?? cycleCounters.skipped)
+    cycleCounters.failed = Number(result.errors ?? cycleCounters.failed)
 
     const summary = `Cycle complete — parsed: ${cycleCounters.parsed} | submitted: ${cycleCounters.submitted} | skipped: ${cycleCounters.skipped} | failed: ${cycleCounters.failed}`
 
@@ -430,8 +431,6 @@ async function handleSendBid(req: http.IncomingMessage, res: http.ServerResponse
   }
 }
 
-// ─── Server ──────────────────────────────────────────────────────
-
 const server = http.createServer(async (req, res) => {
   const url = new URL(req.url || '/', `http://localhost:${PORT}`)
   const method = req.method || 'GET'
@@ -447,7 +446,6 @@ const server = http.createServer(async (req, res) => {
     return res.end()
   }
 
-  // Railway healthcheck / root page
   if (method === 'GET' && pathname === '/') {
     return json(res, 200, {
       ok: true,
@@ -465,13 +463,33 @@ const server = http.createServer(async (req, res) => {
   }
 
   try {
-    if (method === 'GET' && pathname === '/status') return await handleStatus(res)
-    if (method === 'GET' && pathname === '/settings/debug') return await handleSettingsDebug(res)
-    if (method === 'POST' && pathname === '/auto-bid/start') return await handleAutoBidStart(req, res)
-    if (method === 'POST' && pathname === '/auto-bid/stop') return handleAutoBidStop(res)
-    if (method === 'GET' && pathname === '/logs') return handleLogs(url, res)
-    if (method === 'GET' && pathname === '/projects') return await handleGetProjects(url, res)
-    if (method === 'POST' && pathname === '/send-bid') return await handleSendBid(req, res)
+    if (method === 'GET' && pathname === '/status') {
+      return await handleStatus(res)
+    }
+
+    if (method === 'GET' && pathname === '/settings/debug') {
+      return await handleSettingsDebug(res)
+    }
+
+    if (method === 'POST' && pathname === '/auto-bid/start') {
+      return await handleAutoBidStart(req, res)
+    }
+
+    if (method === 'POST' && pathname === '/auto-bid/stop') {
+      return handleAutoBidStop(res)
+    }
+
+    if (method === 'GET' && pathname === '/logs') {
+      return handleLogs(url, res)
+    }
+
+    if (method === 'GET' && pathname === '/projects') {
+      return await handleGetProjects(url, res)
+    }
+
+    if (method === 'POST' && pathname === '/send-bid') {
+      return await handleSendBid(req, res)
+    }
 
     return json(res, 404, {
       ok: false,
@@ -491,7 +509,7 @@ const server = http.createServer(async (req, res) => {
 
 server.listen(PORT, '0.0.0.0', () => {
   console.log(`\n[worker] BidPilot Worker v2 running on http://0.0.0.0:${PORT}`)
-  console.log(`[worker] Railway/public URL should point to this service`)
+  console.log('[worker] Railway/public URL should point to this service')
   console.log('[worker] Waiting for requests...\n')
 
   addLog({
