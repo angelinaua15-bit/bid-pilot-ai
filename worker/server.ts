@@ -33,6 +33,34 @@ if (!SECRET) {
   process.exit(1)
 }
 
+// ─── Auto-loop state ───────────────────────────────────────────────────────────
+// Runs a bid cycle every AUTO_LOOP_INTERVAL_MS when auto-bid is enabled.
+const AUTO_LOOP_INTERVAL_MS = Number(process.env.AUTO_LOOP_INTERVAL_MS || 60_000) // default: 1 min
+let autoLoopTimer: ReturnType<typeof setInterval> | null = null
+let autoLoopEnabled = false
+let lastCheckedAt: string | null = null
+let lastLoopError: string | null = null
+
+// Tracks processed project IDs across cycles so we never submit twice per process run
+const processedProjectIds = new Set<string>()
+
+// ─── Connect session store (in-memory, per worker process) ────────────────────
+interface ConnectSession {
+  id: string
+  status: 'pending' | 'logged_in' | 'saved' | 'error'
+  username?: string
+  cookieCount?: number
+  error?: string
+  createdAt: string
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  page?: any    // Playwright Page reference — closed after save
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  context?: any // Playwright BrowserContext
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  browser?: any // Playwright Browser
+}
+const connectSessions = new Map<string, ConnectSession>()
+
 interface LogEntry {
   id: string
   level: 'info' | 'success' | 'warning' | 'error'
@@ -142,6 +170,257 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
+// ─── Auto-loop ────────────────────────────────────────────────────────────────
+
+async function runAutoLoop() {
+  if (cycleRunning) {
+    addLog({ level: 'info', message: '[Auto-loop] Skipping — cycle already running' })
+    return
+  }
+
+  lastCheckedAt = new Date().toISOString()
+  lastLoopError = null
+
+  try {
+    const { runAutoBidCycle } = await import('../services/freelancehunt-auto-bid.service')
+    const { getSettings } = await import('../lib/db')
+
+    const settings = await getSettings()
+    if (!settings.enabled) {
+      addLog({ level: 'info', message: '[Auto-loop] Auto-bid disabled in settings — skipping cycle' })
+      return
+    }
+
+    if (settings.emergencyStop) {
+      addLog({ level: 'warning', message: '[Auto-loop] Emergency stop active — skipping cycle' })
+      return
+    }
+
+    cycleRunning = true
+    resetCycleCounters()
+
+    const stepLog = (
+      level: LogEntry['level'],
+      message: string,
+      meta?: Record<string, unknown>
+    ) => {
+      const log = addLog({ level, message: message || '(no message)', meta })
+      cycleLogs.push(log)
+      if (/BID SENT|SUBMITTED/i.test(message)) cycleCounters.submitted++
+      if (/ALREADY_BID|PROJECT_CLOSED/i.test(message)) cycleCounters.skipped++
+      if (/BID FAILED|ERROR/i.test(message)) cycleCounters.failed++
+      const match = message.match(/(\d+)\s+project/i)
+      if (match) cycleCounters.parsed = Number(match[1])
+    }
+    const cycleLogs: LogEntry[] = []
+
+    addLog({ level: 'info', message: `[Auto-loop] Starting cycle at ${lastCheckedAt}` })
+
+    const chatId = process.env.TELEGRAM_CHAT_ID ? Number(process.env.TELEGRAM_CHAT_ID) : undefined
+
+    const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true)
+
+    cycleCounters.submitted = Number(result.bidsSubmitted ?? cycleCounters.submitted)
+    cycleCounters.skipped   = Number(result.bidsSkipped   ?? cycleCounters.skipped)
+    cycleCounters.failed    = Number(result.errors        ?? cycleCounters.failed)
+
+    // Track processed projects so duplicates are never re-submitted
+    if (Array.isArray(result.processedIds)) {
+      for (const id of result.processedIds) processedProjectIds.add(String(id))
+    }
+
+    addLog({
+      level: cycleCounters.submitted > 0 ? 'success' : 'info',
+      message: `[Auto-loop] Cycle done — submitted: ${cycleCounters.submitted} | skipped: ${cycleCounters.skipped} | errors: ${cycleCounters.failed}`,
+    })
+  } catch (err) {
+    lastLoopError = err instanceof Error ? err.message : String(err)
+    addLog({ level: 'error', message: `[Auto-loop] Cycle error: ${lastLoopError}` })
+  } finally {
+    cycleRunning = false
+  }
+}
+
+function startAutoLoop() {
+  if (autoLoopTimer) return
+  autoLoopEnabled = true
+  addLog({ level: 'info', message: `[Auto-loop] Started — interval ${AUTO_LOOP_INTERVAL_MS / 1000}s` })
+  // Run immediately, then on interval
+  runAutoLoop()
+  autoLoopTimer = setInterval(runAutoLoop, AUTO_LOOP_INTERVAL_MS)
+}
+
+function stopAutoLoop() {
+  if (autoLoopTimer) {
+    clearInterval(autoLoopTimer)
+    autoLoopTimer = null
+  }
+  autoLoopEnabled = false
+  addLog({ level: 'warning', message: '[Auto-loop] Stopped' })
+}
+
+// ─── Connect handlers ─────────────────────────────────────────────────────────
+
+async function handleConnectStart(res: http.ServerResponse) {
+  const sessionId = `sess_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`
+
+  const session: ConnectSession = {
+    id: sessionId,
+    status: 'pending',
+    createdAt: new Date().toISOString(),
+  }
+  connectSessions.set(sessionId, session)
+
+  addLog({ level: 'info', message: `[Connect] Starting login session ${sessionId}` })
+
+  // Launch browser async — do not await here so we return the sessionId immediately
+  ;(async () => {
+    try {
+      const { chromium } = await import('playwright')
+      const browser = await chromium.launch({
+        headless: false, // visible so user can log in
+        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+      })
+      const context = await browser.newContext({
+        userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+        locale: 'uk-UA',
+        viewport: { width: 1280, height: 900 },
+      })
+      const page = await context.newPage()
+
+      session.page    = page
+      session.context = context
+      session.browser = browser
+
+      await page.goto('https://freelancehunt.com/login', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+      addLog({ level: 'info', message: `[Connect] Browser opened — waiting for login (session ${sessionId})` })
+
+      // Poll for login completion (check for authenticated page)
+      let polls = 0
+      const maxPolls = 120 // 4 minutes
+      const pollInterval = setInterval(async () => {
+        polls++
+        try {
+          const url = page.url()
+          const html = await page.content().catch(() => '')
+
+          const isLoggedIn =
+            url.includes('/my/') ||
+            url.includes('/freelancer/') ||
+            url.includes('/employer/') ||
+            html.includes('logout') ||
+            html.includes('profile') && !url.includes('/login')
+
+          if (isLoggedIn) {
+            clearInterval(pollInterval)
+            // Extract username from page
+            const username = await page.evaluate(() => {
+              const el =
+                document.querySelector('.header-user-name') ??
+                document.querySelector('[class*="username"]') ??
+                document.querySelector('[class*="user-name"]')
+              return el?.textContent?.trim() ?? ''
+            }).catch(() => '')
+
+            session.status   = 'logged_in'
+            session.username = username || 'authenticated'
+            addLog({ level: 'success', message: `[Connect] Login detected — user: ${session.username}` })
+          } else if (polls >= maxPolls) {
+            clearInterval(pollInterval)
+            session.status = 'error'
+            session.error  = 'Login timeout — user did not log in within 4 minutes'
+            addLog({ level: 'error', message: `[Connect] ${session.error}` })
+            await browser.close().catch(() => {})
+          }
+        } catch (pollErr) {
+          clearInterval(pollInterval)
+          session.status = 'error'
+          session.error  = pollErr instanceof Error ? pollErr.message : String(pollErr)
+          await browser.close().catch(() => {})
+        }
+      }, 2_000)
+
+    } catch (err) {
+      session.status = 'error'
+      session.error  = err instanceof Error ? err.message : String(err)
+      addLog({ level: 'error', message: `[Connect] Browser launch error: ${session.error}` })
+    }
+  })()
+
+  return json(res, 200, { ok: true, sessionId })
+}
+
+function handleConnectStatus(sessionId: string, res: http.ServerResponse) {
+  const session = connectSessions.get(sessionId)
+  if (!session) {
+    return json(res, 404, { ok: false, error: 'Session not found' })
+  }
+  return json(res, 200, {
+    ok: true,
+    status:    session.status,
+    username:  session.username,
+    error:     session.error,
+    createdAt: session.createdAt,
+  })
+}
+
+async function handleConnectSave(sessionId: string, res: http.ServerResponse) {
+  const session = connectSessions.get(sessionId)
+  if (!session) {
+    return json(res, 404, { ok: false, error: 'Session not found' })
+  }
+  if (session.status !== 'logged_in') {
+    return json(res, 400, { ok: false, error: `Cannot save — session status is "${session.status}"` })
+  }
+
+  try {
+    const { context, browser } = session
+
+    // Determine save path
+    const savePath = process.env.FREELANCEHUNT_SESSION_PATH
+      ? process.env.FREELANCEHUNT_SESSION_PATH
+      : path.resolve(process.cwd(), 'storageState.json')
+
+    await context.storageState({ path: savePath })
+    addLog({ level: 'success', message: `[Connect] Session saved to ${savePath}` })
+
+    // Count cookies
+    const state = JSON.parse(fs.readFileSync(savePath, 'utf-8'))
+    const cookieCount = (state.cookies ?? []).length
+
+    session.status      = 'saved'
+    session.cookieCount = cookieCount
+
+    await browser.close().catch(() => {})
+
+    return json(res, 200, {
+      ok: true,
+      username:    session.username,
+      cookieCount,
+      sessionPath: savePath,
+    })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    session.status = 'error'
+    session.error  = message
+    return json(res, 500, { ok: false, error: message })
+  }
+}
+
+async function handleConnectLogout(res: http.ServerResponse) {
+  try {
+    const { resolveSessionPath } = await import('../services/playwright-browser.service')
+    const sessionPath = resolveSessionPath()
+    if (sessionPath && fs.existsSync(sessionPath)) {
+      fs.unlinkSync(sessionPath)
+      addLog({ level: 'info', message: `[Connect] Session file deleted: ${sessionPath}` })
+    }
+    return json(res, 200, { ok: true, message: 'Session cleared' })
+  } catch (err) {
+    return json(res, 500, { ok: false, error: err instanceof Error ? err.message : String(err) })
+  }
+}
+
 async function handleStatus(res: http.ServerResponse) {
   const { sessionExists, resolveSessionPath } = await import('../services/playwright-browser.service')
   const sessionFound = sessionExists()
@@ -155,9 +434,15 @@ async function handleStatus(res: http.ServerResponse) {
     cycleRunning,
     stopRequested,
     counters: { ...cycleCounters },
+    autoLoop: {
+      enabled:       autoLoopEnabled,
+      intervalMs:    AUTO_LOOP_INTERVAL_MS,
+      lastCheckedAt: lastCheckedAt ?? null,
+      lastError:     lastLoopError ?? null,
+    },
     freelancehunt: {
-      connected: sessionFound,
-      authMode: 'playwright_session',
+      connected:   sessionFound,
+      authMode:    'playwright_session',
       sessionPath: sessionPath ?? null,
       error: sessionFound ? undefined : 'storageState.json not found. Run: npm run login:freelancehunt',
     },
@@ -435,6 +720,36 @@ const server = http.createServer(async (req, res) => {
       return await handleGetProjects(url, res)
     }
 
+    // ── Auto-loop control ─────────────────────────────────────────────────────
+    if (method === 'POST' && pathname === '/auto-loop/start') {
+      startAutoLoop()
+      return json(res, 200, { ok: true, message: 'Auto-loop started' })
+    }
+
+    if (method === 'POST' && pathname === '/auto-loop/stop') {
+      stopAutoLoop()
+      return json(res, 200, { ok: true, message: 'Auto-loop stopped' })
+    }
+
+    // ── Freelancehunt connect (browser login) ─────────────────────────────────
+    if (method === 'POST' && pathname === '/connect/freelancehunt/start') {
+      return await handleConnectStart(res)
+    }
+
+    if (method === 'GET' && /^\/connect\/freelancehunt\/status\//.test(pathname)) {
+      const sessionId = decodeURIComponent(pathname.replace('/connect/freelancehunt/status/', ''))
+      return handleConnectStatus(sessionId, res)
+    }
+
+    if (method === 'POST' && /^\/connect\/freelancehunt\/save\//.test(pathname)) {
+      const sessionId = decodeURIComponent(pathname.replace('/connect/freelancehunt/save/', ''))
+      return await handleConnectSave(sessionId, res)
+    }
+
+    if (method === 'POST' && pathname === '/connect/freelancehunt/logout') {
+      return await handleConnectLogout(res)
+    }
+
     return json(res, 404, {
       ok: false,
       error: `Unknown route: ${method} ${pathname}`,
@@ -465,6 +780,22 @@ server.listen(PORT, '0.0.0.0', () => {
         ? `Playwright session loaded — ${resolveSessionPath()}`
         : 'storageState.json not found. Run: npm run login:freelancehunt',
     })
+
+    // Auto-start the background loop when session exists
+    if (found) {
+      import('../lib/db').then(({ getSettings }) => {
+        getSettings().then((settings) => {
+          if (settings.enabled && !settings.emergencyStop) {
+            startAutoLoop()
+          } else {
+            addLog({ level: 'info', message: '[Auto-loop] Not started — auto-bid disabled in DB settings' })
+          }
+        }).catch(() => {
+          // If DB not available yet, start loop anyway and let it check settings per cycle
+          startAutoLoop()
+        })
+      }).catch(() => startAutoLoop())
+    }
   }).catch(() => {})
 
   if (!process.env.OPENAI_API_KEY) {

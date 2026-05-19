@@ -36,10 +36,18 @@ interface IntegrationCheck {
   checkedPaths?: string[];
   cookieCount?: number;
 }
+interface AutoLoopStatus {
+  enabled: boolean;
+  intervalMs: number;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+}
+
 interface StatusData {
   ok: boolean;
   configured: Record<string, boolean>;
   workerMode: boolean;
+  autoLoop?: AutoLoopStatus;
   checks: {
     openai:        IntegrationCheck;
     telegram:      IntegrationCheck;
@@ -90,7 +98,18 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       if (settingsRes.ok) setSettings(settingsRes.data);
       if (logsRes.ok) setRecentLogs(logsRes.data);
       if (bidsRes.ok && bidsRes.data) setRecentBids(bidsRes.data);
-      if (statusRes) setStatus(statusRes);
+      if (statusRes) {
+        // Merge autoLoop from worker status if available
+        if (statusRes.workerMode && statusRes.checks?.freelancehunt?.ok) {
+          try {
+            const workerStatusRes = await fetch('/api/freelancehunt/status').then((r) => r.json()).catch(() => null);
+            if (workerStatusRes?.ok && workerStatusRes.data?.autoLoop) {
+              statusRes.autoLoop = workerStatusRes.data.autoLoop;
+            }
+          } catch { /* ignore */ }
+        }
+        setStatus(statusRes);
+      }
       if (statsRes?.ok && statsRes.data) setRealStats(statsRes.data);
     } finally {
       setLoading(false);
@@ -274,27 +293,60 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
           {/* Worker connected */}
           {status?.workerMode && (
             <div className={cn(
-              'glass-card rounded-2xl p-3 border flex items-center gap-3',
+              'glass-card rounded-2xl p-3 border',
               status.checks.freelancehunt.ok
                 ? 'border-green-500/20 bg-green-500/5'
                 : 'border-red-500/20 bg-red-500/5'
             )}>
-              <span className={cn(
-                'w-2.5 h-2.5 rounded-full flex-shrink-0',
-                status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-red-400'
-              )} />
-              <div className="flex-1 min-w-0">
-                <p className="text-xs font-semibold">
-                  Worker {status.checks.freelancehunt.ok ? 'Connected' : 'Disconnected'}
-                </p>
-                <p className="text-[11px] text-muted-foreground truncate">
-                  {status.checks.freelancehunt.ok
-                    ? `${status.checks.freelancehunt.username ?? 'authenticated'} · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
-                    : (status.checks.freelancehunt.error ?? 'Worker unreachable')}
-                </p>
+              <div className="flex items-center gap-3">
+                <span className={cn(
+                  'w-2.5 h-2.5 rounded-full flex-shrink-0',
+                  status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-red-400'
+                )} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-xs font-semibold">
+                    Freelancehunt {status.checks.freelancehunt.ok ? 'Connected' : 'Disconnected'}
+                  </p>
+                  <p className="text-[11px] text-muted-foreground truncate">
+                    {status.checks.freelancehunt.ok
+                      ? `${status.checks.freelancehunt.username ?? 'authenticated'} · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
+                      : (status.checks.freelancehunt.error ?? 'Worker unreachable')}
+                  </p>
+                </div>
+                {status.checks.freelancehunt.ok && (
+                  <CheckCircle2 size={14} className="text-green-400 flex-shrink-0" />
+                )}
               </div>
-              {status.checks.freelancehunt.ok && (
-                <CheckCircle2 size={14} className="text-green-400 flex-shrink-0" />
+              {/* Auto-loop status row */}
+              {status.autoLoop && (
+                <div className="mt-2 pt-2 border-t border-border/50 flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-1.5">
+                    <span className={cn(
+                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
+                      status.autoLoop.enabled ? 'bg-green-400 animate-pulse' : 'bg-muted-foreground'
+                    )} />
+                    <span className="text-[11px] text-muted-foreground">
+                      Auto-loop {status.autoLoop.enabled ? `running (every ${status.autoLoop.intervalMs / 1000}s)` : 'stopped'}
+                    </span>
+                  </div>
+                  {status.autoLoop.lastCheckedAt && (
+                    <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                      {formatDistanceToNow(new Date(status.autoLoop.lastCheckedAt), { addSuffix: true, locale: uk })}
+                    </span>
+                  )}
+                </div>
+              )}
+              {status.autoLoop?.lastError && (
+                <p className="text-[11px] text-red-400 mt-1.5 leading-snug">{status.autoLoop.lastError}</p>
+              )}
+              {/* Navigate to account page */}
+              {!status.checks.freelancehunt.ok && (
+                <button
+                  onClick={() => { haptic.light(); onNavigate('profile'); }}
+                  className="mt-2 text-[11px] text-primary font-medium flex items-center gap-1"
+                >
+                  Connect account <ArrowRight size={10} />
+                </button>
               )}
             </div>
           )}

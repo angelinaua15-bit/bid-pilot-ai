@@ -9,6 +9,7 @@ import { ProjectsScreen } from '@/components/screens/ProjectsScreen';
 import { AutoBidSettingsScreen } from '@/components/screens/AutoBidSettingsScreen';
 import { LogsScreen } from '@/components/screens/LogsScreen';
 import { HistoryScreen } from '@/components/screens/HistoryScreen';
+import { FreelancehuntProfileScreen } from '@/components/screens/FreelancehuntProfileScreen';
 import type { NavTab } from '@/types';
 
 // ── App shell ────────────────────────────────────────────────────────────────
@@ -84,6 +85,11 @@ function AppShell() {
         {activeTab === 'history' && (
           <div className="h-full fade-in">
             <HistoryScreen />
+          </div>
+        )}
+        {activeTab === 'profile' && (
+          <div className="h-full overflow-y-auto fade-in">
+            <FreelancehuntProfileScreen />
           </div>
         )}
       </main>

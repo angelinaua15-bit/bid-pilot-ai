@@ -1,6 +1,6 @@
 'use client';
 
-import { Home, Search, SlidersHorizontal, ScrollText, Clock } from 'lucide-react';
+import { Home, Search, SlidersHorizontal, ScrollText, Clock, Link2 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 import type { NavTab } from '@/types';
@@ -12,11 +12,11 @@ interface NavItem {
 }
 
 const NAV_ITEMS: NavItem[] = [
-  { id: 'home',     label: 'Dashboard',    icon: Home },
-  { id: 'projects', label: 'Projects',     icon: Search },
-  { id: 'settings', label: 'Settings',     icon: SlidersHorizontal },
-  { id: 'logs',     label: 'Logs',         icon: ScrollText },
-  { id: 'history',  label: 'History',      icon: Clock },
+  { id: 'home',     label: 'Dashboard', icon: Home },
+  { id: 'projects', label: 'Projects',  icon: Search },
+  { id: 'settings', label: 'Settings',  icon: SlidersHorizontal },
+  { id: 'logs',     label: 'Logs',      icon: ScrollText },
+  { id: 'profile',  label: 'Account',   icon: Link2 },
 ];
 
 interface BottomNavigationProps {

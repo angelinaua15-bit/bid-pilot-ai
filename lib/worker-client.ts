@@ -27,9 +27,17 @@ export interface WorkerFreelancehuntStatus {
   error?: string;
 }
 
+export interface WorkerAutoLoopStatus {
+  enabled: boolean;
+  intervalMs: number;
+  lastCheckedAt: string | null;
+  lastError: string | null;
+}
+
 export interface WorkerStatus {
   ok: boolean;
   freelancehunt: WorkerFreelancehuntStatus;
+  autoLoop?: WorkerAutoLoopStatus;
   version?: string;
   uptime?: number;
 }
