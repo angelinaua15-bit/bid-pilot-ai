@@ -8,6 +8,7 @@ import { LoadingState } from '@/components/shared/LoadingState';
 import { EmptyState } from '@/components/shared/EmptyState';
 import type { Project, NavTab } from '@/types';
 import { cn } from '@/lib/utils';
+import { safeText } from '@/lib/safe-text';
 
 const CATEGORIES = ['All', 'Telegram bots', 'AI agents', 'Websites', 'Automation', 'E-commerce'];
 
@@ -56,29 +57,27 @@ export function ProjectsScreen({ onNavigate }: ProjectsScreenProps) {
     'E-commerce':    ['магазин', 'ecommerce', 'shopify', 'woo'],
   };
 
-  const safe = (v: any): string => {
-  if (typeof v === 'string') return v.toLowerCase()
+  const filtered = projects.filter((p) => {
+    const title       = safeText(p.title);
+    const description = safeText(p.description);
+    const category    = safeText(p.category);
+    const q           = search.toLowerCase();
 
-  if (Array.isArray(v)) {
-    return v.join(' ').toLowerCase()
-  }
+    const matchSearch =
+      !search ||
+      title.includes(q) ||
+      description.includes(q) ||
+      category.includes(q);
 
-  if (v === null || v === undefined) {
-    return ''
-  }
+    const matchCat =
+      activeCategory === 'All' ||
+      (CATEGORY_MAP[activeCategory] ?? []).some((kw) =>
+        `${title} ${description} ${category}`.includes(kw.toLowerCase())
+      );
 
-  return String(v).toLowerCase()
-}
-
-const filtered = projects.filter((p) => {
-  const matchSearch =
-    !search ||
-    safe(p.title).includes(search.toLowerCase()) ||
-    safe(p.description).includes(search.toLowerCase()) ||
-    safe(p.category).includes(search.toLowerCase())
-
-  return matchSearch
-})
+    const matchNew = !onlyNew || p.isNew;
+    return matchSearch && matchCat && matchNew;
+  });
 
   return (
     <div className="flex flex-col h-dvh">

@@ -12,18 +12,7 @@
 
 import type { Project, GeneratedBid, CompanyProfile } from '@/types';
 import { companyProfile as defaultProfile } from '@/lib/mock-data';
-
-/**
- * Safely convert any project field value to a lowercase string.
- * Handles: string | string[] | object | null | undefined.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const safe = (v: any): string => {
-  if (typeof v === 'string') return v.toLowerCase();
-  if (Array.isArray(v)) return v.map(String).join(' ').toLowerCase();
-  if (v && typeof v === 'object') return JSON.stringify(v).toLowerCase();
-  return '';
-};
+import { safeText as safe } from '@/lib/safe-text';
 
 // ─── Error class exposed to callers ──────────────────────────────────────────
 

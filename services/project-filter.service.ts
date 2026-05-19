@@ -5,18 +5,7 @@
  */
 
 import type { Project, AutoBidSettings, FreelancerCategory } from '@/types';
-
-/**
- * Safely convert any project field value to a lowercase string.
- * Handles: string | string[] | object | null | undefined.
- */
-// eslint-disable-next-line @typescript-eslint/no-explicit-any
-const safe = (v: any): string => {
-  if (typeof v === 'string') return v.toLowerCase();
-  if (Array.isArray(v)) return v.map(String).join(' ').toLowerCase();
-  if (v && typeof v === 'object') return JSON.stringify(v).toLowerCase();
-  return '';
-};
+import { safeText as safe } from '@/lib/safe-text';
 
 // Category → keywords map for relevance matching
 const CATEGORY_KEYWORDS: Record<FreelancerCategory, string[]> = {
