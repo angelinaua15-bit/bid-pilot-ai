@@ -258,20 +258,18 @@ export async function runAutoBidCycle(
     const projectUrl   = project.projectUrl ?? '';
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
-    // Cross-cycle dedup: skip if already submitted in this worker process run
-    if (
-      globalProcessedIds?.has(project.id) ||
-      (numericId && globalProcessedIds?.has(numericId)) ||
-      alreadyBidIds.has(project.id) ||
-      (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))
-    ) {
-      log(logs, 'info',
-        `[${i + 1}/${filtered.length}] SKIP (already processed): "${projectTitle}"`,
-        { projectId: project.id, projectTitle }
-      );
-      bidsSkipped++;
-      continue;
-    }
+    // ── DEBUG: all filters disabled — force bid on every project ────────────
+    // shouldBid() returns true unconditionally.
+    // alreadyBidIds and globalProcessedIds dedup are DISABLED.
+    // Remove this block when debugging is complete.
+    log(logs, 'info',
+      `[DEBUG][${i + 1}/${filtered.length}] shouldBid=true (all filters OFF) ` +
+      `| id=${project.id} | title="${projectTitle}" | url=${projectUrl} ` +
+      `| budget=${project.budget} ${project.currency} | skills=${(project.skills ?? []).join(',')}`,
+      { projectId: project.id, projectTitle }
+    );
+
+    // ── END DEBUG BLOCK ────────────────────────────────────────────────────
 
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Processing: "${projectTitle}" — ${projectUrl}`,
@@ -385,7 +383,7 @@ export async function runAutoBidCycle(
         });
 
         log(logs, 'success',
-          `BID SENT [${i + 1}/${filtered.length}] — via ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | "${projectTitle}"`,
+          `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | url: ${projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
             meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy },
@@ -425,7 +423,7 @@ export async function runAutoBidCycle(
 
       if (isApiSkip) {
         log(logs, 'warning',
-          `[${i + 1}/${filtered.length}] SKIP (API reason): "${projectTitle}" — ${msg.slice(0, 200)}`,
+          `SKIPPED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | reason: ${msg.slice(0, 300)} | url: ${projectUrl}`,
           { projectId: project.id, projectTitle, meta: { projectUrl, reason: msg } }
         );
         bidsSkipped++;
@@ -435,9 +433,9 @@ export async function runAutoBidCycle(
         continue;
       }
 
-      // All other errors: log full API response, count as failure, continue to next project
+      // All other errors: log full error, count as failure, continue to next project
       log(logs, 'error',
-        `[${i + 1}/${filtered.length}] BID FAILED: "${projectTitle}" — ${msg}`,
+        `FAILED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | error: ${msg} | url: ${projectUrl}`,
         { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
       );
       errors++;
