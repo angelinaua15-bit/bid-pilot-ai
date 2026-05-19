@@ -1,386 +1,214 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect } from 'react';
 import {
   Shield, CheckCircle2, XCircle, Loader2,
-  Monitor, RefreshCw, Globe, AlertTriangle,
-  ArrowRight,
+  RefreshCw, AlertTriangle, Monitor, ArrowRight,
 } from 'lucide-react';
 import { haptic } from '@/lib/telegram';
 import { cn } from '@/lib/utils';
 
 type Step =
-  | 'idle'          // not started yet
-  | 'starting'      // POST /api/connect/freelancehunt in flight
-  | 'waiting'       // browser opened, polling for login
-  | 'logged_in'     // user is logged in, ready to save
-  | 'saving'        // POST ?action=save in flight
-  | 'saved'         // success
-  | 'error';        // something went wrong
+  | 'idle'        // initial state before first check
+  | 'checking'    // verifying session via API
+  | 'valid'       // session verified successfully
+  | 'expired'     // session expired — needs re-login
+  | 'missing'     // storageState.json not found
+  | 'error';      // unexpected error
 
 interface FreelancehuntConnectScreenProps {
   onConnected: () => void;
   onSkip: () => void;
 }
 
-const STEP_LABELS: Record<Step, string> = {
-  idle:       'Підключення Freelancehunt',
-  starting:   'Відкриваємо браузер...',
-  waiting:    'Очікуємо вхід...',
-  logged_in:  'Вхід виявлено!',
-  saving:     'Зберігаємо сесію...',
-  saved:      'Акаунт підключено!',
-  error:      'Помилка підключення',
-};
-
 export function FreelancehuntConnectScreen({ onConnected, onSkip }: FreelancehuntConnectScreenProps) {
   const [step, setStep]             = useState<Step>('idle');
-  const [sessionId, setSessionId]   = useState<string | null>(null);
   const [username, setUsername]     = useState<string | undefined>();
-  const [cookieCount, setCookieCount] = useState<number | undefined>();
   const [errorMsg, setErrorMsg]     = useState<string | undefined>();
-  const [workerAvailable, setWorkerAvailable] = useState<boolean | null>(null);
-  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const [sessionPath, setSessionPath] = useState<string | undefined>();
 
-  // Check if worker is reachable on mount
+  // Auto-verify on mount — no manual "Open browser" step needed
   useEffect(() => {
-    fetch('/api/status')
-      .then((r) => r.json())
-      .then((d) => setWorkerAvailable(d.workerMode === true))
-      .catch(() => setWorkerAvailable(false));
+    handleVerify();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Poll /api/connect/freelancehunt?session=<id> while in 'waiting' state
-  useEffect(() => {
-    if (step !== 'waiting' || !sessionId) return;
-
-    pollRef.current = setInterval(async () => {
-      try {
-        const res = await fetch(`/api/connect/freelancehunt?session=${encodeURIComponent(sessionId)}`);
-        const data = await res.json();
-
-        if (!data.ok) {
-          stopPolling();
-          setErrorMsg(data.error ?? 'Worker повернув помилку');
-          setStep('error');
-          haptic.error();
-          return;
-        }
-
-        if (data.status === 'logged_in') {
-          stopPolling();
-          setUsername(data.username);
-          setStep('logged_in');
-          haptic.success();
-        } else if (data.status === 'error') {
-          stopPolling();
-          setErrorMsg(data.error ?? 'Невідома помилка');
-          setStep('error');
-          haptic.error();
-        }
-        // 'pending' → keep polling
-      } catch {
-        // transient network error — keep polling
-      }
-    }, 2500);
-
-    return stopPolling;
-  }, [step, sessionId]);
-
-  function stopPolling() {
-    if (pollRef.current) {
-      clearInterval(pollRef.current);
-      pollRef.current = null;
-    }
-  }
-
-  async function handleStart() {
+  async function handleVerify() {
     haptic.medium();
-    setStep('starting');
+    setStep('checking');
     setErrorMsg(undefined);
 
     try {
-      const res = await fetch('/api/connect/freelancehunt', { method: 'POST' });
-      const data = await res.json();
-
-      if (!data.ok || !data.sessionId) {
-        setErrorMsg(data.error ?? 'Не вдалося запустити браузер');
-        setStep('error');
-        haptic.error();
-        return;
-      }
-
-      setSessionId(data.sessionId);
-      setStep('waiting');
-    } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Помилка підключення');
-      setStep('error');
-      haptic.error();
-    }
-  }
-
-  async function handleSave() {
-    if (!sessionId) return;
-    haptic.medium();
-    setStep('saving');
-
-    try {
-      const res = await fetch('/api/connect/freelancehunt?action=save', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ sessionId }),
-      });
+      const res = await fetch('/api/freelancehunt/status');
       const data = await res.json();
 
       if (!data.ok) {
-        setErrorMsg(data.error ?? 'Не вдалося зберегти сесію');
+        setErrorMsg(data.error ?? 'Cannot reach worker');
         setStep('error');
         haptic.error();
         return;
       }
 
-      setUsername(data.username);
-      setCookieCount(data.cookieCount);
-      setStep('saved');
+      const fh = data.data ?? data;
+      setSessionPath(fh.sessionPath ?? undefined);
+
+      if (!fh.connected) {
+        const errMsg: string = typeof fh.error === 'string' ? fh.error.toLowerCase() : '';
+        if (errMsg.includes('not found') || errMsg.includes('missing')) {
+          setStep('missing');
+        } else if (errMsg.includes('expired')) {
+          setStep('expired');
+        } else {
+          setStep('missing');
+        }
+        haptic.error();
+        return;
+      }
+
+      setUsername(fh.username);
+      setStep('valid');
       haptic.success();
-      setTimeout(() => onConnected(), 1500);
+      setTimeout(() => onConnected(), 1200);
     } catch (err) {
-      setErrorMsg(err instanceof Error ? err.message : 'Помилка збереження');
+      setErrorMsg(err instanceof Error ? err.message : 'Connection error');
       setStep('error');
       haptic.error();
     }
   }
 
-  function handleRetry() {
-    stopPolling();
-    setStep('idle');
-    setSessionId(null);
-    setErrorMsg(undefined);
-    setUsername(undefined);
-  }
-
-  const isWorking = step === 'starting' || step === 'waiting' || step === 'saving';
+  const isChecking = step === 'checking' || step === 'idle';
 
   return (
     <div className="flex flex-col min-h-dvh px-5 pt-6 pb-28 fade-in">
 
       {/* Header */}
-      <h1 className="text-xl font-bold mb-1">Підключення Freelancehunt</h1>
+      <h1 className="text-xl font-bold mb-1">Freelancehunt Session</h1>
       <p className="text-sm text-muted-foreground mb-6 leading-relaxed">
-        Увійдіть у Freelancehunt у браузері на вашому Mac&nbsp;— жодних паролів у застосунку.
+        Auto-bid runs through the local Playwright browser using your saved session.
+        No manual login required.
       </p>
 
-      {/* Worker not configured */}
-      {workerAvailable === false && (
-        <div className="glass-card p-4 rounded-2xl mb-5 border border-yellow-500/20 bg-yellow-500/5 flex items-start gap-3">
-          <AlertTriangle size={18} className="text-yellow-400 flex-shrink-0 mt-0.5" />
-          <div>
-            <p className="text-sm font-semibold text-yellow-400 mb-1">Worker не підключено</p>
-            <p className="text-xs text-muted-foreground leading-relaxed mb-2">
-              Для підключення Freelancehunt потрібен локальний worker на вашому Mac.
-            </p>
-            <code className="text-[11px] font-mono text-foreground bg-secondary px-2 py-1 rounded block">
-              npm run worker
-            </code>
-            <p className="text-[11px] text-muted-foreground mt-2">
-              Потім задайте <code className="font-mono">AUTOMATION_WORKER_URL</code> у Vercel.
-            </p>
-          </div>
+      {/* Local-only mode badge */}
+      <div className="glass-card p-3 rounded-2xl mb-4 border border-primary/20 bg-primary/5 flex items-center gap-2.5">
+        <Monitor size={15} className="text-primary flex-shrink-0" />
+        <div>
+          <p className="text-xs font-semibold text-primary">Local-only mode</p>
+          <p className="text-[11px] text-muted-foreground">Recommended for stable Freelancehunt automation</p>
         </div>
-      )}
+      </div>
 
-      {/* Status card */}
-      {step === 'error' && (
-        <div className="glass-card p-4 rounded-2xl mb-5 border border-destructive/30 bg-destructive/10 flex items-start gap-3">
-          <XCircle size={18} className="text-destructive flex-shrink-0 mt-0.5" />
+      {/* Session status card */}
+      <div className={cn(
+        'glass-card p-4 rounded-2xl border mb-4 transition-all',
+        step === 'valid'                  && 'border-green-500/30 bg-green-500/5',
+        step === 'missing'                && 'border-yellow-500/20 bg-yellow-500/5',
+        step === 'expired'                && 'border-red-500/20 bg-red-500/5',
+        step === 'error'                  && 'border-destructive/30 bg-destructive/10',
+        (step === 'idle' || isChecking)   && 'border-border',
+      )}>
+        <div className="flex items-center gap-3">
+          <div className={cn(
+            'w-10 h-10 rounded-2xl flex items-center justify-center flex-shrink-0',
+            step === 'valid'   && 'bg-green-500/20',
+            step === 'missing' && 'bg-yellow-500/15',
+            step === 'expired' && 'bg-red-500/15',
+            step === 'error'   && 'bg-destructive/15',
+            isChecking         && 'bg-secondary',
+          )}>
+            {isChecking        && <Loader2 size={18} className="text-primary animate-spin" />}
+            {step === 'valid'  && <CheckCircle2 size={18} className="text-green-400" />}
+            {step === 'missing'&& <AlertTriangle size={18} className="text-yellow-400" />}
+            {step === 'expired'&& <XCircle size={18} className="text-red-400" />}
+            {step === 'error'  && <XCircle size={18} className="text-destructive" />}
+          </div>
           <div className="flex-1 min-w-0">
-            <p className="text-sm font-semibold">Помилка</p>
-            <p className="text-xs text-muted-foreground mt-0.5 break-words">{errorMsg}</p>
-          </div>
-        </div>
-      )}
-
-      {step === 'saved' && (
-        <div className="glass-card p-4 rounded-2xl mb-5 border border-green-500/30 bg-green-500/10 flex items-center gap-3">
-          <CheckCircle2 size={20} className="text-green-400 flex-shrink-0" />
-          <div>
-            <p className="text-sm font-semibold">Підключено успішно!</p>
-            {username && <p className="text-xs text-muted-foreground">@{username}{cookieCount ? ` · ${cookieCount} cookies` : ''}</p>}
-          </div>
-        </div>
-      )}
-
-      {/* Flow steps */}
-      <div className="flex flex-col gap-3 mb-6">
-
-        {/* Step 1 */}
-        <div className={cn(
-          'glass-card p-4 rounded-2xl border transition-all',
-          step === 'idle' || step === 'starting' ? 'border-primary/30' : 'border-border opacity-60'
-        )}>
-          <div className="flex items-center gap-3">
-            <div className={cn(
-              'w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0',
-              step === 'starting' ? 'bg-primary/20' : 'bg-secondary'
+            <p className={cn(
+              'text-sm font-semibold',
+              step === 'valid'   && 'text-green-400',
+              step === 'missing' && 'text-yellow-400',
+              step === 'expired' && 'text-red-400',
+              step === 'error'   && 'text-destructive',
             )}>
-              {step === 'starting'
-                ? <Loader2 size={16} className="text-primary animate-spin" />
-                : <Monitor size={16} className="text-muted-foreground" />
-              }
-            </div>
-            <div>
-              <p className="text-sm font-semibold">Відкрити браузер</p>
-              <p className="text-xs text-muted-foreground">Worker запустить Chromium на вашому Mac</p>
-            </div>
-          </div>
-        </div>
-
-        {/* Step 2 */}
-        <div className={cn(
-          'glass-card p-4 rounded-2xl border transition-all',
-          step === 'waiting' ? 'border-primary/30' :
-          step === 'logged_in' || step === 'saving' || step === 'saved' ? 'border-green-500/20 opacity-80' :
-          'border-border opacity-40'
-        )}>
-          <div className="flex items-center gap-3">
-            <div className={cn(
-              'w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0',
-              step === 'waiting' ? 'bg-primary/20' :
-              (step === 'logged_in' || step === 'saving' || step === 'saved') ? 'bg-green-500/20' :
-              'bg-secondary'
-            )}>
-              {step === 'waiting' ? (
-                <RefreshCw size={16} className="text-primary animate-spin" />
-              ) : (step === 'logged_in' || step === 'saving' || step === 'saved') ? (
-                <CheckCircle2 size={16} className="text-green-400" />
-              ) : (
-                <Globe size={16} className="text-muted-foreground" />
-              )}
-            </div>
-            <div className="flex-1 min-w-0">
-              <p className="text-sm font-semibold">Увійдіть на Freelancehunt</p>
-              <p className="text-xs text-muted-foreground">
-                {step === 'waiting'
-                  ? 'Очікуємо вхід у браузері...'
-                  : (step === 'logged_in' || step === 'saving' || step === 'saved')
-                    ? `Вхід виявлено${username ? ` — ${username}` : ''}!`
-                    : 'Введіть логін і пароль у браузері'}
-              </p>
-            </div>
-          </div>
-        </div>
-
-        {/* Step 3 */}
-        <div className={cn(
-          'glass-card p-4 rounded-2xl border transition-all',
-          step === 'logged_in' ? 'border-primary/30' :
-          step === 'saved' ? 'border-green-500/20 opacity-80' :
-          'border-border opacity-40'
-        )}>
-          <div className="flex items-center gap-3">
-            <div className={cn(
-              'w-8 h-8 rounded-xl flex items-center justify-center flex-shrink-0',
-              step === 'saving' ? 'bg-primary/20' :
-              step === 'saved' ? 'bg-green-500/20' :
-              'bg-secondary'
-            )}>
-              {step === 'saving' ? (
-                <Loader2 size={16} className="text-primary animate-spin" />
-              ) : step === 'saved' ? (
-                <CheckCircle2 size={16} className="text-green-400" />
-              ) : (
-                <Shield size={16} className="text-muted-foreground" />
-              )}
-            </div>
-            <div>
-              <p className="text-sm font-semibold">Зберегти сесію</p>
-              <p className="text-xs text-muted-foreground">Cookies зберігаються на вашому Mac</p>
-            </div>
+              {isChecking        && 'Verifying session...'}
+              {step === 'valid'  && `Logged in${username ? ` — ${username}` : ''}`}
+              {step === 'missing'&& 'storageState.json not found'}
+              {step === 'expired'&& 'Session expired'}
+              {step === 'error'  && 'Error'}
+            </p>
+            <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+              {isChecking        && 'Opening freelancehunt.com/my/ to verify...'}
+              {step === 'valid'  && (sessionPath ? sessionPath.split('/').pop() : 'storageState.json')}
+              {step === 'missing'&& 'Run: npm run login:freelancehunt locally, then redeploy'}
+              {step === 'expired'&& 'Re-run: npm run login:freelancehunt to refresh the session'}
+              {step === 'error'  && (errorMsg ?? 'Unexpected error')}
+            </p>
           </div>
         </div>
       </div>
 
-      {/* Security notice */}
-      <div className="glass-card p-4 rounded-2xl flex gap-3 mb-6">
-        <Shield size={16} className="text-primary flex-shrink-0 mt-0.5" />
-        <p className="text-xs text-muted-foreground leading-relaxed">
-          Пароль не передається в застосунок. Файл сесії зберігається локально на вашому Mac і ніколи не завантажується на сервер.
+      {/* Setup instructions when session is missing or expired */}
+      {(step === 'missing' || step === 'expired') && (
+        <div className="glass-card p-4 rounded-2xl mb-4 flex flex-col gap-2.5">
+          <p className="text-xs font-semibold">How to create a session</p>
+          {[
+            { n: 1, text: <>Run <code className="font-mono text-foreground bg-secondary px-1.5 py-0.5 rounded">npm run login:freelancehunt</code> locally</> },
+            { n: 2, text: 'Log in to Freelancehunt in the browser that opens' },
+            { n: 3, text: <><kbd className="font-mono text-foreground bg-secondary px-1 py-0.5 rounded text-[10px]">ENTER</kbd> — <code className="font-mono text-foreground bg-secondary px-1.5 py-0.5 rounded">storageState.json</code> is saved automatically</> },
+            { n: 4, text: 'Commit the file and redeploy to Railway' },
+          ].map(({ n, text }) => (
+            <div key={n} className="flex items-start gap-2">
+              <span className="w-5 h-5 rounded-full bg-primary/15 text-primary text-[10px] font-bold flex items-center justify-center flex-shrink-0 mt-0.5">{n}</span>
+              <p className="text-[11px] text-muted-foreground leading-relaxed">{text}</p>
+            </div>
+          ))}
+        </div>
+      )}
+
+      {/* Security note */}
+      <div className="glass-card p-3 rounded-2xl flex gap-2.5 mb-6">
+        <Shield size={13} className="text-primary flex-shrink-0 mt-0.5" />
+        <p className="text-[11px] text-muted-foreground leading-relaxed">
+          Your password is never stored. Only browser session cookies in{' '}
+          <code className="font-mono text-foreground">storageState.json</code> are used.
         </p>
       </div>
 
       {/* Actions */}
       <div className="flex flex-col gap-3 mt-auto">
-
-        {/* Start button */}
-        {(step === 'idle' || step === 'error') && (
+        {step === 'valid' && (
           <button
-            onClick={step === 'error' ? handleRetry : handleStart}
-            disabled={workerAvailable === false}
-            className={cn(
-              'w-full py-4 rounded-2xl font-semibold text-sm transition-all active:scale-95 flex items-center justify-center gap-2',
-              workerAvailable !== false
-                ? 'bg-primary text-primary-foreground brand-glow'
-                : 'bg-secondary text-muted-foreground cursor-not-allowed'
-            )}
-          >
-            {step === 'error' ? (
-              <><RefreshCw size={16} />Спробувати ще раз</>
-            ) : (
-              <><Monitor size={16} />Відкрити браузер для входу</>
-            )}
-          </button>
-        )}
-
-        {/* Waiting — show status */}
-        {step === 'waiting' && (
-          <div className="w-full py-4 rounded-2xl bg-secondary flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <RefreshCw size={14} className="animate-spin" />
-            Очікуємо вхід у браузері...
-          </div>
-        )}
-
-        {/* Starting */}
-        {step === 'starting' && (
-          <div className="w-full py-4 rounded-2xl bg-secondary flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" />
-            Відкриваємо браузер...
-          </div>
-        )}
-
-        {/* Confirm save */}
-        {step === 'logged_in' && (
-          <button
-            onClick={handleSave}
+            onClick={onConnected}
             className="w-full py-4 rounded-2xl font-semibold text-sm bg-green-500 text-white transition-all active:scale-95 flex items-center justify-center gap-2 brand-glow"
           >
             <CheckCircle2 size={16} />
-            Зберегти сесію та продовжити
+            Continue to Dashboard
             <ArrowRight size={16} />
           </button>
         )}
 
-        {/* Saving */}
-        {step === 'saving' && (
-          <div className="w-full py-4 rounded-2xl bg-secondary flex items-center justify-center gap-2 text-sm text-muted-foreground">
-            <Loader2 size={14} className="animate-spin" />
-            Зберігаємо сесію...
-          </div>
+        {(step === 'missing' || step === 'expired' || step === 'error') && (
+          <button
+            onClick={handleVerify}
+            className="w-full py-4 rounded-2xl font-semibold text-sm bg-primary text-primary-foreground transition-all active:scale-95 flex items-center justify-center gap-2 brand-glow"
+          >
+            <RefreshCw size={15} />
+            Re-check session
+          </button>
         )}
 
-        {/* Saved */}
-        {step === 'saved' && (
-          <div className="w-full py-4 rounded-2xl bg-green-500/10 border border-green-500/20 flex items-center justify-center gap-2 text-sm text-green-400 font-semibold">
-            <CheckCircle2 size={16} />
-            Підключено! Переходимо...
+        {isChecking && (
+          <div className="w-full py-4 rounded-2xl bg-secondary flex items-center justify-center gap-2 text-sm text-muted-foreground">
+            <Loader2 size={14} className="animate-spin" />
+            Verifying session...
           </div>
         )}
 
         <button
           onClick={() => { haptic.light(); onSkip(); }}
-          disabled={isWorking}
+          disabled={isChecking}
           className="w-full py-3 text-sm text-muted-foreground font-medium disabled:opacity-40"
         >
-          Пропустити, підключити пізніше
+          Skip, connect later
         </button>
       </div>
     </div>
