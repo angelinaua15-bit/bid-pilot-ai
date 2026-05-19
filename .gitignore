@@ -19,3 +19,6 @@ node_modules
 # Playwright session — contains auth cookies, never commit
 storageState.json
 /tmp/fh-error-*.png
+
+# npm lockfile — this project uses pnpm; package-lock.json must not be committed
+package-lock.json
