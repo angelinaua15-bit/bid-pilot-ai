@@ -22,98 +22,64 @@ export type BidLogFn = (level: BidLogLevel, message: string) => void;
 
 const noop: BidLogFn = () => {};
 
-// ─── Session resolution ───────────────────────────────────────────────────────
+// ─── Single canonical storageState path ──────────────────────────────────────
+// Computed once at module load using path.resolve(process.cwd(), ...).
+// Never uses relative paths like "./storageState.json" or "../storageState.json".
 
-/**
- * Resolve the storageState.json path using `path.resolve(process.cwd(), ...)`.
- * Never uses relative paths ("./...") — always absolute.
- * Search order:
- *   1. FREELANCEHUNT_SESSION_PATH env var (explicit override)
- *   2. <cwd>/storageState.json  ← primary: project root on Railway
- *   3. /tmp/storageState.json   ← fallback for ephemeral containers
- */
-export function resolveSessionPath(): string | null {
-  const cwd = process.cwd();
-  const primary = path.resolve(cwd, 'storageState.json');
+const storageStatePath: string = process.env.FREELANCEHUNT_SESSION_PATH
+  ? path.resolve(process.env.FREELANCEHUNT_SESSION_PATH)
+  : path.resolve(process.cwd(), 'storageState.json');
 
-  const candidates: string[] = [
-    ...(process.env.FREELANCEHUNT_SESSION_PATH ? [process.env.FREELANCEHUNT_SESSION_PATH] : []),
-    primary,
-    '/tmp/storageState.json',
-  ];
+// Emit diagnostic logs immediately at module load so they appear in Railway logs
+// even before any function is called.
+console.log('cwd:', process.cwd());
+console.log('storageStatePath:', storageStatePath);
+console.log('storageState exists:', fs.existsSync(storageStatePath));
 
-  // Log diagnostic info on every resolution attempt (visible in Railway logs)
-  console.log('[Playwright] resolveSessionPath — cwd:', cwd);
-  console.log('[Playwright] resolveSessionPath — primary path:', primary);
-  console.log('[Playwright] resolveSessionPath — primary exists:', fs.existsSync(primary));
+// ─── Public helpers ───────────────────────────────────────────────────────────
 
-  for (const p of candidates) {
-    try {
-      if (fs.existsSync(p)) {
-        console.log('[Playwright] resolveSessionPath — resolved to:', p);
-        return p;
-      }
-    } catch {
-      // ignore permission errors
-    }
-  }
-
-  console.log('[Playwright] resolveSessionPath — NOT FOUND. Candidates checked:', candidates);
-  return null;
+export function resolveSessionPath(): string {
+  return storageStatePath;
 }
 
 export function sessionExists(): boolean {
-  return resolveSessionPath() !== null;
+  return fs.existsSync(storageStatePath);
 }
 
 // ─── Persistent browser + context (reused across bids in one worker process) ──
 
 let _browser: Browser | null = null;
 let _context: BrowserContext | null = null;
-let _sessionPath: string | null = null; // track which session is loaded
 
 async function getContext(log: BidLogFn): Promise<BrowserContext> {
-  const cwd = process.cwd();
-  const storageStatePath = path.resolve(cwd, 'storageState.json');
-  const exists = fs.existsSync(storageStatePath);
-
-  console.log('cwd:', cwd);
+  // Log every time we enter getContext so Railway shows the path in context
+  console.log('cwd:', process.cwd());
   console.log('storageStatePath:', storageStatePath);
-  console.log('storageState exists:', exists);
+  console.log('storageState exists:', fs.existsSync(storageStatePath));
 
-  log('info', `[Playwright] getContext — cwd: ${cwd}`);
   log('info', `[Playwright] getContext — storageStatePath: ${storageStatePath}`);
-  log('info', `[Playwright] getContext — fs.existsSync(storageStatePath): ${exists}`);
+  log('info', `[Playwright] getContext — exists: ${fs.existsSync(storageStatePath)}`);
 
-  const sessionPath = resolveSessionPath();
-  if (!sessionPath) {
+  if (!fs.existsSync(storageStatePath)) {
     throw new Error(
-      `SESSION_MISSING: storageState.json not found. ` +
-      `cwd=${cwd} | primary=${storageStatePath} | exists=${exists}. ` +
+      `SESSION_MISSING: storageState.json not found at ${storageStatePath}. ` +
       `Run: npm run login:freelancehunt`
     );
   }
 
-  // Re-create context if session file changed or browser disconnected
-  const sessionChanged = _sessionPath !== sessionPath;
+  // Re-create context if browser disconnected
   if (_browser && !_browser.isConnected()) {
     _browser = null;
     _context = null;
   }
 
-  if (!_browser || !_context || sessionChanged) {
-    // Close stale context/browser first
+  if (!_browser || !_context) {
     await _context?.close().catch(() => {});
     await _browser?.close().catch(() => {});
     _context = null;
     _browser = null;
 
-    const resolvedStorageState = path.resolve(process.cwd(), 'storageState.json');
-    console.log('cwd:', process.cwd());
-    console.log('storageStatePath:', resolvedStorageState);
-    console.log('storageState exists:', fs.existsSync(resolvedStorageState));
-    log('info', `[Playwright] Loading session — resolved path: ${resolvedStorageState}`);
-    log('info', `[Playwright] Session file exists: ${fs.existsSync(resolvedStorageState)}`);
+    log('info', `[Playwright] Launching browser — loading session from: ${storageStatePath}`);
 
     const { chromium } = await import('playwright');
     _browser = await chromium.launch({
@@ -130,7 +96,7 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
     });
 
     _context = await _browser.newContext({
-      storageState: resolvedStorageState,
+      storageState: storageStatePath,
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -138,8 +104,7 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
       viewport: { width: 1280, height: 900 },
     });
 
-    _sessionPath = resolvedStorageState;
-    log('info', `[Playwright] Session loaded — browser context created from ${resolvedStorageState}`);
+    log('info', `[Playwright] Session loaded — browser context created from ${storageStatePath}`);
   }
 
   return _context;
@@ -150,7 +115,6 @@ export async function closeBrowser(): Promise<void> {
   await _browser?.close().catch(() => {});
   _context = null;
   _browser = null;
-  _sessionPath = null;
 }
 
 // ─── Session verification ─────────────────────────────────────────────────────
@@ -191,7 +155,6 @@ export async function verifySession(log: BidLogFn = noop): Promise<SessionVerify
       return { valid: false, reason: 'SESSION_EXPIRED: redirected to login page' };
     }
 
-    // Extract username
     const username = await page.evaluate(() => {
       const selectors = [
         '.header-user-name',
@@ -238,26 +201,23 @@ export async function submitBidViaPlaywright(
   const log = opts.logFn ?? noop;
   const screenshotPath = `/tmp/fh-bid-${Date.now()}.png`;
 
-  // ── 1. Get shared context (loads session once per process) ─────────────────
   const context = await getContext(log);
   const page = await context.newPage();
 
   try {
-    // ── 2. Navigate to project page ──────────────────────────────────────────
+    // ── 1. Navigate to project page ──────────────────────────────────────────
     log('info', `[Playwright] Project parsed — navigating to: ${opts.projectUrl}`);
     await page.goto(opts.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
     const finalUrl = page.url();
-
-    // Session expired mid-cycle
     if (finalUrl.includes('/login') || finalUrl.includes('/auth')) {
-      _context = null; // force context re-creation on next bid
+      _context = null;
       throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
     }
 
     log('info', `[Playwright] Page loaded: ${await page.title()}`);
 
-    // ── 3. Detect unavailable states ─────────────────────────────────────────
+    // ── 2. Detect unavailable states ─────────────────────────────────────────
     const pageText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
 
     const closedPhrases = [
@@ -265,9 +225,7 @@ export async function submitBidViaPlaywright(
       'project completed', 'завершено', 'виконано',
     ];
     for (const phrase of closedPhrases) {
-      if (pageText.includes(phrase)) {
-        throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
-      }
+      if (pageText.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
     }
 
     const alreadyPhrases = [
@@ -275,12 +233,10 @@ export async function submitBidViaPlaywright(
       'ваша заявка', 'заявку подано', 'відгук надіслано',
     ];
     for (const phrase of alreadyPhrases) {
-      if (pageText.includes(phrase)) {
-        throw new Error(`ALREADY_BID: "${phrase}" found on page`);
-      }
+      if (pageText.includes(phrase)) throw new Error(`ALREADY_BID: "${phrase}" found on page`);
     }
 
-    // ── 4. Find and click the bid/apply button ───────────────────────────────
+    // ── 3. Click bid button ───────────────────────────────────────────────────
     log('info', '[Playwright] Looking for bid button...');
 
     const bidButtonSelectors = [
@@ -307,13 +263,10 @@ export async function submitBidViaPlaywright(
           bidButtonClicked = true;
           break;
         }
-      } catch {
-        // try next selector
-      }
+      } catch { /* try next */ }
     }
 
     if (!bidButtonClicked) {
-      // Form might already be visible inline
       const inlineFormVisible = await page
         .locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="пропоз"]')
         .first()
@@ -322,14 +275,12 @@ export async function submitBidViaPlaywright(
 
       if (!inlineFormVisible) {
         await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-        throw new Error(
-          `FORM_NOT_FOUND: No bid button or inline form found on ${opts.projectUrl}. Screenshot: ${screenshotPath}`
-        );
+        throw new Error(`FORM_NOT_FOUND: No bid button or inline form found on ${opts.projectUrl}. Screenshot: ${screenshotPath}`);
       }
       log('info', '[Playwright] Bid form already visible inline');
     }
 
-    // ── 5. Wait for bid form ─────────────────────────────────────────────────
+    // ── 4. Wait for textarea ──────────────────────────────────────────────────
     log('info', '[Playwright] Waiting for bid form...');
 
     const textareaSelectors = [
@@ -355,33 +306,25 @@ export async function submitBidViaPlaywright(
           log('info', `[Playwright] Textarea found: "${sel}"`);
           break;
         }
-      } catch {
-        // try next
-      }
+      } catch { /* try next */ }
     }
 
     if (!textarea) {
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      throw new Error(
-        `FORM_NOT_FOUND: Textarea not visible after clicking bid button. Screenshot: ${screenshotPath}`
-      );
+      throw new Error(`FORM_NOT_FOUND: Textarea not visible after clicking bid button. Screenshot: ${screenshotPath}`);
     }
 
-    // ── 6. Fill proposal text ────────────────────────────────────────────────
+    // ── 5. Fill proposal ──────────────────────────────────────────────────────
     log('info', `[Playwright] Filling proposal — ${opts.text.length} chars`);
     await textarea.fill(opts.text);
 
-    // ── 7. Fill budget ────────────────────────────────────────────────────────
+    // ── 6. Fill budget ────────────────────────────────────────────────────────
     const budgetAmount = Math.max(1, Math.round(opts.budget));
     const budgetSelectors = [
-      'input[name="amount"]',
-      'input[name="budget"]',
-      'input[name="price"]',
-      'input[placeholder*="грн"]',
-      'input[placeholder*="бюджет"]',
+      'input[name="amount"]', 'input[name="budget"]', 'input[name="price"]',
+      'input[placeholder*="грн"]', 'input[placeholder*="бюджет"]',
       'input[placeholder*="вартість"]',
-      '.bid-form input[type="number"]',
-      '.modal input[type="number"]',
+      '.bid-form input[type="number"]', '.modal input[type="number"]',
       '[role="dialog"] input[type="number"]',
     ];
 
@@ -395,23 +338,15 @@ export async function submitBidViaPlaywright(
           budgetFilled = true;
           break;
         }
-      } catch {
-        // try next
-      }
+      } catch { /* try next */ }
     }
+    if (!budgetFilled) log('warning', '[Playwright] Budget field not found — continuing without budget');
 
-    if (!budgetFilled) {
-      log('warning', '[Playwright] Budget field not found — continuing without budget');
-    }
-
-    // ── 8. Fill deadline days ─────────────────────────────────────────────────
+    // ── 7. Fill deadline ──────────────────────────────────────────────────────
     const daysAmount = Math.max(1, Math.round(opts.days));
     const daysSelectors = [
-      'input[name="days"]',
-      'input[name="deadline"]',
-      'input[name="term"]',
-      'input[placeholder*="днів"]',
-      'input[placeholder*="термін"]',
+      'input[name="days"]', 'input[name="deadline"]', 'input[name="term"]',
+      'input[placeholder*="днів"]', 'input[placeholder*="термін"]',
       'input[placeholder*="дні"]',
     ];
 
@@ -425,16 +360,11 @@ export async function submitBidViaPlaywright(
           daysFilled = true;
           break;
         }
-      } catch {
-        // try next
-      }
+      } catch { /* try next */ }
     }
+    if (!daysFilled) log('warning', '[Playwright] Deadline field not found — continuing without days');
 
-    if (!daysFilled) {
-      log('warning', '[Playwright] Deadline field not found — continuing without days');
-    }
-
-    // ── 9. Submit form ────────────────────────────────────────────────────────
+    // ── 8. Submit ─────────────────────────────────────────────────────────────
     log('info', '[Playwright] Submitting bid form...');
 
     const submitSelectors = [
@@ -460,9 +390,7 @@ export async function submitBidViaPlaywright(
           submitted = true;
           break;
         }
-      } catch {
-        // try next
-      }
+      } catch { /* try next */ }
     }
 
     if (!submitted) {
@@ -470,11 +398,10 @@ export async function submitBidViaPlaywright(
       throw new Error(`FORM_NOT_FOUND: Submit button not found. Screenshot: ${screenshotPath}`);
     }
 
-    // ── 10. Confirm success ───────────────────────────────────────────────────
+    // ── 9. Confirm success ────────────────────────────────────────────────────
     await page.waitForTimeout(3_000);
 
     const postText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
-
     const successPhrases = [
       'заявку подано', 'відгук надіслано', 'ваша заявка',
       'bid submitted', 'application sent', 'дякуємо', 'успішно', 'success',
@@ -483,13 +410,11 @@ export async function submitBidViaPlaywright(
     let confirmed = successPhrases.some((p) => postText.includes(p));
 
     if (!confirmed) {
-      // Form closed = implicit success
       const formGone = !(await page
         .locator('textarea[name="comment"], textarea[name="body"]')
         .first()
         .isVisible({ timeout: 1_000 })
         .catch(() => false));
-
       if (formGone) {
         log('info', '[Playwright] Form closed after submit — treating as success');
         confirmed = true;
@@ -498,9 +423,7 @@ export async function submitBidViaPlaywright(
 
     if (!confirmed) {
       await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      throw new Error(
-        `FORM_NOT_FOUND: No success indicator after submit. Screenshot: ${screenshotPath}`
-      );
+      throw new Error(`FORM_NOT_FOUND: No success indicator after submit. Screenshot: ${screenshotPath}`);
     }
 
     log('success', `[Playwright] Bid submitted successfully — ${opts.projectUrl}`);
@@ -514,6 +437,5 @@ export async function submitBidViaPlaywright(
     throw enriched;
   } finally {
     await page.close().catch(() => {});
-    // Context stays open — reused for next bid
   }
 }
