@@ -24,21 +24,41 @@ const noop: BidLogFn = () => {};
 
 // ─── Session resolution ───────────────────────────────────────────────────────
 
-const SESSION_SEARCH_PATHS = [
-  ...(process.env.FREELANCEHUNT_SESSION_PATH ? [process.env.FREELANCEHUNT_SESSION_PATH] : []),
-  path.resolve(process.cwd(), 'storageState.json'),
-  path.resolve(process.cwd(), '..', 'storageState.json'),
-  '/tmp/storageState.json',
-];
-
+/**
+ * Resolve the storageState.json path using `path.resolve(process.cwd(), ...)`.
+ * Never uses relative paths ("./...") — always absolute.
+ * Search order:
+ *   1. FREELANCEHUNT_SESSION_PATH env var (explicit override)
+ *   2. <cwd>/storageState.json  ← primary: project root on Railway
+ *   3. /tmp/storageState.json   ← fallback for ephemeral containers
+ */
 export function resolveSessionPath(): string | null {
-  for (const p of SESSION_SEARCH_PATHS) {
+  const cwd = process.cwd();
+  const primary = path.resolve(cwd, 'storageState.json');
+
+  const candidates: string[] = [
+    ...(process.env.FREELANCEHUNT_SESSION_PATH ? [process.env.FREELANCEHUNT_SESSION_PATH] : []),
+    primary,
+    '/tmp/storageState.json',
+  ];
+
+  // Log diagnostic info on every resolution attempt (visible in Railway logs)
+  console.log('[Playwright] resolveSessionPath — cwd:', cwd);
+  console.log('[Playwright] resolveSessionPath — primary path:', primary);
+  console.log('[Playwright] resolveSessionPath — primary exists:', fs.existsSync(primary));
+
+  for (const p of candidates) {
     try {
-      if (fs.existsSync(p)) return p;
+      if (fs.existsSync(p)) {
+        console.log('[Playwright] resolveSessionPath — resolved to:', p);
+        return p;
+      }
     } catch {
       // ignore permission errors
     }
   }
+
+  console.log('[Playwright] resolveSessionPath — NOT FOUND. Candidates checked:', candidates);
   return null;
 }
 
@@ -53,11 +73,19 @@ let _context: BrowserContext | null = null;
 let _sessionPath: string | null = null; // track which session is loaded
 
 async function getContext(log: BidLogFn): Promise<BrowserContext> {
+  const cwd = process.cwd();
+  const storageStatePath = path.resolve(cwd, 'storageState.json');
+  const exists = fs.existsSync(storageStatePath);
+
+  log('info', `[Playwright] getContext — cwd: ${cwd}`);
+  log('info', `[Playwright] getContext — storageStatePath: ${storageStatePath}`);
+  log('info', `[Playwright] getContext — fs.existsSync(storageStatePath): ${exists}`);
+
   const sessionPath = resolveSessionPath();
   if (!sessionPath) {
     throw new Error(
       `SESSION_MISSING: storageState.json not found. ` +
-      `Searched: ${SESSION_SEARCH_PATHS.join(', ')}. ` +
+      `cwd=${cwd} | primary=${storageStatePath} | exists=${exists}. ` +
       `Run: npm run login:freelancehunt`
     );
   }
@@ -76,7 +104,9 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
     _context = null;
     _browser = null;
 
-    log('info', `[Playwright] Session file: ${sessionPath}`);
+    const resolvedStorageState = path.resolve(process.cwd(), 'storageState.json');
+    log('info', `[Playwright] Loading session — resolved path: ${resolvedStorageState}`);
+    log('info', `[Playwright] Session file exists: ${fs.existsSync(resolvedStorageState)}`);
 
     const { chromium } = await import('playwright');
     _browser = await chromium.launch({
@@ -93,7 +123,7 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
     });
 
     _context = await _browser.newContext({
-      storageState: sessionPath,
+      storageState: resolvedStorageState,
       userAgent:
         'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 ' +
         '(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -101,8 +131,8 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
       viewport: { width: 1280, height: 900 },
     });
 
-    _sessionPath = sessionPath;
-    log('info', '[Playwright] Session loaded — browser context created');
+    _sessionPath = resolvedStorageState;
+    log('info', `[Playwright] Session loaded — browser context created from ${resolvedStorageState}`);
   }
 
   return _context;
