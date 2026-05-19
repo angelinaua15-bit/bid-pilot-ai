@@ -439,3 +439,122 @@ export async function submitBidViaPlaywright(
     await page.close().catch(() => {});
   }
 }
+
+// ─── Project feed parser ──────────────────────────────────────────────────────
+
+export interface FeedProject {
+  id: string;
+  title: string;
+  projectUrl: string;
+  description: string;
+  budget: number;
+  currency: string;
+  skills: string[];
+  publishedAt: string;
+}
+
+/**
+ * Parse the project feed from https://freelancehunt.com/projects using the
+ * authenticated Playwright session. Returns up to 50 projects.
+ */
+export async function parseProjectsFromFeed(log: BidLogFn = noop): Promise<FeedProject[]> {
+  const context = await getContext(log);
+  const page = await context.newPage();
+
+  try {
+    log('info', '[Parser] Opening https://freelancehunt.com/projects');
+    await page.goto('https://freelancehunt.com/projects', {
+      waitUntil: 'domcontentloaded',
+      timeout: 30_000,
+    });
+
+    const finalUrl = page.url();
+    if (finalUrl.includes('/login') || finalUrl.includes('/auth')) {
+      _context = null;
+      throw new Error('SESSION_EXPIRED: Redirected to login while loading project feed');
+    }
+
+    // Wait for at least one project row to appear
+    await page.waitForSelector(
+      'tr.project, .project-item, [class*="project"], .project-list tr, tbody tr',
+      { timeout: 15_000 }
+    ).catch(() => {});
+
+    const projects = await page.evaluate((): FeedProject[] => {
+      const results: FeedProject[] = [];
+      const now = new Date().toISOString();
+
+      // Try table rows first (freelancehunt uses a <table> layout)
+      const rows = Array.from(
+        document.querySelectorAll('tr.project, .project-item, tbody tr')
+      );
+
+      for (const row of rows) {
+        try {
+          // Title + URL
+          const link = (
+            row.querySelector('a.visitable') ??
+            row.querySelector('a[href*="/project/"]') ??
+            row.querySelector('td a')
+          ) as HTMLAnchorElement | null;
+
+          if (!link?.href || !link.href.includes('/project/')) continue;
+
+          const title = link.textContent?.trim() ?? '';
+          if (!title) continue;
+
+          const projectUrl = link.href.startsWith('http')
+            ? link.href
+            : `https://freelancehunt.com${link.href}`;
+
+          // Extract numeric ID from URL: /project/slug/12345.html
+          const idMatch = projectUrl.match(/\/(\d{4,})(?:\.html)?(?:[/?#]|$)/);
+          const id = idMatch ? `fh_${idMatch[1]}` : `fh_${Date.now()}_${Math.random().toString(36).slice(2, 6)}`;
+
+          // Description / details cell
+          const descEl =
+            row.querySelector('.description') ??
+            row.querySelector('td:nth-child(2)');
+          const description = descEl?.textContent?.trim().slice(0, 500) ?? '';
+
+          // Budget
+          const budgetEl =
+            row.querySelector('.budget') ??
+            row.querySelector('[class*="budget"]') ??
+            row.querySelector('td:nth-child(3)');
+          const budgetText = budgetEl?.textContent?.trim() ?? '0';
+          const budgetNum = Number(budgetText.replace(/[^\d]/g, '')) || 0;
+
+          // Currency
+          const currency = budgetText.includes('$') ? 'USD'
+            : budgetText.includes('€') ? 'EUR'
+            : 'UAH';
+
+          // Skills / tags
+          const skillEls = Array.from(
+            row.querySelectorAll('.skill, .tag, [class*="skill"], [class*="tag"]')
+          );
+          const skills = skillEls
+            .map((el) => el.textContent?.trim() ?? '')
+            .filter(Boolean)
+            .slice(0, 10);
+
+          results.push({ id, title, projectUrl, description, budget: budgetNum, currency, skills, publishedAt: now });
+        } catch {
+          // skip malformed row
+        }
+      }
+
+      return results;
+    }) as FeedProject[];
+
+    log('info', `[Parser] Parsed ${projects.length} projects from feed`);
+    for (const p of projects.slice(0, 5)) {
+      log('info', `[Parser] project parsed — "${p.title}" | ${p.budget} ${p.currency} | ${p.projectUrl}`);
+    }
+
+    return projects;
+  } finally {
+    await page.close().catch(() => {});
+  }
+}

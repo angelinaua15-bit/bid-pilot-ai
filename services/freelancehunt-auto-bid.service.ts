@@ -119,8 +119,6 @@ export async function runAutoBidCycle(
   let bidsSkipped = 0;
   let errors = 0;
 
-  // Auth token from env
-  const apiToken = process.env.FREELANCEHUNT_TOKEN ?? '';
   const isMockMode = Boolean(process.env.FREELANCEHUNT_MOCK);
 
   log(logs, 'info',
@@ -204,8 +202,8 @@ export async function runAutoBidCycle(
   // ── 1. Parse projects from API ──────────────────────────────────────────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
-    // No category or budget filters — fetch all projects from the API
-    parseResult = await parseNewProjects(apiToken, {}, stepLog);
+    // Parse from website feed — no API token needed
+    parseResult = await parseNewProjects('', {}, stepLog);
 
     log(logs, 'info',
       `Found ${parseResult.totalFetched} projects total, ${parseResult.newCount} new (source: ${parseResult.source})`,
