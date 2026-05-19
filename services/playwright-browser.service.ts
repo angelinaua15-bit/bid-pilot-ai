@@ -215,17 +215,27 @@ export async function submitBidViaPlaywright(
       throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
     }
 
-    log('info', `[Playwright] Page loaded: ${await page.title()}`);
+    const pageTitle = await page.title();
+    log('info', `[Playwright] Page loaded: ${pageTitle} — URL: ${page.url()}`);
 
-    // ── 2. Detect unavailable states ─────────────────────────────────────────
-    const pageText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
+    // ── 2. Log page snapshot for debugging ───────────────────────────────────
+    const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
+    log('info', `[Playwright] Page text (first 3000 chars):\n${pageText.slice(0, 3000)}`);
+
+    const pageTextLower = pageText.toLowerCase();
+
+    // ── 3. Detect unavailable states before trying to bid ────────────────────
+    if (pageTextLower.includes('/login') || page.url().includes('/login') || page.url().includes('/auth')) {
+      _context = null;
+      throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
+    }
 
     const closedPhrases = [
       'проект закрито', 'проект виконано', 'project is closed',
       'project completed', 'завершено', 'виконано',
     ];
     for (const phrase of closedPhrases) {
-      if (pageText.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
+      if (pageTextLower.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
     }
 
     const alreadyPhrases = [
@@ -233,36 +243,145 @@ export async function submitBidViaPlaywright(
       'ваша заявка', 'заявку подано', 'відгук надіслано',
     ];
     for (const phrase of alreadyPhrases) {
-      if (pageText.includes(phrase)) throw new Error(`ALREADY_BID: "${phrase}" found on page`);
+      if (pageTextLower.includes(phrase)) throw new Error(`ALREADY_BID: "${phrase}" found on page`);
     }
 
-    // ── 3. Click bid button ───────────────────────────────────────────────────
+    // ── 4. Locate and click bid button (robust multi-strategy, 15s total) ────
     log('info', '[Playwright] Looking for bid button...');
 
-    const bidButton = page.locator(
-      'a[href*="/bid"], button:has-text("Подати заявку"), button:has-text("Сделать ставку")'
-    ).first();
+    // Strategy A: getByRole with broad text pattern (catches UA/RU/EN labels)
+    const roleLocators = [
+      page.getByRole('link',   { name: /подати заявку|зробити ставку|відгукнутись|предложить|оставить ставку|bid|apply/i }),
+      page.getByRole('button', { name: /подати заявку|зробити ставку|відгукнутись|предложить|оставить ставку|bid|apply/i }),
+    ];
 
-    try {
-      await bidButton.waitFor({ timeout: 15_000 });
-    } catch {
-      // Button not found — check if form is already inline before failing
-      const inlineFormVisible = await page
-        .locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="пропоз"]')
-        .first()
-        .isVisible({ timeout: 2_000 })
-        .catch(() => false);
+    // Strategy B: href/action attribute selectors
+    const attrLocators = page.locator(
+      'a[href*="bid"], a[href*="proposal"], a[href*="apply"], ' +
+      'form[action*="bid"] button[type="submit"], ' +
+      'button[type="submit"][form*="bid"]'
+    );
 
-      if (!inlineFormVisible) {
-        await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-        throw new Error(`FORM_NOT_FOUND: No bid button or inline form found on ${opts.projectUrl}. Screenshot: ${screenshotPath}`);
-      }
+    // Strategy C: class / data attribute selectors
+    const classLocators = page.locator(
+      '.bid-button, .js-bid-form-open, .send-bid, .apply-button, ' +
+      '[data-action="bid"], [data-modal="bid"], [data-target*="bid"]'
+    );
+
+    // Strategy D: text-based CSS selectors (Playwright :has-text pseudo)
+    const cssTextSelectors = [
+      'button:has-text("Відгукнутись")',
+      'a:has-text("Відгукнутись")',
+      'button:has-text("Подати заявку")',
+      'a:has-text("Подати заявку")',
+      'button:has-text("Зробити ставку")',
+      'a:has-text("Зробити ставку")',
+      'button:has-text("Предложить услуги")',
+      'a:has-text("Предложить услуги")',
+      'button:has-text("Оставить ставку")',
+      'a:has-text("Оставить ставку")',
+      'button:has-text("Apply")',
+      'a:has-text("Apply")',
+      'button:has-text("Bid")',
+      'a:has-text("Bid")',
+    ];
+
+    const BUTTON_TIMEOUT_MS = 15_000;
+    const deadline = Date.now() + BUTTON_TIMEOUT_MS;
+
+    let bidButtonClicked = false;
+
+    // Check inline form first (sometimes the form is already open on the page)
+    const inlineFormAlreadyVisible = await page
+      .locator('textarea[name="comment"], textarea[name="body"], textarea[placeholder*="пропоз"]')
+      .first()
+      .isVisible({ timeout: 500 })
+      .catch(() => false);
+
+    if (inlineFormAlreadyVisible) {
       log('info', '[Playwright] Bid form already visible inline — skipping button click');
+      bidButtonClicked = true;
     }
 
-    if (await bidButton.isVisible().catch(() => false)) {
-      log('info', '[Playwright] Clicking bid button');
-      await bidButton.click();
+    if (!bidButtonClicked) {
+      // Try role-based locators
+      for (const loc of roleLocators) {
+        if (Date.now() > deadline) break;
+        try {
+          const el = loc.first();
+          if (await el.isVisible({ timeout: 1_500 })) {
+            const label = await el.textContent().catch(() => '?');
+            log('info', `[Playwright] Clicking bid button (role): "${label?.trim()}"`);
+            await el.click();
+            bidButtonClicked = true;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+    }
+
+    if (!bidButtonClicked) {
+      // Try attribute-based locator
+      try {
+        if (Date.now() <= deadline) {
+          const el = attrLocators.first();
+          if (await el.isVisible({ timeout: 1_500 })) {
+            const label = await el.textContent().catch(() => '?');
+            log('info', `[Playwright] Clicking bid button (attr): "${label?.trim()}"`);
+            await el.click();
+            bidButtonClicked = true;
+          }
+        }
+      } catch { /* try next */ }
+    }
+
+    if (!bidButtonClicked) {
+      // Try class/data-attribute locator
+      try {
+        if (Date.now() <= deadline) {
+          const el = classLocators.first();
+          if (await el.isVisible({ timeout: 1_500 })) {
+            const label = await el.textContent().catch(() => '?');
+            log('info', `[Playwright] Clicking bid button (class): "${label?.trim()}"`);
+            await el.click();
+            bidButtonClicked = true;
+          }
+        }
+      } catch { /* try next */ }
+    }
+
+    if (!bidButtonClicked) {
+      // Try CSS text selectors
+      for (const sel of cssTextSelectors) {
+        if (Date.now() > deadline) break;
+        try {
+          const el = page.locator(sel).first();
+          if (await el.isVisible({ timeout: 1_000 })) {
+            log('info', `[Playwright] Clicking bid button (css): "${sel}"`);
+            await el.click();
+            bidButtonClicked = true;
+            break;
+          }
+        } catch { /* try next */ }
+      }
+    }
+
+    if (!bidButtonClicked) {
+      // Save HTML snapshot + screenshot for debugging
+      const htmlSnapshot = await page.content().catch(() => '');
+      const htmlPath = screenshotPath.replace('.png', '.html');
+      fs.writeFileSync(htmlPath, htmlSnapshot).valueOf();
+      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
+
+      log('error', `[Playwright] Bid button NOT FOUND — URL: ${page.url()}`);
+      log('error', `[Playwright] Screenshot: ${screenshotPath}`);
+      log('error', `[Playwright] HTML snapshot: ${htmlPath}`);
+      log('error', `[Playwright] Page text sample: ${pageText.slice(0, 500)}`);
+
+      throw new Error(
+        `FORM_NOT_FOUND: No bid button found on ${opts.projectUrl} within ${BUTTON_TIMEOUT_MS / 1000}s. ` +
+        `Screenshot: ${screenshotPath}`
+      );
     }
 
     // ── 4. Wait for textarea ──────────────────────────────────────────────────
