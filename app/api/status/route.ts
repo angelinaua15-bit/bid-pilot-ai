@@ -57,6 +57,42 @@ async function checkDatabase(): Promise<{ ok: boolean; backend?: string; error?:
   }
 }
 
+async function probeWorker(url: string): Promise<{
+  ok: boolean;
+  mode: string;
+  username?: string;
+  cookieCount?: number;
+  sessionPath?: string;
+  workerUrl: string;
+  storageStateExists?: boolean;
+  autoLoop?: Record<string, unknown>;
+  error?: string;
+} | null> {
+  try {
+    const secret = process.env.AUTOMATION_SECRET ?? '';
+    const res = await fetch(`${url}/status`, {
+      headers: secret ? { Authorization: `Bearer ${secret}` } : {},
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as Record<string, unknown>;
+    const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
+    return {
+      ok: Boolean(fh.connected),
+      mode: 'local_worker',
+      username: fh.username as string | undefined,
+      cookieCount: fh.cookieCount as number | undefined,
+      sessionPath: fh.sessionPath as string | undefined,
+      workerUrl: url,
+      storageStateExists: Boolean(fh.connected),
+      autoLoop: data.autoLoop as Record<string, unknown> | undefined,
+      error: fh.connected ? undefined : (fh.error as string | undefined ?? 'Local worker: session not found'),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function checkFreelancehunt(): Promise<{
   ok: boolean;
   mode?: string;
@@ -65,29 +101,38 @@ async function checkFreelancehunt(): Promise<{
   checkedPaths?: string[];
   cookieCount?: number;
   workerUrl?: string;
+  storageStateExists?: boolean;
   error?: string;
 }> {
-  // ── Worker mode: delegate to external worker ──────────────────────────────
-  if (config.worker.enabled) {
+  // ── 1. Always try local worker first (http://localhost:8080) ─────────────
+  // LOCAL_WORKER_URL defaults to http://localhost:8080 if not set.
+  const localUrl = (process.env.LOCAL_WORKER_URL ?? 'http://localhost:8080').replace(/\/$/, '');
+  const localResult = await probeWorker(localUrl);
+  if (localResult) {
+    return localResult;
+  }
+
+  // ── 2. Railway / explicit remote worker ──────────────────────────────────
+  if (config.worker.enabled && config.worker.mode === 'railway') {
     try {
       const { getWorkerStatus } = await import('@/lib/worker-client');
       const status = await getWorkerStatus();
       const fh = status.freelancehunt;
       return {
         ok: fh.connected,
-        mode: 'worker',
+        mode: 'railway_worker',
         username: fh.username,
         cookieCount: fh.cookieCount,
         sessionPath: fh.sessionPath,
         workerUrl: config.worker.url,
-        error: fh.connected ? undefined : (fh.error ?? 'Worker reports Freelancehunt not connected'),
+        error: fh.connected ? undefined : (fh.error ?? 'Railway worker: session not found'),
       };
     } catch (err) {
       return {
         ok: false,
-        mode: 'worker',
+        mode: 'railway_worker',
         workerUrl: config.worker.url,
-        error: `Worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Railway worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
@@ -150,11 +195,19 @@ export async function GET() {
 
   const allOk = openai.ok && telegram.ok && freelancehunt.ok;
 
+  // Determine effective worker mode label — local_worker takes priority over config
+  const effectiveMode = freelancehunt.mode === 'local_worker'
+    ? 'local'
+    : freelancehunt.mode === 'railway_worker'
+      ? 'railway'
+      : config.worker.mode;
+
   return NextResponse.json({
     ok: allOk,
     configured,
-    workerMode: config.worker.enabled,
-    workerModeLabel: config.worker.mode,   // 'railway' | 'local' | 'none'
+    workerMode: config.worker.enabled || freelancehunt.mode === 'local_worker',
+    workerModeLabel: effectiveMode,   // 'railway' | 'local' | 'none'
+    localWorkerDetected: freelancehunt.mode === 'local_worker',
     checks: { openai, telegram, database, freelancehunt },
     timestamp: new Date().toISOString(),
   });

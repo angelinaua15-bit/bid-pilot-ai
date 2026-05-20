@@ -96,28 +96,69 @@ async function callOpenAIWithRetry<T>(
   return { result: null, usedFallback: true, reason: 'error', message: 'Max retries reached' };
 }
 
-const MOCK_BIDS: Record<string, string> = {
-  websites: 'Привіт! King Kong Lab. Робимо сайти на Next.js — швидко, якісно, з гарантією результату. Є схожі кейси. Готові взятись.',
-  telegram_bots: 'Привіт! Ми — King Kong Lab. Telegram-боти — наш профіль. Реалізуємо повністю: логіка, оплата, адмін. Готові.',
-  ai_agents: 'King Kong Lab. Будуємо AI-агентів на GPT-4 + LangChain. Є реальні кейси в e-commerce та SaaS. Обговоримо?',
-  automation: 'King Kong Lab. Автоматизація — наша стихія. Parsinig, скрипти, n8n, Make — закриємо будь-яке завдання.',
-  default: 'Привіт! Ми — King Kong Lab. Маємо релевантний досвід саме для цього проєкту. Готові взятись і зробити чисто.',
-};
+// ─── Language detection ───────────────────────────────────────────────────────
 
-function buildSystemPrompt(profile: CompanyProfile): string {
-  return `Ти — AI-асистент компанії ${profile.name}.
-${profile.description}
+type Lang = 'uk' | 'ru' | 'en';
 
-Послуги: ${profile.services.join(', ')}.
-Стиль заявок: ${profile.bidStyle} (short = коротко, впевнено, без зайвого).
+function detectLanguage(project: Project): Lang {
+  const text = [
+    safe(project.title),
+    safe(project.description),
+  ].join(' ');
+
+  // Count Cyrillic chars that are unique to Ukrainian (і, ї, є, ґ)
+  const ukChars   = (text.match(/[іїєґ]/gi) ?? []).length;
+  // Russian-only chars (ы, э, ъ, ё)
+  const ruChars   = (text.match(/[ыэъё]/gi) ?? []).length;
+  // Any Cyrillic at all
+  const anyCyrillic = (text.match(/[а-яёіїєґ]/gi) ?? []).length;
+
+  if (anyCyrillic < 10) return 'en';
+  if (ruChars > ukChars) return 'ru';
+  return 'uk';
+}
+
+// ─── Template fallback bids — individual freelancer voice ─────────────────────
+
+const FALLBACK_UA =
+  'Вітаю! Маю релевантний досвід у подібних задачах і готова взятись за ваш проєкт. ' +
+  'Можу швидко розібратись у вимогах, запропонувати оптимальне рішення та виконати роботу якісно. ' +
+  'Готова обговорити деталі й одразу почати.';
+
+const FALLBACK_RU =
+  'Здравствуйте! У меня есть релевантный опыт в похожих задачах, готова взяться за ваш проект. ' +
+  'Могу быстро разобраться в требованиях, предложить оптимальное решение и выполнить работу качественно. ' +
+  'Готова обсудить детали и начать.';
+
+const FALLBACK_EN =
+  'Hello! I have relevant experience with similar tasks and can help with your project. ' +
+  'I can quickly review the requirements, suggest the best solution, and complete the work carefully. ' +
+  'Ready to discuss details and start.';
+
+function getFallbackText(lang: Lang): string {
+  if (lang === 'ru') return FALLBACK_RU;
+  if (lang === 'en') return FALLBACK_EN;
+  return FALLBACK_UA;
+}
+
+function buildSystemPrompt(lang: Lang): string {
+  const langLabel = lang === 'uk' ? 'українська' : lang === 'ru' ? 'російська' : 'English';
+
+  return `Ти — фрілансер-розробник, що шукає замовлення на Freelancehunt.
+Пишеш заявки від ПЕРШОЇ ОСОБИ (Я, не Ми).
+
+ЗАБОРОНЕНО використовувати:
+- "Ми", "Наша команда", "King Kong Lab", "компанія", "агентство", "команда спеціалістів"
+
+ОБОВ'ЯЗКОВО використовуй:
+- "Я", "Маю досвід", "Можу зробити", "Готовий/готова взятись", "Запропоную рішення"
 
 Правила:
-- Заявка має бути КОРОТКОЮ (3-5 речень максимум)
-- Звертайся по-людськи, без шаблонів
-- Згадай 1 конкретний кейс або технологію
-- НЕ пиши "Готовий до обговорення" або "Звертайтесь"
-- Запропонуй конкретну ціну і терміни
-- Мова: ${profile.language === 'uk' ? 'українська' : profile.language === 'ru' ? 'російська' : 'англійська'}
+- Заявка КОРОТКА: 4–6 речень максимум
+- Структура: привітання → розуміння задачі → релевантний досвід → що конкретно зроблю → ціна і термін → запрошення обговорити
+- Згадай 1 конкретну технологію або кейс
+- НЕ пиши "Готовий до обговорення" або "Звертайтесь" — занадто шаблонно
+- Мова відповіді: ${langLabel}
 
 Відповідай ТІЛЬКИ JSON:
 { "text": string, "price": number, "deadline": string, "questions": string[] }`;
@@ -141,31 +182,27 @@ function buildBidPrompt(project: Project): string {
 
 // ─── Template fallback bid builder ───────────────────────────────────────────
 
-function buildTemplateBid(project: Project, profile: CompanyProfile): GeneratedBid {
-  const category = safe(project.category);
-  const skillsText = safe(project.skills);
-  const bidText =
-    MOCK_BIDS[
-      Object.keys(MOCK_BIDS).find(
-        (k) => category.includes(k) || skillsText.includes(k)
-      ) ?? 'default'
-    ] ?? MOCK_BIDS.default;
-
+function buildTemplateBid(project: Project, _profile?: CompanyProfile): GeneratedBid {
+  const lang = detectLanguage(project);
+  const bidText = getFallbackText(lang);
   const price = Math.round(project.budget * (1 + Math.random() * 0.2));
   const deadline = price > 1500 ? '21 день' : price > 700 ? '14 днів' : '7 днів';
 
+  const questions = lang === 'ru'
+    ? ['Есть ли техническое задание или макет?', 'Какие сроки критичны для запуска?']
+    : lang === 'en'
+      ? ['Do you have a technical spec or design mockup?', 'What are the critical deadlines?']
+      : ['Чи є технічне завдання або Figma-макет?', 'Які терміни критичні для запуску?'];
+
   return {
     id: `bid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    userId: 'company',
+    userId: 'freelancer',
     projectId: project.id,
     projectTitle: project.title,
     text: bidText,
     price,
     deadline,
-    questions: [
-      'Чи є технічне завдання або Figma-макет?',
-      'Які терміни критичні для запуску?',
-    ],
+    questions,
     status: 'draft',
     createdAt: new Date().toISOString(),
   };
@@ -184,16 +221,49 @@ function buildTemplateBid(project: Project, profile: CompanyProfile): GeneratedB
  * @param profile - Company profile (defaults to King Kong Lab)
  * @returns { bid, usedFallback, fallbackReason? }
  */
+// Forbidden company phrases to strip/replace from OpenAI output
+const COMPANY_PHRASES: [RegExp, string][] = [
+  [/\bми\b[\s—-]*(king\s*kong\s*lab|kkl)\b/gi, 'Я'],
+  [/\bking\s*kong\s*lab\b/gi, 'Я'],
+  [/\bmi\s+(king|kkl)\b/gi, 'Я'],
+  [/\bнаша\s+команда\b/gi, 'Я'],
+  [/\bнаш[іа]\s+фахівц[іи]\b/gi, 'Я'],
+  [/\bкоманда\s+спеціалістів\b/gi, 'досвідчений розробник'],
+  [/\bкомпанія\b/gi, 'фрілансер'],
+  [/\bагентство\b/gi, 'фрілансер'],
+  [/\bми\s+готов[іи]/gi, 'Я готовий/готова'],
+  [/\bми\s+маємо\b/gi, 'Маю'],
+  [/\bми\s+зроби/gi, 'Зроблю'],
+  [/\bми\s+виконаємо\b/gi, 'Виконаю'],
+  [/\bми\s+пропонуємо\b/gi, 'Пропоную'],
+  // Russian equivalents
+  [/\bнаша\s+команда\b/gi, 'Я'],
+  [/\bмы\s+готов[ыы]/gi, 'Я готов/готова'],
+  [/\bмы\s+имеем\b/gi, 'У меня есть'],
+  [/\bмы\s+сделаем\b/gi, 'Сделаю'],
+  [/\bкомпания\b/gi, 'фрилансер'],
+  [/\bагентство\b/gi, 'фрилансер'],
+];
+
+function sanitizeProposalText(text: string): string {
+  let result = text;
+  for (const [pattern, replacement] of COMPANY_PHRASES) {
+    result = result.replace(pattern, replacement);
+  }
+  return result;
+}
+
 export async function generateAutoBid(
   project: Project,
-  profile: CompanyProfile = defaultProfile
+  _profile?: CompanyProfile
 ): Promise<GeneratedBid & { usedFallback?: boolean; fallbackReason?: string }> {
   const openai = getOpenAI();
+  const lang = detectLanguage(project);
 
   // ── No API key ──────────────────────────────────────────────────────────────
   if (!openai) {
     await new Promise((r) => setTimeout(r, 300 + Math.random() * 200));
-    return { ...buildTemplateBid(project, profile), usedFallback: true, fallbackReason: 'no_key' };
+    return { ...buildTemplateBid(project), usedFallback: true, fallbackReason: 'no_key' };
   }
 
   // ── Call OpenAI with retry + fallback ───────────────────────────────────────
@@ -201,10 +271,10 @@ export async function generateAutoBid(
     () =>
       openai.chat.completions.create({
         model: 'gpt-4o-mini',
-        temperature: 0.6,
+        temperature: 0.65,
         max_tokens: 512,
         messages: [
-          { role: 'system', content: buildSystemPrompt(profile) },
+          { role: 'system', content: buildSystemPrompt(lang) },
           { role: 'user', content: buildBidPrompt(project) },
         ],
         response_format: { type: 'json_object' },
@@ -215,7 +285,7 @@ export async function generateAutoBid(
   // ── Fallback (quota / error) ─────────────────────────────────────────────────
   if (outcome.usedFallback) {
     return {
-      ...buildTemplateBid(project, profile),
+      ...buildTemplateBid(project),
       usedFallback: true,
       fallbackReason: outcome.reason === 'quota' ? 'quota_exceeded' : 'api_error',
     };
@@ -229,12 +299,15 @@ export async function generateAutoBid(
     parsed = {};
   }
 
+  const rawText = parsed.text ?? getFallbackText(lang);
+  const cleanText = sanitizeProposalText(rawText);
+
   return {
     id: `bid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,
-    userId: 'company',
+    userId: 'freelancer',
     projectId: project.id,
     projectTitle: project.title,
-    text: parsed.text ?? MOCK_BIDS.default,
+    text: cleanText,
     price: parsed.price ?? project.budget,
     deadline: parsed.deadline ?? '14 днів',
     questions: Array.isArray(parsed.questions) ? parsed.questions : [],

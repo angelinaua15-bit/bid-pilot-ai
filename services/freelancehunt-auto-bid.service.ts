@@ -21,13 +21,10 @@ import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
 import { submitBidViaPlaywright } from './playwright-browser.service';
 import { sendTelegramMessage } from './telegram.service';
-import { companyProfile } from '@/lib/mock-data';
+import { shouldBid } from './project-filter.service';
 import { config } from '@/lib/config';
 import { saveBid, appendLog as persistLog } from '@/lib/db';
 
-// NOTE: project-filter.service is intentionally NOT used here.
-// All category, budget, keyword, match-score, and working-hours filters are
-// disabled. Only the in-session duplicate check (alreadyBidIds) is applied.
 
 export interface AutoBidRunResult {
   logs: AutoBidLog[];
@@ -258,18 +255,35 @@ export async function runAutoBidCycle(
     const projectUrl   = project.projectUrl ?? '';
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
-    // ── DEBUG: all filters disabled — force bid on every project ────────────
-    // shouldBid() returns true unconditionally.
-    // alreadyBidIds and globalProcessedIds dedup are DISABLED.
-    // Remove this block when debugging is complete.
-    log(logs, 'info',
-      `[DEBUG][${i + 1}/${filtered.length}] shouldBid=true (all filters OFF) ` +
-      `| id=${project.id} | title="${projectTitle}" | url=${projectUrl} ` +
-      `| budget=${project.budget} ${project.currency} | skills=${(project.skills ?? []).join(',')}`,
-      { projectId: project.id, projectTitle }
-    );
+    // ── IT-only filter ────────────────────────────────────────────────────────
+    const itFilter = shouldBid(project);
+    if (!itFilter.allowed) {
+      log(logs, 'info',
+        `[SKIP] Not IT project — ${itFilter.reason} | "${projectTitle}"`,
+        { projectId: project.id, projectTitle }
+      );
+      bidsSkipped++;
+      continue;
+    }
 
-    // ── END DEBUG BLOCK ────────────────────────────────────────────────────
+    // ── In-cycle dedup ────────────────────────────────────────────────────────
+    if (alreadyBidIds.has(project.id) || (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))) {
+      log(logs, 'info',
+        `[SKIP] Already bid in this cycle — "${projectTitle}"`,
+        { projectId: project.id, projectTitle }
+      );
+      bidsSkipped++;
+      continue;
+    }
+
+    if (globalProcessedIds?.has(project.id) || (project.freelancehuntId && globalProcessedIds?.has(project.freelancehuntId))) {
+      log(logs, 'info',
+        `[SKIP] Already bid in this worker process — "${projectTitle}"`,
+        { projectId: project.id, projectTitle }
+      );
+      bidsSkipped++;
+      continue;
+    }
 
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Processing: "${projectTitle}" — ${projectUrl}`,
@@ -281,7 +295,7 @@ export async function runAutoBidCycle(
       projectId: project.id, projectTitle,
     });
 
-    const bid = await generateAutoBid(project, companyProfile);
+    const bid = await generateAutoBid(project);
 
     if (bid.usedFallback) {
       const reason =
