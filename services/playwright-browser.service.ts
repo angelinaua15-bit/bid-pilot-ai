@@ -199,58 +199,63 @@ export async function submitBidViaPlaywright(
   opts: PlaywrightBidOptions
 ): Promise<PlaywrightBidResult> {
   const log = opts.logFn ?? noop;
-  const screenshotPath = `/tmp/fh-bid-${Date.now()}.png`;
+  const ts = Date.now();
+  const screenshotPath = `/tmp/fh-bid-${ts}.png`;
+
+  /** Save screenshot + log path — called on every failure point */
+  async function saveFailureScreenshot(tag: string): Promise<void> {
+    const p = `/tmp/fh-bid-${ts}-${tag}.png`;
+    await page.screenshot({ path: p, fullPage: true }).catch(() => {});
+    log('error', `[BID] FAILED screenshot: ${p}`);
+  }
 
   const context = await getContext(log);
   const page = await context.newPage();
 
   try {
     // ── 1. Navigate to project page ──────────────────────────────────────────
-    log('info', `[Playwright] Project parsed — navigating to: ${opts.projectUrl}`);
+    log('info', `[BID] Opening form — navigating to: ${opts.projectUrl}`);
     await page.goto(opts.projectUrl, { waitUntil: 'domcontentloaded', timeout: 30_000 });
+    await page.waitForTimeout(800 + Math.random() * 400); // human-like pause
 
-    const finalUrl = page.url();
-    if (finalUrl.includes('/login') || finalUrl.includes('/auth')) {
+    const currentUrl = page.url();
+    if (currentUrl.includes('/login') || currentUrl.includes('/auth')) {
       _context = null;
-      throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
+      throw new Error('SESSION_EXPIRED: Redirected to login page');
     }
 
-    const pageTitle = await page.title();
-    log('info', `[Playwright] Page loaded: ${pageTitle} — URL: ${page.url()}`);
+    log('info', `[BID] Page loaded — title: "${await page.title()}" | url: ${currentUrl}`);
 
-    // ── 2. Log page snapshot for debugging ───────────────────────────────────
+    // ── 2. Detect already-applied / project closed ───────────────────────────
     const pageText = await page.evaluate(() => document.body.innerText).catch(() => '');
-    log('info', `[Playwright] Page text (first 3000 chars):\n${pageText.slice(0, 3000)}`);
+    const pt = pageText.toLowerCase();
 
-    const pageTextLower = pageText.toLowerCase();
-
-    // ── 3. Detect unavailable states before trying to bid ────────────────────
-    if (pageTextLower.includes('/login') || page.url().includes('/login') || page.url().includes('/auth')) {
-      _context = null;
-      throw new Error('SESSION_EXPIRED: Redirected to login page mid-cycle');
+    // Already bid — skip silently
+    const alreadyPhrases = [
+      'ви вже відгукнулись', 'you already applied', 'your bid has been',
+      'ваша ставка', 'заявку подано', 'відгук надіслано', 'ви вже залишили заявку',
+    ];
+    for (const phrase of alreadyPhrases) {
+      if (pt.includes(phrase)) {
+        log('info', `[BID] Already applied — skipping silently (phrase: "${phrase}")`);
+        return { success: false, strategy: 'playwright' };
+      }
     }
 
     const closedPhrases = [
       'проект закрито', 'проект виконано', 'project is closed',
-      'project completed', 'завершено', 'виконано',
+      'project completed', 'завершено і закрито',
     ];
     for (const phrase of closedPhrases) {
-      if (pageTextLower.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}" found on page`);
+      if (pt.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}"`);
     }
 
-    const alreadyPhrases = [
-      'ви вже відгукнулись', 'your bid has been', 'you already applied',
-      'ваша заявка', 'заявку подано', 'відгук надіслано',
-    ];
-    for (const phrase of alreadyPhrases) {
-      if (pageTextLower.includes(phrase)) throw new Error(`ALREADY_BID: "${phrase}" found on page`);
-    }
+    // ── 3. Find and click bid button ─────────────────────────────────────────
+    log('info', '[BID] Looking for bid button...');
 
-    // ── 4. Locate and click the real apply button (strict intent, 15s total) ──
-    log('info', '[Playwright] Looking for apply button...');
-
-    // Exact apply-intent patterns. MUST NOT match "Ставки", "Заявки", "Bids" tabs.
+    // text= matchers — exact intent only, NOT "Ставки N" tabs
     const applyTexts: RegExp[] = [
+      /^зробити ставку$/i,
       /^подати заявку$/i,
       /^подати пропозицію$/i,
       /^залишити заявку$/i,
@@ -261,22 +266,20 @@ export async function submitBidViaPlaywright(
       /^сделать ставку$/i,
       /^apply$/i,
       /^submit proposal$/i,
+      /^place a bid$/i,
     ];
 
-    // Phrases that identify a tab/counter — never click these
     const skipTexts: RegExp[] = [
-      /^ставки(\s+\d+)?$/i,
-      /^заявки(\s+\d+)?$/i,
-      /^bids(\s+\d+)?$/i,
+      /^ставки\s*\d*$/i,
+      /^заявки\s*\d*$/i,
+      /^bids\s*\d*$/i,
       /^\d+\s*(ставк|заявк|bid)/i,
     ];
 
-    /** Returns true if the element's trimmed innerText matches an apply pattern
-     *  and does NOT match a skip pattern. */
-    async function isValidApplyButton(el: import('playwright').Locator): Promise<boolean> {
+    async function isApplyButton(el: import('playwright').Locator): Promise<boolean> {
       try {
-        const raw = (await el.innerText({ timeout: 500 })).trim();
-        if (!raw) return false;
+        const raw = (await el.innerText({ timeout: 400 })).trim();
+        if (!raw || raw.length > 60) return false;
         if (skipTexts.some((r) => r.test(raw))) return false;
         return applyTexts.some((r) => r.test(raw));
       } catch {
@@ -284,132 +287,125 @@ export async function submitBidViaPlaywright(
       }
     }
 
-    // Candidate selectors — broad pool, filtered strictly by text above
-    const candidateSelectors = [
-      'button',
-      'a',
-      '[role="button"]',
-      '.bid-button',
-      '.js-bid-form-open',
-      '.send-bid',
-      '.apply-button',
-      '[data-action="bid"]',
-      '[data-modal="bid"]',
-    ];
-
-    const BUTTON_TIMEOUT_MS = 15_000;
-    const deadline = Date.now() + BUTTON_TIMEOUT_MS;
+    const BUTTON_DEADLINE = Date.now() + 15_000;
     let bidButtonClicked = false;
 
-    // Check inline form first (form may already be open on the page)
-    const inlineFormAlreadyVisible = await page
-      .locator('textarea, [name="comment"], [name="bid[comment]"], input[name*="budget"], input[name*="days"]')
+    // Check if form is already inline-visible (no button needed)
+    const inlineForm = await page
+      .locator('textarea, input[name*="budget"], input[name*="days"], input[name*="term"]')
       .first()
       .isVisible({ timeout: 500 })
       .catch(() => false);
 
-    if (inlineFormAlreadyVisible) {
-      log('info', '[Playwright] Bid form already visible inline — skipping button click');
+    if (inlineForm) {
+      log('info', '[BID] Form detected inline — skipping button click');
       bidButtonClicked = true;
     }
 
     if (!bidButtonClicked) {
+      const candidateSelectors = ['button', 'a', '[role="button"]', '.bid-button', '.js-bid-form-open', '.send-bid', '[data-action="bid"]'];
       outer: for (const sel of candidateSelectors) {
-        if (Date.now() > deadline) break;
+        if (Date.now() > BUTTON_DEADLINE) break;
         try {
-          const elements = await page.locator(sel).all();
-          for (const el of elements) {
-            if (Date.now() > deadline) break outer;
+          for (const el of await page.locator(sel).all()) {
+            if (Date.now() > BUTTON_DEADLINE) break outer;
             try {
-              const visible = await el.isVisible({ timeout: 300 }).catch(() => false);
-              if (!visible) continue;
-              if (!(await isValidApplyButton(el))) continue;
-              const label = (await el.innerText({ timeout: 300 }).catch(() => '?')).trim();
-              log('info', `[Playwright] Clicking apply button: "${label}" (selector: ${sel})`);
+              if (!(await el.isVisible({ timeout: 300 }).catch(() => false))) continue;
+              if (!(await isApplyButton(el))) continue;
+              const label = (await el.innerText({ timeout: 300 }).catch(() => '')).trim();
+              log('info', `[BID] Clicking bid button: "${label}" [${sel}]`);
               await el.click({ timeout: 5_000 });
+              await page.waitForTimeout(600 + Math.random() * 400);
               bidButtonClicked = true;
               break outer;
-            } catch { /* try next element */ }
+            } catch { /* try next */ }
           }
         } catch { /* try next selector */ }
       }
     }
 
+    // Fallback: navigate directly to bid form URL derived from project URL
     if (!bidButtonClicked) {
-      const htmlSnapshot = await page.content().catch(() => '');
-      const htmlPath = screenshotPath.replace('.png', '.html');
-      try { fs.writeFileSync(htmlPath, htmlSnapshot); } catch { /* ignore */ }
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-
-      log('error', `[Playwright] Apply button NOT FOUND — URL: ${page.url()}`);
-      log('error', `[Playwright] Page text (first 3000 chars):\n${pageText.slice(0, 3000)}`);
-      log('error', `[Playwright] Screenshot: ${screenshotPath}`);
-
-      throw new Error(
-        'Apply button not found. Maybe already applied, project closed, or different UI. ' +
-        `URL: ${opts.projectUrl} | Screenshot: ${screenshotPath}`
-      );
+      const bidUrl = opts.projectUrl.replace(/\.html.*$/, '') + '/bids/new';
+      log('warning', `[BID] Button not found — trying direct bid URL: ${bidUrl}`);
+      try {
+        await page.goto(bidUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
+        await page.waitForTimeout(800);
+        const afterUrl = page.url();
+        if (!afterUrl.includes('/login') && !afterUrl.includes('/auth')) {
+          bidButtonClicked = true;
+          log('info', `[BID] Direct bid URL loaded: ${afterUrl}`);
+        }
+      } catch { /* ignore — will fail at form detection */ }
     }
 
-    // ── 5. Wait for bid form (textarea / budget / days) — max 15s ────────────
-    log('info', '[Playwright] Waiting for bid form (max 15s)...');
+    if (!bidButtonClicked) {
+      await saveFailureScreenshot('no-button');
+      log('error', `[BID] FAILED — bid button not found on: ${opts.projectUrl}`);
+      log('error', `[BID] Page text sample: ${pageText.slice(0, 1000)}`);
+      throw new Error(`BID_BUTTON_NOT_FOUND: ${opts.projectUrl}`);
+    }
+
+    // ── 4. Wait for bid form — textarea, budget, days ────────────────────────
+    log('info', '[BID] Form detected — waiting for fields (max 15s)...');
+
+    const FORM_DEADLINE = Date.now() + 15_000;
 
     const textareaSelectors = [
+      'textarea',
       'textarea[name="comment"]',
       'textarea[name="bid[comment]"]',
+      '[name="comment"]',
+      '[id*="comment"]',
+      '[id*="description"]',
       'textarea[name="body"]',
       'textarea[name="text"]',
-      'input[name*="budget"]',
-      'input[name*="days"]',
-      'textarea[placeholder*="опис"]',
       'textarea[placeholder*="пропоз"]',
-      'textarea[placeholder*="Опишіть"]',
-      'textarea[placeholder*="Ваша пропозиція"]',
+      'textarea[placeholder*="опис"]',
       '.bid-form textarea',
-      'form.bid textarea',
       '.modal textarea',
       '[role="dialog"] textarea',
     ];
 
-    const FORM_TIMEOUT_MS = 15_000;
-    const formDeadline = Date.now() + FORM_TIMEOUT_MS;
-    let textarea = null;
-
+    let textarea: import('playwright').Locator | null = null;
     for (const sel of textareaSelectors) {
-      if (Date.now() > formDeadline) break;
+      if (Date.now() > FORM_DEADLINE) break;
       try {
-        const remaining = Math.max(500, formDeadline - Date.now());
+        const remaining = Math.max(400, FORM_DEADLINE - Date.now());
         const el = page.locator(sel).first();
         if (await el.isVisible({ timeout: Math.min(remaining, 3_000) })) {
           textarea = el;
-          log('info', `[Playwright] Bid form field found: "${sel}"`);
+          log('info', `[BID] Form detected — textarea: "${sel}"`);
           break;
         }
       } catch { /* try next */ }
     }
 
     if (!textarea) {
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      log('error', `[Playwright] Bid form NOT found after ${FORM_TIMEOUT_MS / 1000}s — URL: ${page.url()}`);
-      log('error', `[Playwright] Screenshot: ${screenshotPath}`);
-      throw new Error(
-        `FORM_NOT_FOUND: Bid form not visible after ${FORM_TIMEOUT_MS / 1000}s. ` +
-        'Maybe already applied, project closed, or different UI. ' +
-        `URL: ${opts.projectUrl}`
-      );
+      await saveFailureScreenshot('no-form');
+      log('error', `[BID] FAILED — form not found after 15s. URL: ${page.url()}`);
+      throw new Error(`FORM_NOT_FOUND: No bid textarea found on ${opts.projectUrl}`);
     }
 
-    // ── 5. Fill proposal ──────────────────────────────────────────────────────
-    log('info', `[Playwright] Filling proposal — ${opts.text.length} chars`);
+    // ── 5. Fill proposal text ─────────────────────────────────────────────────
+    log('info', `[BID] Filling proposal — ${opts.text.length} chars`);
+    await textarea.click({ timeout: 3_000 });
+    await page.waitForTimeout(200 + Math.random() * 200);
     await textarea.fill(opts.text);
+    await page.waitForTimeout(300 + Math.random() * 200);
 
     // ── 6. Fill budget ────────────────────────────────────────────────────────
     const budgetAmount = Math.max(1, Math.round(opts.budget));
     const budgetSelectors = [
-      'input[name="amount"]', 'input[name="budget"]', 'input[name="price"]',
-      'input[placeholder*="грн"]', 'input[placeholder*="бюджет"]',
+      'input[name*="budget"]',
+      'input[name="amount"]',
+      'input[name="price"]',
+      'input[type="number"]',
+      'input[placeholder*="грн"]',
+      'input[placeholder*="бюджет"]',
       'input[placeholder*="вартість"]',
-      '.bid-form input[type="number"]', '.modal input[type="number"]',
+      '.bid-form input[type="number"]',
+      '.modal input[type="number"]',
       '[role="dialog"] input[type="number"]',
     ];
 
@@ -417,21 +413,26 @@ export async function submitBidViaPlaywright(
     for (const sel of budgetSelectors) {
       try {
         const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1_500 })) {
+        if (await el.isVisible({ timeout: 1_000 })) {
+          await el.click({ timeout: 2_000 });
+          await page.waitForTimeout(100);
           await el.fill(String(budgetAmount));
-          log('info', `[Playwright] Budget ${budgetAmount} filled via "${sel}"`);
+          log('info', `[BID] Budget set: ${budgetAmount} via "${sel}"`);
           budgetFilled = true;
           break;
         }
       } catch { /* try next */ }
     }
-    if (!budgetFilled) log('warning', '[Playwright] Budget field not found — continuing without budget');
+    if (!budgetFilled) log('warning', '[BID] Budget field not found — skipping');
 
-    // ── 7. Fill deadline ──────────────────────────────────────────────────────
+    // ── 7. Fill deadline / days ───────────────────────────────────────────────
     const daysAmount = Math.max(1, Math.round(opts.days));
     const daysSelectors = [
-      'input[name="days"]', 'input[name="deadline"]', 'input[name="term"]',
-      'input[placeholder*="днів"]', 'input[placeholder*="термін"]',
+      'input[name*="days"]',
+      'input[name="deadline"]',
+      'input[name="term"]',
+      'input[placeholder*="днів"]',
+      'input[placeholder*="термін"]',
       'input[placeholder*="дні"]',
     ];
 
@@ -439,27 +440,32 @@ export async function submitBidViaPlaywright(
     for (const sel of daysSelectors) {
       try {
         const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: 1_500 })) {
+        if (await el.isVisible({ timeout: 1_000 })) {
+          await el.click({ timeout: 2_000 });
+          await page.waitForTimeout(100);
           await el.fill(String(daysAmount));
-          log('info', `[Playwright] Deadline ${daysAmount}d filled via "${sel}"`);
+          log('info', `[BID] Deadline set: ${daysAmount}d via "${sel}"`);
           daysFilled = true;
           break;
         }
       } catch { /* try next */ }
     }
-    if (!daysFilled) log('warning', '[Playwright] Deadline field not found — continuing without days');
+    if (!daysFilled) log('warning', '[BID] Deadline field not found — skipping');
 
-    // ── 8. Submit ─────────────────────────────────────────────────────────────
-    log('info', '[Playwright] Submitting bid form...');
+    await page.waitForTimeout(400 + Math.random() * 300); // human pause before submit
+
+    // ── 8. Click submit button ────────────────────────────────────────────────
+    log('info', '[BID] Clicking submit...');
 
     const submitSelectors = [
+      'button[type="submit"]:has-text("Подати ставку")',
+      'button[type="submit"]:has-text("Подати заявку")',
       'button[type="submit"]:has-text("Відправити")',
-      'button[type="submit"]:has-text("Подати")',
       'button[type="submit"]:has-text("Надіслати")',
       'button[type="submit"]:has-text("Submit")',
       'button[type="submit"]:has-text("Send")',
       '.bid-form button[type="submit"]',
-      'form.bid button[type="submit"]',
+      'form button[type="submit"]',
       '.modal button[type="submit"]',
       '[role="dialog"] button[type="submit"]',
       'button[type="submit"]',
@@ -470,8 +476,9 @@ export async function submitBidViaPlaywright(
       try {
         const btn = page.locator(sel).first();
         if (await btn.isVisible({ timeout: 1_500 })) {
-          log('info', `[Playwright] Clicking submit: "${sel}"`);
-          await btn.click();
+          const label = (await btn.innerText({ timeout: 500 }).catch(() => sel)).trim();
+          log('info', `[BID] Clicking submit: "${label}" [${sel}]`);
+          await btn.click({ timeout: 5_000 });
           submitted = true;
           break;
         }
@@ -479,44 +486,55 @@ export async function submitBidViaPlaywright(
     }
 
     if (!submitted) {
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      throw new Error(`FORM_NOT_FOUND: Submit button not found. Screenshot: ${screenshotPath}`);
+      await saveFailureScreenshot('no-submit');
+      log('error', '[BID] FAILED — submit button not found');
+      throw new Error(`SUBMIT_NOT_FOUND: No submit button on ${opts.projectUrl}`);
     }
 
-    // ── 9. Confirm success ────────────────────────────────────────────────────
-    await page.waitForTimeout(3_000);
+    // ── 9. Wait for success state ─────────────────────────────────────────────
+    log('info', '[BID] Waiting for success confirmation...');
+    await page.waitForTimeout(2_500);
 
-    const postText = (await page.evaluate(() => document.body.innerText)).slice(0, 3000).toLowerCase();
+    const postText = (await page.evaluate(() => document.body.innerText).catch(() => '')).toLowerCase();
     const successPhrases = [
-      'заявку подано', 'відгук надіслано', 'ваша заявка',
-      'bid submitted', 'application sent', 'дякуємо', 'успішно', 'success',
+      'заявку подано', 'ставку подано', 'відгук надіслано', 'ваша ставка',
+      'bid submitted', 'application sent', 'дякуємо', 'успішно',
     ];
 
     let confirmed = successPhrases.some((p) => postText.includes(p));
 
     if (!confirmed) {
-      const formGone = !(await page
-        .locator('textarea[name="comment"], textarea[name="body"]')
-        .first()
-        .isVisible({ timeout: 1_000 })
-        .catch(() => false));
-      if (formGone) {
-        log('info', '[Playwright] Form closed after submit — treating as success');
+      // URL change is also a success indicator
+      const urlChanged = page.url() !== currentUrl;
+      if (urlChanged) {
+        log('info', `[BID] URL changed after submit — treating as success (new: ${page.url()})`);
         confirmed = true;
       }
     }
 
     if (!confirmed) {
-      await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
-      throw new Error(`FORM_NOT_FOUND: No success indicator after submit. Screenshot: ${screenshotPath}`);
+      // Form disappearing means submission went through
+      const formGone = !(await page.locator('textarea').first().isVisible({ timeout: 1_000 }).catch(() => false));
+      if (formGone) {
+        log('info', '[BID] Form closed after submit — treating as success');
+        confirmed = true;
+      }
     }
 
-    log('success', `[Playwright] Bid submitted successfully — ${opts.projectUrl}`);
+    if (!confirmed) {
+      await saveFailureScreenshot('no-confirm');
+      log('error', '[BID] FAILED — no success indicator after submit');
+      log('error', `[BID] Post-submit page text: ${postText.slice(0, 500)}`);
+      throw new Error(`NO_CONFIRM: Bid submitted but no success state detected on ${opts.projectUrl}`);
+    }
+
+    log('success', `[BID] SUCCESS — bid submitted: ${opts.projectUrl}`);
     return { success: true, strategy: 'playwright' };
 
   } catch (err) {
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});
     const msg = err instanceof Error ? err.message : String(err);
+    log('error', `[BID] FAILED — ${msg}`);
     const enriched = new Error(msg) as Error & { screenshotPath: string };
     enriched.screenshotPath = screenshotPath;
     throw enriched;
