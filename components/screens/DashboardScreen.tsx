@@ -47,6 +47,8 @@ interface StatusData {
   ok: boolean;
   configured: Record<string, boolean>;
   workerMode: boolean;
+  /** 'railway' | 'local' | 'none' */
+  workerModeLabel?: string;
   autoLoop?: AutoLoopStatus;
   checks: {
     openai:        IntegrationCheck;
@@ -231,16 +233,36 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
           />
         </div>
 
+        {/* Worker mode label */}
+        {status && (
+          <div className="flex items-center gap-1.5 mb-2 px-0.5">
+            <span className={cn(
+              'w-1.5 h-1.5 rounded-full flex-shrink-0',
+              status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-yellow-400'
+            )} />
+            <span className="text-[10px] font-semibold text-primary">
+              {status.workerModeLabel === 'railway' ? 'Railway worker'
+                : status.workerModeLabel === 'local' ? 'Local worker'
+                : 'Local mode (Playwright)'}
+            </span>
+            <span className="text-[10px] text-muted-foreground">
+              {status.checks.freelancehunt.ok
+                ? `· session active${status.checks.freelancehunt.cookieCount ? ` (${status.checks.freelancehunt.cookieCount} cookies)` : ''}`
+                : '· session not found'}
+            </span>
+          </div>
+        )}
+
         <div className="flex gap-2">
           <button
             onClick={handleRunNow}
-            disabled={running || !settings || !!settings.emergencyStop || !status?.workerMode}
+            disabled={running || !settings || !!settings.emergencyStop}
             className="flex-1 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40 transition-all active:scale-95 brand-glow"
           >
             {running ? (
               <><RefreshCw size={13} className="animate-spin" />Запуск...</>
             ) : (
-              <><Play size={13} />Запустити зараз</>
+              <><Play size={13} />Start worker</>
             )}
           </button>
           <button
@@ -290,27 +312,27 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             />
           )}
 
-          {/* Worker connected */}
-          {status?.workerMode && (
+          {/* Freelancehunt session status — always shown */}
+          {status && (
             <div className={cn(
               'glass-card rounded-2xl p-3 border',
               status.checks.freelancehunt.ok
                 ? 'border-green-500/20 bg-green-500/5'
-                : 'border-red-500/20 bg-red-500/5'
+                : 'border-yellow-500/20 bg-yellow-500/5'
             )}>
               <div className="flex items-center gap-3">
                 <span className={cn(
                   'w-2.5 h-2.5 rounded-full flex-shrink-0',
-                  status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-red-400'
+                  status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-yellow-400'
                 )} />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold">
-                    Freelancehunt {status.checks.freelancehunt.ok ? 'Connected' : 'Disconnected'}
+                    Freelancehunt {status.checks.freelancehunt.ok ? 'Connected' : 'Session not found'}
                   </p>
                   <p className="text-[11px] text-muted-foreground truncate">
                     {status.checks.freelancehunt.ok
                       ? `${status.checks.freelancehunt.username ?? 'authenticated'} · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
-                      : (status.checks.freelancehunt.error ?? 'Worker unreachable')}
+                      : (status.checks.freelancehunt.error ?? 'Run: npm run login:freelancehunt')}
                   </p>
                 </div>
                 {status.checks.freelancehunt.ok && (
@@ -351,8 +373,8 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             </div>
           )}
 
-          {/* Worker not configured — setup instructions */}
-          {status && !status.workerMode && (
+          {/* Setup instructions — only shown when no session and no worker URL */}
+          {status && !status.workerMode && !status.checks.freelancehunt.ok && (
             <div className="glass-card rounded-2xl p-4 border border-yellow-500/20 bg-yellow-500/5">
               <p className="text-xs font-semibold text-yellow-400 mb-2">Automation worker not configured</p>
               <p className="text-[11px] text-muted-foreground mb-3 leading-relaxed">
