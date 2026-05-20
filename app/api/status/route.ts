@@ -3,8 +3,9 @@
  * Returns live health check for all integrations.
  *
  * Freelancehunt check behaviour:
- *   - If AUTOMATION_WORKER_URL is set → call GET {worker}/status
- *   - Otherwise → check FREELANCEHUNT_TOKEN in env
+ *   - If AUTOMATION_WORKER_URL or LOCAL_WORKER_URL is set → call GET {worker}/status
+ *   - Otherwise → check storageState.json exists (local Playwright session)
+ *   - Fallback → check FREELANCEHUNT_TOKEN in env
  */
 
 import { NextResponse } from 'next/server';
@@ -91,13 +92,30 @@ async function checkFreelancehunt(): Promise<{
     }
   }
 
-  // ── Local mode: check FREELANCEHUNT_TOKEN ───────────────────────────────
+  // ── Local mode: first check for storageState.json (Playwright session) ──────
+  try {
+    const { sessionExists, resolveSessionPath } = await import('@/services/playwright-browser.service');
+    if (sessionExists()) {
+      const sessionPath = resolveSessionPath();
+      return {
+        ok: true,
+        mode: 'playwright_session',
+        sessionPath,
+        // We only check file existence here (fast path).
+        // Deep verification (opening /my/) happens in /api/freelancehunt/status.
+      };
+    }
+  } catch {
+    // playwright-browser.service not available in this runtime — fall through
+  }
+
+  // ── Fallback: check FREELANCEHUNT_TOKEN ──────────────────────────────────
   const token = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (!token) {
     return {
       ok: false,
-      mode: 'api_token',
-      error: 'FREELANCEHUNT_TOKEN is not set. Add it to your environment variables.',
+      mode: 'none',
+      error: 'No session found. Run: npm run login:freelancehunt to save your Freelancehunt session, then start the worker.',
     };
   }
 
@@ -136,6 +154,7 @@ export async function GET() {
     ok: allOk,
     configured,
     workerMode: config.worker.enabled,
+    workerModeLabel: config.worker.mode,   // 'railway' | 'local' | 'none'
     checks: { openai, telegram, database, freelancehunt },
     timestamp: new Date().toISOString(),
   });
