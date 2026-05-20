@@ -49,14 +49,42 @@ interface StatusData {
   workerMode: boolean;
   /** 'railway' | 'local' | 'none' */
   workerModeLabel?: string;
+  localWorkerDetected?: boolean;
   autoLoop?: AutoLoopStatus;
   checks: {
     openai:        IntegrationCheck;
     telegram:      IntegrationCheck;
     database:      IntegrationCheck;
-    freelancehunt: IntegrationCheck;
+    freelancehunt: IntegrationCheck & { storageStateExists?: boolean };
   };
   timestamp: string;
+}
+
+const LOCAL_WORKER_URL = 'http://localhost:8080';
+
+/** Try to reach the local worker directly from the browser. Returns null if unreachable. */
+async function probeLocalWorker(): Promise<{
+  connected: boolean;
+  cookieCount?: number;
+  sessionPath?: string;
+  storageStateExists?: boolean;
+  autoLoop?: AutoLoopStatus;
+} | null> {
+  try {
+    const res = await fetch(`${LOCAL_WORKER_URL}/status`, { signal: AbortSignal.timeout(2_000) });
+    if (!res.ok) return null;
+    const data = await res.json() as Record<string, unknown>;
+    const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
+    return {
+      connected: Boolean(fh.connected),
+      cookieCount: fh.cookieCount as number | undefined,
+      sessionPath: fh.sessionPath as string | undefined,
+      storageStateExists: Boolean(fh.connected),
+      autoLoop: data.autoLoop as AutoLoopStatus | undefined,
+    };
+  } catch {
+    return null;
+  }
 }
 
 const LOG_COLORS: Record<string, string> = {
@@ -101,8 +129,28 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       if (logsRes.ok) setRecentLogs(logsRes.data);
       if (bidsRes.ok && bidsRes.data) setRecentBids(bidsRes.data);
       if (statusRes) {
-        // Merge autoLoop from worker status if available
-        if (statusRes.workerMode && statusRes.checks?.freelancehunt?.ok) {
+        // Always try local worker from the browser — process.env is not available client-side.
+        // If it responds, override the freelancehunt check and mode label regardless of what
+        // the server-side /api/status reported (which may have been computed with Railway URL).
+        const localWorker = await probeLocalWorker();
+        if (localWorker) {
+          statusRes.localWorkerDetected = true;
+          statusRes.workerMode = true;
+          statusRes.workerModeLabel = 'local';
+          statusRes.checks.freelancehunt = {
+            ...statusRes.checks.freelancehunt,
+            ok: localWorker.connected,
+            mode: 'local_worker',
+            cookieCount: localWorker.cookieCount,
+            sessionPath: localWorker.sessionPath,
+            storageStateExists: localWorker.storageStateExists,
+            error: localWorker.connected ? undefined : 'Local worker: storageState.json not found',
+          };
+          if (localWorker.autoLoop) {
+            statusRes.autoLoop = localWorker.autoLoop;
+          }
+        } else if (statusRes.workerMode && statusRes.checks?.freelancehunt?.ok) {
+          // Fallback: fetch autoLoop from /api/freelancehunt/status for Railway mode
           try {
             const workerStatusRes = await fetch('/api/freelancehunt/status').then((r) => r.json()).catch(() => null);
             if (workerStatusRes?.ok && workerStatusRes.data?.autoLoop) {
@@ -243,11 +291,11 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             <span className="text-[10px] font-semibold text-primary">
               {status.workerModeLabel === 'railway' ? 'Railway worker'
                 : status.workerModeLabel === 'local' ? 'Local worker'
-                : 'Local mode (Playwright)'}
+                : 'Playwright session'}
             </span>
             <span className="text-[10px] text-muted-foreground">
               {status.checks.freelancehunt.ok
-                ? `· session active${status.checks.freelancehunt.cookieCount ? ` (${status.checks.freelancehunt.cookieCount} cookies)` : ''}`
+                ? `· Freelancehunt connected${status.checks.freelancehunt.cookieCount ? ` · ${status.checks.freelancehunt.cookieCount} cookies` : ''} · storageState exists ${status.checks.freelancehunt.storageStateExists ?? status.checks.freelancehunt.ok}`
                 : '· session not found'}
             </span>
           </div>
