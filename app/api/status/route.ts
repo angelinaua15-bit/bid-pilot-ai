@@ -77,16 +77,25 @@ async function probeWorker(url: string): Promise<{
     if (!res.ok) return null;
     const data = await res.json() as Record<string, unknown>;
     const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
+    const connected = Boolean(fh.connected);
+    // storageState file exists if sessionPath is populated (even when session is expired)
+    const storageStateExists = Boolean(fh.sessionPath) || connected;
+    const sessionValid = connected && Number(fh.cookieCount ?? 0) > 0;
     return {
-      ok: Boolean(fh.connected),
+      ok: connected,
       mode: 'local_worker',
       username: fh.username as string | undefined,
       cookieCount: fh.cookieCount as number | undefined,
       sessionPath: fh.sessionPath as string | undefined,
       workerUrl: url,
-      storageStateExists: Boolean(fh.connected),
+      storageStateExists,
+      sessionValid,
       autoLoop: data.autoLoop as Record<string, unknown> | undefined,
-      error: fh.connected ? undefined : (fh.error as string | undefined ?? 'Local worker: session not found'),
+      error: connected
+        ? undefined
+        : storageStateExists
+          ? 'Freelancehunt session expired — reconnect required'
+          : (fh.error as string | undefined ?? 'storageState.json not found'),
     };
   } catch {
     return null;
@@ -102,6 +111,7 @@ async function checkFreelancehunt(): Promise<{
   cookieCount?: number;
   workerUrl?: string;
   storageStateExists?: boolean;
+  sessionValid?: boolean;
   error?: string;
 }> {
   // ── 1. Always try local worker first (http://localhost:8080) ─────────────
