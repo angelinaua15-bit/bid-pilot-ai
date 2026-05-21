@@ -21,7 +21,7 @@ import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
 import { submitBidViaPlaywright } from './playwright-browser.service';
 import { sendTelegramMessage } from './telegram.service';
-import { shouldBid } from './project-filter.service';
+import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
 import { saveBid, appendLog as persistLog } from '@/lib/db';
 
@@ -196,7 +196,7 @@ export async function runAutoBidCycle(
     externalStepLog?.(level, safeMsg, meta);
   };
 
-  // ── 1. Parse projects from API ──────────────────────────────────────────────
+  // ── 1. Parse projects from API ──────────────────────────────────��───────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
     // Parse from website feed — no API token needed
@@ -255,17 +255,6 @@ export async function runAutoBidCycle(
     const projectUrl   = project.projectUrl ?? '';
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
-    // ── IT-only filter ────────────────────────────────────────────────────────
-    const itFilter = shouldBid(project);
-    if (!itFilter.allowed) {
-      log(logs, 'info',
-        `[SKIP] Not IT project — ${itFilter.reason} | "${projectTitle}"`,
-        { projectId: project.id, projectTitle }
-      );
-      bidsSkipped++;
-      continue;
-    }
-
     // ── In-cycle dedup ────────────────────────────────────────────────────────
     if (alreadyBidIds.has(project.id) || (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))) {
       log(logs, 'info',
@@ -284,6 +273,32 @@ export async function runAutoBidCycle(
       bidsSkipped++;
       continue;
     }
+
+    // ── Multi-stage filter (budget → blocked keywords → allowed keywords → AI score) ──
+    const filter = await shouldApply(project, true);
+    if (!filter.allowed) {
+      const detail = [
+        `stage=${filter.stage}`,
+        `budget=${filter.budget} ${filter.currency}`,
+        `category="${filter.category}"`,
+        filter.blockedKeywords.length > 0 ? `blocked=[${filter.blockedKeywords.slice(0, 3).join(', ')}]` : null,
+        filter.matchedKeywords.length > 0 ? `matched=[${filter.matchedKeywords.slice(0, 3).join(', ')}]` : null,
+        filter.aiScore !== undefined ? `ai_score=${filter.aiScore}` : null,
+      ].filter(Boolean).join(' | ');
+
+      log(logs, 'info',
+        `[SKIP] "${projectTitle}" — ${filter.reason} | ${detail}`,
+        { projectId: project.id, projectTitle, meta: { filterStage: filter.stage, aiScore: filter.aiScore, budget: filter.budget, currency: filter.currency } }
+      );
+      bidsSkipped++;
+      continue;
+    }
+
+    // Log filter pass details
+    log(logs, 'info',
+      `[FILTER PASS] "${projectTitle}" | keywords=[${filter.matchedKeywords.slice(0, 4).join(', ')}]${filter.aiScore !== undefined ? ` | ai_score=${filter.aiScore}` : ''} | budget=${filter.budget} ${filter.currency} | category="${filter.category}"`,
+      { projectId: project.id, projectTitle, meta: { matchedKeywords: filter.matchedKeywords, aiScore: filter.aiScore } }
+    );
 
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Processing: "${projectTitle}" — ${projectUrl}`,
