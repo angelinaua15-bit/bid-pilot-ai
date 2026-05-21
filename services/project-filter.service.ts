@@ -215,12 +215,12 @@ export interface ShouldBidResult {
  */
 export function shouldBid(project: Project): ShouldBidResult {
   const text = [
-    safeText(project.title),
-    safeText(project.description),
-    safeText(project.category),
+    safe(project.title),
+    safe(project.description),
+    safe(project.category),
     Array.isArray(project.skills)
-      ? project.skills.map((s) => safeText(s)).join(' ')
-      : safeText(project.skills),
+      ? project.skills.map((s) => safe(s)).join(' ')
+      : safe(project.skills),
   ].join(' ');
 
   for (const re of IT_ALLOW_TERMS) {
