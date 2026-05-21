@@ -35,6 +35,8 @@ interface IntegrationCheck {
   sessionPath?: string;
   checkedPaths?: string[];
   cookieCount?: number;
+  storageStateExists?: boolean;
+  sessionValid?: boolean;
 }
 interface AutoLoopStatus {
   enabled: boolean;
@@ -62,25 +64,34 @@ interface StatusData {
 
 const LOCAL_WORKER_URL = 'http://localhost:8080';
 
-/** Try to reach the local worker directly from the browser. Returns null if unreachable. */
-async function probeLocalWorker(): Promise<{
+interface LocalWorkerStatus {
   connected: boolean;
   cookieCount?: number;
   sessionPath?: string;
-  storageStateExists?: boolean;
+  storageStateExists: boolean;
+  sessionValid: boolean;
   autoLoop?: AutoLoopStatus;
-} | null> {
+  counters?: { bidsSubmitted?: number; bidsSkipped?: number; errors?: number; cycles?: number };
+}
+
+/** Try to reach the local worker directly from the browser. Returns null if unreachable. */
+async function probeLocalWorker(): Promise<LocalWorkerStatus | null> {
   try {
-    const res = await fetch(`${LOCAL_WORKER_URL}/status`, { signal: AbortSignal.timeout(2_000) });
+    const res = await fetch(`${LOCAL_WORKER_URL}/status`, { signal: AbortSignal.timeout(3_500) });
     if (!res.ok) return null;
     const data = await res.json() as Record<string, unknown>;
     const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
+    const storageStateExists = Boolean(fh.connected) || Boolean(fh.sessionPath);
+    // session is valid if connected=true AND cookieCount>0
+    const sessionValid = Boolean(fh.connected) && (Number(fh.cookieCount ?? 0) > 0);
     return {
       connected: Boolean(fh.connected),
       cookieCount: fh.cookieCount as number | undefined,
       sessionPath: fh.sessionPath as string | undefined,
-      storageStateExists: Boolean(fh.connected),
+      storageStateExists,
+      sessionValid,
       autoLoop: data.autoLoop as AutoLoopStatus | undefined,
+      counters: data.counters as LocalWorkerStatus['counters'] | undefined,
     };
   } catch {
     return null;
@@ -129,9 +140,9 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
       if (logsRes.ok) setRecentLogs(logsRes.data);
       if (bidsRes.ok && bidsRes.data) setRecentBids(bidsRes.data);
       if (statusRes) {
-        // Always try local worker from the browser — process.env is not available client-side.
-        // If it responds, override the freelancehunt check and mode label regardless of what
-        // the server-side /api/status reported (which may have been computed with Railway URL).
+        // Always probe the local worker from the browser — process.env is server-only.
+        // If the local worker responds it takes full priority over whatever the server reported
+        // (server-side probes to localhost:8080 always fail when running on Vercel).
         const localWorker = await probeLocalWorker();
         if (localWorker) {
           statusRes.localWorkerDetected = true;
@@ -144,10 +155,23 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             cookieCount: localWorker.cookieCount,
             sessionPath: localWorker.sessionPath,
             storageStateExists: localWorker.storageStateExists,
-            error: localWorker.connected ? undefined : 'Local worker: storageState.json not found',
+            sessionValid: localWorker.sessionValid,
+            error: localWorker.connected
+              ? undefined
+              : localWorker.storageStateExists
+                ? 'Freelancehunt session expired — reconnect required'
+                : 'Local worker: storageState.json not found',
           };
-          if (localWorker.autoLoop) {
-            statusRes.autoLoop = localWorker.autoLoop;
+          if (localWorker.autoLoop) statusRes.autoLoop = localWorker.autoLoop;
+          // Merge real-time counters from local worker into stats
+          if (localWorker.counters) {
+            setRealStats((prev) => ({
+              ...prev,
+              sentTotal:    localWorker.counters?.bidsSubmitted ?? prev.sentTotal,
+              sentToday:    localWorker.counters?.bidsSubmitted ?? prev.sentToday,
+              errorCount:   localWorker.counters?.errors        ?? prev.errorCount,
+              successCount: localWorker.counters?.bidsSubmitted ?? prev.successCount,
+            }));
           }
         } else if (statusRes.workerMode && statusRes.checks?.freelancehunt?.ok) {
           // Fallback: fetch autoLoop from /api/freelancehunt/status for Railway mode
@@ -283,21 +307,45 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
 
         {/* Worker mode label */}
         {status && (
-          <div className="flex items-center gap-1.5 mb-2 px-0.5">
+          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mb-2 px-0.5">
             <span className={cn(
               'w-1.5 h-1.5 rounded-full flex-shrink-0',
-              status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-yellow-400'
+              status.checks.freelancehunt.ok ? 'bg-green-400'
+                : status.localWorkerDetected ? 'bg-yellow-400'
+                : 'bg-red-400'
             )} />
             <span className="text-[10px] font-semibold text-primary">
               {status.workerModeLabel === 'railway' ? 'Railway worker'
-                : status.workerModeLabel === 'local' ? 'Local worker'
-                : 'Playwright session'}
+                : status.workerModeLabel === 'local' ? 'Local worker connected'
+                : 'No worker'}
             </span>
-            <span className="text-[10px] text-muted-foreground">
-              {status.checks.freelancehunt.ok
-                ? `· Freelancehunt connected${status.checks.freelancehunt.cookieCount ? ` · ${status.checks.freelancehunt.cookieCount} cookies` : ''} · storageState exists ${status.checks.freelancehunt.storageStateExists ?? status.checks.freelancehunt.ok}`
-                : '· session not found'}
-            </span>
+            {status.checks.freelancehunt.ok ? (
+              <>
+                <span className="text-[10px] text-muted-foreground">·</span>
+                <span className="text-[10px] text-green-400 font-medium">Freelancehunt connected</span>
+                <span className="text-[10px] text-muted-foreground">·</span>
+                <span className="text-[10px] text-muted-foreground">
+                  storageState: {status.checks.freelancehunt.storageStateExists ? 'loaded' : 'missing'}
+                </span>
+                {status.checks.freelancehunt.cookieCount !== undefined && (
+                  <>
+                    <span className="text-[10px] text-muted-foreground">·</span>
+                    <span className="text-[10px] text-muted-foreground">{status.checks.freelancehunt.cookieCount} cookies</span>
+                  </>
+                )}
+              </>
+            ) : status.localWorkerDetected ? (
+              <>
+                <span className="text-[10px] text-muted-foreground">·</span>
+                <span className="text-[10px] text-yellow-400">
+                  {status.checks.freelancehunt.storageStateExists
+                    ? 'session expired — reconnect required'
+                    : 'storageState not found'}
+                </span>
+              </>
+            ) : (
+              <span className="text-[10px] text-muted-foreground">· session not found</span>
+            )}
           </div>
         )}
 
@@ -366,20 +414,28 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
               'glass-card rounded-2xl p-3 border',
               status.checks.freelancehunt.ok
                 ? 'border-green-500/20 bg-green-500/5'
-                : 'border-yellow-500/20 bg-yellow-500/5'
+                : status.checks.freelancehunt.storageStateExists
+                  ? 'border-yellow-500/20 bg-yellow-500/5'
+                  : 'border-border/50'
             )}>
               <div className="flex items-center gap-3">
                 <span className={cn(
                   'w-2.5 h-2.5 rounded-full flex-shrink-0',
-                  status.checks.freelancehunt.ok ? 'bg-green-400' : 'bg-yellow-400'
+                  status.checks.freelancehunt.ok ? 'bg-green-400'
+                    : status.checks.freelancehunt.storageStateExists ? 'bg-yellow-400'
+                    : 'bg-muted-foreground'
                 )} />
                 <div className="flex-1 min-w-0">
                   <p className="text-xs font-semibold">
-                    Freelancehunt {status.checks.freelancehunt.ok ? 'Connected' : 'Session not found'}
+                    {status.checks.freelancehunt.ok
+                      ? 'Freelancehunt Connected'
+                      : status.checks.freelancehunt.storageStateExists
+                        ? 'Freelancehunt session expired'
+                        : 'Freelancehunt session not found'}
                   </p>
                   <p className="text-[11px] text-muted-foreground truncate">
                     {status.checks.freelancehunt.ok
-                      ? `${status.checks.freelancehunt.username ?? 'authenticated'} · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
+                      ? `storageState loaded · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
                       : (status.checks.freelancehunt.error ?? 'Run: npm run login:freelancehunt')}
                   </p>
                 </div>
@@ -467,15 +523,15 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                   { key: 'database',      label: 'Database',      icon: Database,      sub: status.checks.database.backend },
                   {
                     key: 'freelancehunt',
-                    label: status.workerMode ? 'Freelancehunt (worker)' : 'Freelancehunt',
+                    label: status.workerModeLabel === 'local'
+                      ? 'Freelancehunt (local worker)'
+                      : status.workerModeLabel === 'railway'
+                        ? 'Freelancehunt (Railway worker)'
+                        : 'Freelancehunt',
                     icon: Globe,
                     sub: status.checks.freelancehunt.ok
-                      ? `${status.checks.freelancehunt.username ?? 'connected'} · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
-                      : status.workerMode
-                        ? (status.checks.freelancehunt.error ?? 'Worker not connected')
-                        : (status.checks.freelancehunt.checkedPaths?.length
-                            ? `Not found — checked ${status.checks.freelancehunt.checkedPaths.length} paths`
-                            : status.checks.freelancehunt.error ?? 'session not found'),
+                      ? `storageState loaded · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
+                      : (status.checks.freelancehunt.error ?? 'session not found'),
                   },
                 ] as const).map(({ key, label, icon: Icon, sub }) => {
                   const check = status.checks[key as keyof typeof status.checks];
