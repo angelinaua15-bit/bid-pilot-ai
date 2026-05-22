@@ -250,7 +250,27 @@ export async function submitBidViaPlaywright(
       if (pt.includes(phrase)) throw new Error(`PROJECT_CLOSED: "${phrase}"`);
     }
 
-    // ── 3. Find and click bid button ─────────────────────────────────────────
+    // ── 3. Debug snapshot before button search ───────────────────────────────
+    const pageTitle   = await page.title().catch(() => '(unknown)');
+    const allTextareaCount = await page.locator('textarea').count().catch(() => 0);
+    const allFormCount     = await page.locator('form').count().catch(() => 0);
+    log('info', `[BID] Page snapshot — title: "${pageTitle}" | url: ${currentUrl} | textareas: ${allTextareaCount} | forms: ${allFormCount}`);
+
+    // Detect login page — throw immediately, don't attempt to fill forms
+    const isLoginPage =
+      currentUrl.includes('/login') ||
+      currentUrl.includes('/auth') ||
+      (await page.locator('input[type="password"], input[name="email"], input[name="password"]').count().catch(() => 0)) > 0;
+
+    if (isLoginPage) {
+      _context = null; // invalidate context so next call re-creates it
+      const screenshotP = `/tmp/fh-session-expired-${ts}.png`;
+      await page.screenshot({ path: screenshotP, fullPage: true }).catch(() => {});
+      log('error', `[BID] SESSION_EXPIRED detected — login page at: ${currentUrl} | screenshot: ${screenshotP}`);
+      throw new Error(`SESSION_EXPIRED: Login page detected at ${currentUrl}`);
+    }
+
+    // ── Find and click bid button ─────────────────────────────────────────────
     log('info', '[BID] Looking for bid button...');
 
     // text= matchers — exact intent only, NOT "Ставки N" tabs
@@ -324,19 +344,54 @@ export async function submitBidViaPlaywright(
       }
     }
 
-    // Fallback: navigate directly to bid form URL derived from project URL
+    // Fallback A: try /bids/new URL derived from project URL
     if (!bidButtonClicked) {
-      const bidUrl = opts.projectUrl.replace(/\.html.*$/, '') + '/bids/new';
-      log('warning', `[BID] Button not found — trying direct bid URL: ${bidUrl}`);
+      // Freelancehunt bid form URL pattern: /project/slug/ID/bids/new
+      // Strip query string / trailing slash and append /bids/new
+      const baseUrl  = opts.projectUrl.split('?')[0].replace(/\/$/, '');
+      const bidUrl   = baseUrl.endsWith('/bids/new') ? baseUrl : `${baseUrl}/bids/new`;
+      log('warning', `[BID] Button not found — navigating to bid form URL: ${bidUrl}`);
       try {
-        await page.goto(bidUrl, { waitUntil: 'domcontentloaded', timeout: 15_000 });
-        await page.waitForTimeout(800);
+        await page.goto(bidUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+        await page.waitForTimeout(1_000);
         const afterUrl = page.url();
-        if (!afterUrl.includes('/login') && !afterUrl.includes('/auth')) {
-          bidButtonClicked = true;
-          log('info', `[BID] Direct bid URL loaded: ${afterUrl}`);
+        if (afterUrl.includes('/login') || afterUrl.includes('/auth')) {
+          _context = null;
+          throw new Error(`SESSION_EXPIRED: Login page after navigating to ${bidUrl}`);
         }
-      } catch { /* ignore — will fail at form detection */ }
+        const bidPageTitle = await page.title().catch(() => '');
+        const bidTextareas = await page.locator('textarea').count().catch(() => 0);
+        log('info', `[BID] Bid form URL loaded — title: "${bidPageTitle}" | textareas: ${bidTextareas} | url: ${afterUrl}`);
+        bidButtonClicked = true;
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (msg.startsWith('SESSION_EXPIRED')) throw err;
+        log('warning', `[BID] /bids/new navigation failed: ${msg}`);
+      }
+    }
+
+    // Fallback B: go back to original project page and retry button click once
+    if (!bidButtonClicked) {
+      log('warning', `[BID] Retrying original project page for bid button: ${opts.projectUrl}`);
+      try {
+        await page.goto(opts.projectUrl, { waitUntil: 'domcontentloaded', timeout: 20_000 });
+        await page.waitForTimeout(1_200);
+        for (const sel of ['button', 'a', '[role="button"]']) {
+          for (const el of await page.locator(sel).all()) {
+            try {
+              if (!(await el.isVisible({ timeout: 300 }).catch(() => false))) continue;
+              if (!(await isApplyButton(el))) continue;
+              const label = (await el.innerText({ timeout: 300 }).catch(() => '')).trim();
+              log('info', `[BID] Retry — clicking bid button: "${label}" [${sel}]`);
+              await el.click({ timeout: 5_000 });
+              await page.waitForTimeout(800);
+              bidButtonClicked = true;
+              break;
+            } catch { /* skip */ }
+          }
+          if (bidButtonClicked) break;
+        }
+      } catch { /* will fail at form detection below */ }
     }
 
     if (!bidButtonClicked) {
@@ -347,43 +402,52 @@ export async function submitBidViaPlaywright(
     }
 
     // ── 4. Wait for bid form — textarea, budget, days ────────────────────────
-    log('info', '[BID] Form detected — waiting for fields (max 15s)...');
+    log('info', '[BID] Waiting for bid form textarea (max 30s)...');
 
-    const FORM_DEADLINE = Date.now() + 15_000;
+    const FORM_DEADLINE = Date.now() + 30_000;
 
+    // Selectors ordered from most specific to most generic
     const textareaSelectors = [
-      'textarea',
       'textarea[name="comment"]',
       'textarea[name="bid[comment]"]',
+      'textarea[name="message"]',
+      'textarea[name="body"]',
+      'textarea[name="text"]',
       '[name="comment"]',
       '[id*="comment"]',
       '[id*="description"]',
-      'textarea[name="body"]',
-      'textarea[name="text"]',
       'textarea[placeholder*="пропоз"]',
       'textarea[placeholder*="опис"]',
+      'textarea[placeholder*="Ваша пропозиц"]',
+      'textarea.form-control',
       '.bid-form textarea',
       '.modal textarea',
       '[role="dialog"] textarea',
+      'form textarea',
+      '[contenteditable="true"]',
+      'textarea',   // last resort: any visible textarea
     ];
 
     let textarea: import('playwright').Locator | null = null;
     for (const sel of textareaSelectors) {
       if (Date.now() > FORM_DEADLINE) break;
       try {
-        const remaining = Math.max(400, FORM_DEADLINE - Date.now());
+        const remaining = Math.max(500, FORM_DEADLINE - Date.now());
         const el = page.locator(sel).first();
-        if (await el.isVisible({ timeout: Math.min(remaining, 3_000) })) {
+        if (await el.isVisible({ timeout: Math.min(remaining, 4_000) })) {
           textarea = el;
-          log('info', `[BID] Form detected — textarea: "${sel}"`);
+          log('info', `[BID] Textarea found: "${sel}" | url: ${page.url()}`);
           break;
         }
       } catch { /* try next */ }
     }
 
     if (!textarea) {
+      const postTextareaCount = await page.locator('textarea').count().catch(() => 0);
+      const postFormCount     = await page.locator('form').count().catch(() => 0);
       await saveFailureScreenshot('no-form');
-      log('error', `[BID] FAILED — form not found after 15s. URL: ${page.url()}`);
+      log('error', `[BID] FORM_NOT_FOUND after 30s — url: ${page.url()} | title: "${await page.title().catch(() => '')}" | textareas: ${postTextareaCount} | forms: ${postFormCount}`);
+      log('error', `[BID] Page text sample: ${(await page.evaluate(() => document.body.innerText).catch(() => '')).slice(0, 800)}`);
       throw new Error(`FORM_NOT_FOUND: No bid textarea found on ${opts.projectUrl}`);
     }
 
