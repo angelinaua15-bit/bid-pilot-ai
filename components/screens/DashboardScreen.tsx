@@ -11,7 +11,7 @@ import { haptic } from '@/lib/telegram';
 import { StatCard } from '@/components/shared/StatCard';
 import { LoadingState } from '@/components/shared/LoadingState';
 import { EmptyState } from '@/components/shared/EmptyState';
-import type { AutoBidSettings, AutoBidLog, GeneratedBid, NavTab } from '@/types';
+import type { AutoBidSettings, AutoBidLog, Application, NavTab } from '@/types';
 
 interface RealStats {
   sentTotal: number;
@@ -117,7 +117,6 @@ interface DashboardScreenProps {
 
 export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
   const [settings, setSettings] = useState<AutoBidSettings | null>(null);
-  const [recentBids, setRecentBids] = useState<GeneratedBid[]>([]);
   const [recentLogs, setRecentLogs] = useState<AutoBidLog[]>([]);
   const [status, setStatus] = useState<StatusData | null>(null);
   const [realStats, setRealStats] = useState<RealStats>({ sentTotal: 0, sentToday: 0, draftTotal: 0, errorCount: 0, successCount: 0 });
@@ -125,20 +124,21 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
   const [running, setRunning] = useState(false);
   const [runResult, setRunResult] = useState<{ submitted: number; skipped: number } | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
+  const [applications, setApplications] = useState<Application[]>([]);
+  const [appTab, setAppTab] = useState<'sent' | 'skipped' | 'all'>('sent');
+  const [appLoading, setAppLoading] = useState(false);
 
   const loadData = useCallback(async () => {
     setLoading(true);
     try {
-      const [settingsRes, logsRes, bidsRes, statusRes, statsRes] = await Promise.all([
+      const [settingsRes, logsRes, statusRes, statsRes] = await Promise.all([
         fetch('/api/auto-bid/settings').then((r) => r.json()),
         fetch('/api/logs?limit=5').then((r) => r.json()),
-        fetch('/api/history?limit=3').then((r) => r.json()).catch(() => ({ ok: false })),
         fetch('/api/status').then((r) => r.json()).catch(() => null),
         fetch('/api/stats').then((r) => r.json()).catch(() => null),
       ]);
       if (settingsRes.ok) setSettings(settingsRes.data);
       if (logsRes.ok) setRecentLogs(logsRes.data);
-      if (bidsRes.ok && bidsRes.data) setRecentBids(bidsRes.data);
       if (statusRes) {
         // Always probe the local worker from the browser — process.env is server-only.
         // If the local worker responds it takes full priority over whatever the server reported
@@ -190,7 +190,22 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
     }
   }, []);
 
+  const loadApplications = useCallback(async (tab: 'sent' | 'skipped' | 'all') => {
+    setAppLoading(true);
+    try {
+      const res = await fetch(`/api/applications?status=${tab}&limit=20`).then((r) => r.json()).catch(() => null);
+      if (res?.ok && Array.isArray(res.data)) {
+        setApplications(res.data);
+      } else {
+        setApplications([]);
+      }
+    } finally {
+      setAppLoading(false);
+    }
+  }, []);
+
   useEffect(() => { loadData(); }, [loadData]);
+  useEffect(() => { loadApplications(appTab); }, [loadApplications, appTab]);
 
   const handleToggleAutoBid = async () => {
     if (!settings) return;
@@ -216,9 +231,10 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
         body: JSON.stringify({}),
       }).then((r) => r.json());
       if (res.ok) {
-        setRunResult({ submitted: res.data.bidsSubmitted, skipped: res.data.bidsSkipped });
-        haptic.success();
-        await loadData();
+  setRunResult({ submitted: res.data.bidsSubmitted, skipped: res.data.bidsSkipped });
+  haptic.success();
+  await loadData();
+  await loadApplications(appTab);
       } else {
         setRunError(res.error ?? 'Unknown error');
         haptic.error();
@@ -593,39 +609,110 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             )}
           </div>
 
-          {/* Recent bids */}
-          {recentBids.length > 0 && (
-            <div>
-              <div className="flex items-center justify-between mb-2">
-                <h2 className="text-sm font-semibold">Останні заявки</h2>
+          {/* Recent applications — real worker output only, no mock data */}
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <h2 className="text-sm font-semibold">Останні заявки</h2>
+              <button
+                onClick={() => { haptic.light(); onNavigate('history'); }}
+                className="text-xs text-primary font-medium flex items-center gap-1"
+              >
+                Всі <ArrowRight size={12} />
+              </button>
+            </div>
+
+            {/* Tabs */}
+            <div className="flex gap-1 mb-2">
+              {(['sent', 'skipped', 'all'] as const).map((tab) => (
                 <button
-                  onClick={() => { haptic.light(); onNavigate('history'); }}
-                  className="text-xs text-primary font-medium flex items-center gap-1"
+                  key={tab}
+                  onClick={() => { haptic.light(); setAppTab(tab); }}
+                  className={cn(
+                    'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
+                    appTab === tab
+                      ? 'bg-primary text-primary-foreground'
+                      : 'bg-secondary text-muted-foreground'
+                  )}
                 >
-                  Всі <ArrowRight size={12} />
+                  {tab === 'sent' ? 'Відправлені' : tab === 'skipped' ? 'Пропущені' : 'Всі'}
                 </button>
+              ))}
+            </div>
+
+            {appLoading ? (
+              <div className="flex items-center justify-center py-6">
+                <RefreshCw size={14} className="animate-spin text-muted-foreground" />
               </div>
+            ) : applications.length === 0 ? (
+              <div className="glass-card rounded-2xl p-4 text-center">
+                <p className="text-xs text-muted-foreground leading-relaxed">
+                  {appTab === 'sent'
+                    ? 'Ще немає відправлених заявок. Запустіть worker або зачекайте нові релевантні проєкти.'
+                    : appTab === 'skipped'
+                      ? 'Немає пропущених проєктів.'
+                      : 'Немає заявок. Запустіть worker для обробки проєктів.'}
+                </p>
+              </div>
+            ) : (
               <div className="flex flex-col gap-2">
-                {recentBids.map((bid) => (
-                  <div key={bid.id} className="glass-card p-3 rounded-xl flex items-center gap-3">
-                    <div className="w-8 h-8 rounded-xl bg-primary/15 flex items-center justify-center flex-shrink-0">
-                      <Zap size={14} className="text-primary" />
+                {applications.map((app) => (
+                  <div key={app.id} className="glass-card p-3 rounded-xl">
+                    <div className="flex items-start gap-3">
+                      <div className={cn(
+                        'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5',
+                        app.status === 'sent'    ? 'bg-green-500/15' :
+                        app.status === 'skipped' ? 'bg-yellow-500/15' :
+                                                   'bg-red-500/15'
+                      )}>
+                        {app.status === 'sent'    ? <CheckCircle2 size={13} className="text-green-400" /> :
+                         app.status === 'skipped' ? <Clock size={13} className="text-yellow-400" /> :
+                                                    <XCircle size={13} className="text-red-400" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium truncate">{app.title}</p>
+                        <div className="flex flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
+                          <span className="text-[11px] text-muted-foreground">
+                            {app.budget} {app.currency}
+                          </span>
+                          {app.deadline && (
+                            <span className="text-[11px] text-muted-foreground">· {app.deadline}</span>
+                          )}
+                          {app.aiScore !== undefined && (
+                            <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>
+                          )}
+                        </div>
+                        {app.status === 'skipped' && app.skippedReason && (
+                          <p className="text-[10px] text-muted-foreground truncate mt-0.5 opacity-70">
+                            {app.skippedReason.length > 60
+                              ? app.skippedReason.slice(0, 60) + '…'
+                              : app.skippedReason}
+                          </p>
+                        )}
+                        {app.matchedKeywords && app.matchedKeywords.length > 0 && (
+                          <p className="text-[10px] text-primary/60 truncate mt-0.5">
+                            {app.matchedKeywords.slice(0, 3).join(', ')}
+                          </p>
+                        )}
+                      </div>
+                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
+                        <span className={cn(
+                          'text-[10px] font-semibold',
+                          app.status === 'sent'    ? 'text-green-400' :
+                          app.status === 'skipped' ? 'text-yellow-400' :
+                                                     'text-red-400'
+                        )}>
+                          {app.status === 'sent' ? 'Відправлено' : app.status === 'skipped' ? 'Пропущено' : 'Помилка'}
+                        </span>
+                        <span className="text-[10px] text-muted-foreground">
+                          {formatDistanceToNow(new Date(app.sentAt ?? app.createdAt), { addSuffix: true, locale: uk })}
+                        </span>
+                      </div>
                     </div>
-                    <div className="flex-1 min-w-0">
-                      <p className="text-xs font-medium truncate">{bid.projectTitle}</p>
-                      <p className="text-[11px] text-muted-foreground">${bid.price} · {bid.deadline}</p>
-                    </div>
-                    <span className={cn('text-[11px] font-medium flex-shrink-0',
-                      bid.status === 'sent' ? 'text-blue-400' :
-                      bid.status === 'replied' ? 'text-green-400' : 'text-muted-foreground'
-                    )}>
-                      {bid.status === 'sent' ? 'Відправлено' : bid.status === 'replied' ? 'Відповідь' : 'Чернетка'}
-                    </span>
                   </div>
                 ))}
               </div>
-            </div>
-          )}
+            )}
+          </div>
         </>
       )}
     </div>

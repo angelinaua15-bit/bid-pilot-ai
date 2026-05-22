@@ -12,13 +12,15 @@
  */
 
 import { defaultAutoBidSettings, mockLogs, mockBids } from '@/lib/mock-data';
-import type { AutoBidSettings, AutoBidLog, GeneratedBid } from '@/types';
+import type { AutoBidSettings, AutoBidLog, GeneratedBid, Application } from '@/types';
 
 // ─── In-memory fallback store ─────────────────────────────────────────────────
 
 let _memSettings: AutoBidSettings = { ...defaultAutoBidSettings };
 const _memLogs: AutoBidLog[] = [...mockLogs];
 const _memBids: GeneratedBid[] = [...mockBids];
+// Applications store — no mock data, only real worker output
+const _memApplications: Application[] = [];
 
 // ─── Supabase service client (lazy) ──────────────────────────────────────────
 
@@ -211,7 +213,7 @@ export async function clearLogs(): Promise<void> {
   }
 }
 
-// ─── Bids ─────────────────────────────────────────────────────────────────────
+// ─── Bids ───────────────────────────────────────��─────────────────────────────
 
 export async function saveBid(bid: GeneratedBid): Promise<void> {
   if (!isSupabaseConfigured) {
@@ -237,6 +239,127 @@ export async function saveBid(bid: GeneratedBid): Promise<void> {
   } catch (err) {
     console.error('[db] saveBid error:', err);
     _memBids.unshift(bid);
+  }
+}
+
+// ─── Applications ─────────────────────────────────────────────────────────────
+
+/**
+ * Save a worker-processed application record (sent, skipped, or failed).
+ * Uses the `applications` table in Supabase; falls back to in-memory.
+ */
+export async function saveApplication(app: Application): Promise<void> {
+  if (!isSupabaseConfigured) {
+    // Remove existing with same id to avoid duplicates, then prepend
+    const idx = _memApplications.findIndex((a) => a.id === app.id);
+    if (idx !== -1) _memApplications.splice(idx, 1);
+    _memApplications.unshift(app);
+    if (_memApplications.length > 2000) _memApplications.splice(2000);
+    return;
+  }
+
+  try {
+    const db = getDb();
+    if (!db) {
+      const idx = _memApplications.findIndex((a) => a.id === app.id);
+      if (idx !== -1) _memApplications.splice(idx, 1);
+      _memApplications.unshift(app);
+      return;
+    }
+
+    const { error } = await db.from('applications').upsert(
+      {
+        id:                   app.id,
+        project_id:           app.projectId,
+        freelancehunt_id:     app.freelancehuntId ?? null,
+        title:                app.title,
+        url:                  app.url,
+        budget:               app.budget,
+        currency:             app.currency,
+        deadline:             app.deadline ?? null,
+        status:               app.status,
+        created_at:           app.createdAt,
+        sent_at:              app.sentAt ?? null,
+        proposal_text:        app.proposalText ?? null,
+        proposal_price:       app.proposalPrice ?? null,
+        freelancehunt_bid_id: app.freelancehuntBidId ?? null,
+        ai_score:             app.aiScore ?? null,
+        matched_keywords:     app.matchedKeywords ?? null,
+        blocked_keywords:     app.blockedKeywords ?? null,
+        skipped_reason:       app.skippedReason ?? null,
+        filter_stage:         app.filterStage ?? null,
+      },
+      { onConflict: 'id' }
+    );
+    if (error) throw error;
+  } catch (err) {
+    console.error('[db] saveApplication error:', err);
+    const idx = _memApplications.findIndex((a) => a.id === app.id);
+    if (idx !== -1) _memApplications.splice(idx, 1);
+    _memApplications.unshift(app);
+  }
+}
+
+export async function getApplications(options?: {
+  limit?: number;
+  status?: 'sent' | 'skipped' | 'failed' | 'all';
+}): Promise<{ applications: Application[]; total: number }> {
+  const limit = Math.min(options?.limit ?? 50, 500);
+  const statusFilter = options?.status === 'all' ? undefined : options?.status;
+
+  if (!isSupabaseConfigured) {
+    let apps = [..._memApplications];
+    if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+    return { applications: apps.slice(0, limit), total: apps.length };
+  }
+
+  try {
+    const db = getDb();
+    if (!db) {
+      let apps = [..._memApplications];
+      if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+      return { applications: apps.slice(0, limit), total: apps.length };
+    }
+
+    let query = db
+      .from('applications')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .limit(limit);
+
+    if (statusFilter) query = query.eq('status', statusFilter);
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+
+    const applications: Application[] = (data ?? []).map((r) => ({
+      id:                  r.id,
+      projectId:           r.project_id,
+      freelancehuntId:     r.freelancehunt_id     ?? undefined,
+      title:               r.title,
+      url:                 r.url,
+      budget:              r.budget,
+      currency:            r.currency,
+      deadline:            r.deadline             ?? undefined,
+      status:              r.status as Application['status'],
+      createdAt:           r.created_at,
+      sentAt:              r.sent_at              ?? undefined,
+      proposalText:        r.proposal_text        ?? undefined,
+      proposalPrice:       r.proposal_price       ?? undefined,
+      freelancehuntBidId:  r.freelancehunt_bid_id ?? undefined,
+      aiScore:             r.ai_score             ?? undefined,
+      matchedKeywords:     r.matched_keywords     ?? undefined,
+      blockedKeywords:     r.blocked_keywords     ?? undefined,
+      skippedReason:       r.skipped_reason       ?? undefined,
+      filterStage:         r.filter_stage         ?? undefined,
+    }));
+
+    return { applications, total: count ?? applications.length };
+  } catch (err) {
+    console.error('[db] getApplications error:', err);
+    let apps = [..._memApplications];
+    if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+    return { applications: apps.slice(0, limit), total: apps.length };
   }
 }
 
