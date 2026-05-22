@@ -196,7 +196,7 @@ export async function runAutoBidCycle(
     externalStepLog?.(level, safeMsg, meta);
   };
 
-  // ── 1. Parse projects from API ──────────────────────────────────��───────────
+  // ── 1. Parse projects from API ────────────────────────────���─────��───────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
     // Parse from website feed — no API token needed
@@ -401,7 +401,8 @@ export async function runAutoBidCycle(
             retryMsg.startsWith('ALREADY_BID:') ||
             retryMsg.startsWith('PROJECT_CLOSED:') ||
             retryMsg.startsWith('FORM_NOT_FOUND:') ||
-            retryMsg.startsWith('INVALID_ID:');
+            retryMsg.startsWith('INVALID_ID:') ||
+            retryMsg.startsWith('SESSION_EXPIRED:');
           if (isNonRetryable || attempt === MAX_RETRIES) throw retryErr;
           log(logs, 'warning',
             `[${i + 1}/${filtered.length}] Browser error (attempt ${attempt}/${MAX_RETRIES}), retrying in 5s: ${retryMsg}`,
@@ -508,6 +509,32 @@ export async function runAutoBidCycle(
         { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
       );
       errors++;
+
+      // Persist failed application with error reason so Dashboard can show it
+      const errorCode =
+        msg.startsWith('FORM_NOT_FOUND') ? 'FORM_NOT_FOUND' :
+        msg.startsWith('SESSION_EXPIRED') ? 'SESSION_EXPIRED' :
+        msg.startsWith('PROJECT_CLOSED') ? 'PROJECT_CLOSED' :
+        msg.startsWith('SELECTOR_CHANGED') ? 'SELECTOR_CHANGED' :
+        msg.startsWith('SUBMIT_NOT_FOUND') ? 'SUBMIT_NOT_FOUND' :
+        msg.startsWith('NO_CONFIRM') ? 'NO_CONFIRM' :
+        'UNKNOWN_ERROR';
+
+      await saveApplication({
+        id:              `app_fail_${project.id}_${Date.now()}`,
+        projectId:       project.id,
+        freelancehuntId: project.freelancehuntId ?? undefined,
+        title:           projectTitle,
+        url:             projectUrl,
+        budget:          project.budget,
+        currency:        project.currency ?? 'UAH',
+        status:          'failed',
+        createdAt:       new Date().toISOString(),
+        skippedReason:   msg.slice(0, 500),
+        filterStage:     errorCode,
+        aiScore:         filter?.aiScore,
+        matchedKeywords: filter?.matchedKeywords,
+      }).catch(() => {});
 
       // Telegram error notification (send but don't block the cycle)
       if (chatId) {
