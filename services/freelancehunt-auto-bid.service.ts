@@ -23,7 +23,7 @@ import { submitBidViaPlaywright } from './playwright-browser.service';
 import { sendTelegramMessage } from './telegram.service';
 import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
-import { saveBid, appendLog as persistLog } from '@/lib/db';
+import { saveBid, saveApplication, appendLog as persistLog } from '@/lib/db';
 
 
 export interface AutoBidRunResult {
@@ -274,8 +274,8 @@ export async function runAutoBidCycle(
       continue;
     }
 
-    // ── Multi-stage filter (budget → blocked keywords → allowed keywords → AI score) ──
-    const filter = await shouldApply(project, true);
+    // ── Multi-stage filter: budget → blocked keywords → allowed keywords → AI score ─
+    const filter = await shouldApply(project, Boolean(process.env.OPENAI_API_KEY));
     if (!filter.allowed) {
       const detail = [
         `stage=${filter.stage}`,
@@ -288,16 +288,34 @@ export async function runAutoBidCycle(
 
       log(logs, 'info',
         `[SKIP] "${projectTitle}" — ${filter.reason} | ${detail}`,
-        { projectId: project.id, projectTitle, meta: { filterStage: filter.stage, aiScore: filter.aiScore, budget: filter.budget, currency: filter.currency } }
+        { projectId: project.id, projectTitle, meta: { filterStage: filter.stage, aiScore: filter.aiScore } }
       );
+
+      // Persist so Dashboard "Skipped" tab shows real data
+      await saveApplication({
+        id:              `app_skip_${project.id}_${Date.now()}`,
+        projectId:       project.id,
+        freelancehuntId: project.freelancehuntId ?? undefined,
+        title:           projectTitle,
+        url:             projectUrl,
+        budget:          filter.budget,
+        currency:        filter.currency,
+        status:          'skipped',
+        createdAt:       new Date().toISOString(),
+        aiScore:         filter.aiScore,
+        matchedKeywords: filter.matchedKeywords,
+        blockedKeywords: filter.blockedKeywords,
+        skippedReason:   filter.reason,
+        filterStage:     filter.stage,
+      }).catch(() => {});
+
       bidsSkipped++;
       continue;
     }
 
-    // Log filter pass details
     log(logs, 'info',
-      `[FILTER PASS] "${projectTitle}" | keywords=[${filter.matchedKeywords.slice(0, 4).join(', ')}]${filter.aiScore !== undefined ? ` | ai_score=${filter.aiScore}` : ''} | budget=${filter.budget} ${filter.currency} | category="${filter.category}"`,
-      { projectId: project.id, projectTitle, meta: { matchedKeywords: filter.matchedKeywords, aiScore: filter.aiScore } }
+      `[FILTER PASS] "${projectTitle}" | keywords=[${filter.matchedKeywords.slice(0, 4).join(', ')}]${filter.aiScore !== undefined ? ` | ai_score=${filter.aiScore}` : ''} | budget=${filter.budget} ${filter.currency}`,
+      { projectId: project.id, projectTitle }
     );
 
     log(logs, 'info',
@@ -404,12 +422,34 @@ export async function runAutoBidCycle(
         incrementDailyCount('bids');
         bidsSubmitted++;
 
+        const sentAt = new Date().toISOString();
+
         await saveBid({
           ...bid,
           status: 'sent',
           freelancehuntBidId: result.bidId,
-          sentAt: new Date().toISOString(),
+          sentAt,
         });
+
+        // Also persist to applications table for Dashboard display
+        await saveApplication({
+          id:                 `app_sent_${project.id}_${Date.now()}`,
+          projectId:          project.id,
+          freelancehuntId:    project.freelancehuntId ?? undefined,
+          title:              projectTitle,
+          url:                projectUrl,
+          budget:             budgetAmount ?? project.budget,
+          currency:           project.currency ?? 'UAH',
+          deadline:           bid.deadline,
+          status:             'sent',
+          createdAt:          bid.createdAt ?? sentAt,
+          sentAt,
+          proposalText:       bid.text,
+          proposalPrice:      bid.price,
+          freelancehuntBidId: result.bidId,
+          aiScore:            filter.aiScore,
+          matchedKeywords:    filter.matchedKeywords,
+        }).catch(() => {});
 
         log(logs, 'success',
           `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | url: ${projectUrl}`,

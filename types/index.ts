@@ -259,6 +259,44 @@ export interface PortfolioItem {
   tags: string[];
 }
 
+// ─── Applications (worker output) ────────────────────────────────────────────
+
+export type ApplicationStatus = 'sent' | 'skipped' | 'failed';
+
+/**
+ * A record of every project the worker processed — either successfully bid on,
+ * or skipped/filtered out. Saved by the orchestrator and surfaced in Dashboard.
+ */
+export interface Application {
+  id: string;
+  projectId: string;
+  freelancehuntId?: string;
+  title: string;
+  url: string;
+  budget: number;
+  currency: string;
+  deadline?: string;
+  status: ApplicationStatus;
+  createdAt: string;
+  sentAt?: string;
+  /** AI-generated proposal text (only for sent applications) */
+  proposalText?: string;
+  /** Price proposed by AI */
+  proposalPrice?: number;
+  /** Freelancehunt bid ID returned after submission */
+  freelancehuntBidId?: string;
+  /** AI relevance score 0–100 */
+  aiScore?: number;
+  /** Keywords that matched the allowlist */
+  matchedKeywords?: string[];
+  /** Keywords that triggered the blocklist */
+  blockedKeywords?: string[];
+  /** Human-readable reason for skipping */
+  skippedReason?: string;
+  /** Filter stage that caused the skip */
+  filterStage?: string;
+}
+
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
 export type NavTab = 'home' | 'projects' | 'settings' | 'logs' | 'history' | 'profile';
