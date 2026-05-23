@@ -65,6 +65,7 @@ async function probeWorker(url: string): Promise<{
   sessionPath?: string;
   workerUrl: string;
   storageStateExists?: boolean;
+  sessionValid?: boolean;
   autoLoop?: Record<string, unknown>;
   error?: string;
 } | null> {

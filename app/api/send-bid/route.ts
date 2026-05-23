@@ -35,7 +35,6 @@ export async function POST(req: NextRequest) {
     }
 
     // Delegate to worker POST /send-bid
-    const { default: workerFetch } = await import('@/lib/worker-client');
     // Use the generic workerFetch via the named startWorkerAutoBid pattern
     const res = await fetch(`${config.worker.url}/send-bid`, {
       method: 'POST',

@@ -20,7 +20,7 @@ export interface TelegramInitData {
 
 // ─── User / Profile ──────────────────────────────────────────────────────────
 
-export type ProposalTone = 'short' | 'expert' | 'friendly' | 'premium';
+export type ProposalTone = 'short' | 'expert' | 'friendly' | 'premium' | 'professional' | 'detailed' | 'creative';
 
 export type FreelancerCategory =
   | 'websites'
@@ -114,7 +114,7 @@ export type ProjectFilter = {
 
 // ─── Bids ────────────────────────────────────────────────────────────────────
 
-export type BidStatus = 'draft' | 'sent' | 'skipped' | 'replied';
+export type BidStatus = 'draft' | 'sent' | 'sent_unconfirmed' | 'skipped' | 'replied';
 
 export interface GeneratedBid {
   id: string;
