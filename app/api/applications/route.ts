@@ -1,5 +1,5 @@
 /**
- * GET /api/applications?status=sent|skipped|failed|all&limit=50
+ * GET /api/applications?status=sent|sent_unconfirmed|skipped|failed|all&limit=50
  *
  * Returns worker-processed application records from the database.
  * No mock/demo data — only real applications saved by the orchestrator.
@@ -14,10 +14,10 @@ export async function GET(req: NextRequest) {
     const limit = Math.min(Number(searchParams.get('limit') ?? '50'), 500);
     const rawStatus = searchParams.get('status') ?? 'sent';
 
-    // Validate status param
-    const validStatuses = ['sent', 'skipped', 'failed', 'all'] as const;
+    // Validate status param — includes sent_unconfirmed
+    const validStatuses = ['sent', 'sent_unconfirmed', 'skipped', 'failed', 'all'] as const;
     type StatusParam = typeof validStatuses[number];
-    const status: StatusParam = validStatuses.includes(rawStatus as StatusParam)
+    const status: StatusParam = (validStatuses as readonly string[]).includes(rawStatus)
       ? (rawStatus as StatusParam)
       : 'sent';
 

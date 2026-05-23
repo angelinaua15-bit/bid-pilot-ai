@@ -261,7 +261,7 @@ export interface PortfolioItem {
 
 // ─── Applications (worker output) ────────────────────────────────────────────
 
-export type ApplicationStatus = 'sent' | 'skipped' | 'failed';
+export type ApplicationStatus = 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed';
 
 /**
  * A record of every project the worker processed — either successfully bid on,

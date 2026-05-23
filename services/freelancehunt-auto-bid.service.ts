@@ -196,7 +196,7 @@ export async function runAutoBidCycle(
     externalStepLog?.(level, safeMsg, meta);
   };
 
-  // ── 1. Parse projects from API ──────────────────────────────────��───────────
+  // ── 1. Parse projects from API ────────────────────────────���─────��───────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
     // Parse from website feed — no API token needed
@@ -423,10 +423,12 @@ export async function runAutoBidCycle(
         bidsSubmitted++;
 
         const sentAt = new Date().toISOString();
+        const appStatus: import('@/types').ApplicationStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
+        const bidStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
 
         await saveBid({
           ...bid,
-          status: 'sent',
+          status: bidStatus,
           freelancehuntBidId: result.bidId,
           sentAt,
         });
@@ -441,7 +443,7 @@ export async function runAutoBidCycle(
           budget:             budgetAmount ?? project.budget,
           currency:           project.currency ?? 'UAH',
           deadline:           bid.deadline,
-          status:             'sent',
+          status:             appStatus,
           createdAt:          bid.createdAt ?? sentAt,
           sentAt,
           proposalText:       bid.text,
@@ -449,13 +451,17 @@ export async function runAutoBidCycle(
           freelancehuntBidId: result.bidId,
           aiScore:            filter.aiScore,
           matchedKeywords:    filter.matchedKeywords,
+          skippedReason:      result.unconfirmed
+            ? `Sent unconfirmed — submit clicked, no error. preUrl:${result.preSubmitUrl} postUrl:${result.postSubmitUrl}`
+            : undefined,
         }).catch(() => {});
 
-        log(logs, 'success',
-          `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | url: ${projectUrl}`,
+        const statusLabel = result.unconfirmed ? 'SENT_UNCONFIRMED' : 'SUBMITTED';
+        log(logs, result.unconfirmed ? 'warning' : 'success',
+          `${statusLabel} [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | preUrl: ${result.preSubmitUrl ?? projectUrl} | postUrl: ${result.postSubmitUrl ?? projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy },
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy, unconfirmed: result.unconfirmed },
           }
         );
 
