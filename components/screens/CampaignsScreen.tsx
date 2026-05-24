@@ -223,9 +223,13 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
 function ChannelsList({ channels, onRefresh, isAdmin }: {
   channels: TelegramChannel[]; onRefresh: () => void; isAdmin: boolean;
 }) {
-  const [showForm, setShowForm] = useState(false);
-  const [form, setForm] = useState({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
-  const [saving, setSaving] = useState(false);
+  const [showForm, setShowForm]   = useState(false);
+  const [form, setForm]           = useState({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
+  const [saving, setSaving]       = useState(false);
+  const [seeding, setSeeding]     = useState(false);
+  const [seedMsg, setSeedMsg]     = useState('');
+  const [search, setSearch]       = useState('');
+  const [filterCat, setFilterCat] = useState('');
 
   const handleAdd = async () => {
     if (!form.title.trim() || !form.usernameOrLink.trim()) return;
@@ -245,13 +249,70 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
     onRefresh();
   };
 
+  const handleSeed = async () => {
+    haptic.medium();
+    setSeeding(true);
+    setSeedMsg('');
+    try {
+      const res = await fetch('/api/channels/seed', { method: 'POST' }).then((r) => r.json());
+      if (res.ok) {
+        haptic.success();
+        setSeedMsg(`Додано ${res.inserted} з ${res.total} каналів`);
+        onRefresh();
+      } else {
+        setSeedMsg(`Помилка: ${res.error}`);
+      }
+    } finally { setSeeding(false); }
+  };
+
+  // Unique categories for filter
+  const allCategories = Array.from(new Set(channels.map((c) => c.category).filter(Boolean))).sort();
+
+  const filtered = channels.filter((ch) => {
+    const q = search.toLowerCase();
+    const matchSearch = !q || ch.title.toLowerCase().includes(q) ||
+      (ch.usernameOrLink ?? '').toLowerCase().includes(q) ||
+      (ch.notes ?? '').toLowerCase().includes(q);
+    const matchCat = !filterCat || ch.category === filterCat;
+    return matchSearch && matchCat;
+  });
+
   return (
     <div className="flex flex-col gap-3">
       {isAdmin && (
-        <button onClick={() => setShowForm((v) => !v)}
-          className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/15 text-primary text-xs font-semibold self-start active:scale-95 transition-transform">
-          <Plus size={12} /> Додати канал
-        </button>
+        <div className="flex flex-wrap gap-2">
+          <button onClick={() => setShowForm((v) => !v)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/15 text-primary text-xs font-semibold self-start active:scale-95 transition-transform">
+            <Plus size={12} /> Додати канал
+          </button>
+          <button onClick={handleSeed} disabled={seeding}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-green-500/15 text-green-400 text-xs font-semibold self-start active:scale-95 transition-transform disabled:opacity-50">
+            <RefreshCw size={12} className={seeding ? 'animate-spin' : ''} />
+            {seeding ? 'Завантаження...' : 'Завантажити 400+ груп'}
+          </button>
+        </div>
+      )}
+      {seedMsg && (
+        <p className="text-[11px] px-3 py-2 rounded-lg bg-green-500/10 text-green-400 font-medium">{seedMsg}</p>
+      )}
+
+      {/* Search + filter */}
+      {channels.length > 5 && (
+        <div className="flex gap-2">
+          <input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Пошук каналу..."
+            className="flex-1 bg-secondary rounded-lg px-3 py-2 text-xs outline-none placeholder:text-muted-foreground"
+          />
+          {allCategories.length > 1 && (
+            <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
+              className="bg-secondary rounded-lg px-2 py-2 text-xs outline-none max-w-[140px]">
+              <option value="">Всі категорії</option>
+              {allCategories.map((c) => <option key={c} value={c!}>{c}</option>)}
+            </select>
+          )}
+        </div>
       )}
 
       {showForm && isAdmin && (
@@ -299,15 +360,19 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
         </div>
       )}
 
-      {channels.length === 0 ? (
+      {filtered.length === 0 ? (
         <div className="glass-card p-6 rounded-2xl text-center">
           <p className="text-xs text-muted-foreground">
-            {isAdmin ? 'Немає каналів. Натисніть «Додати канал», щоб додати перший.' : 'Немає доступних каналів. Зверніться до адміністратора.'}
+            {channels.length === 0
+              ? (isAdmin ? 'Немає каналів. Натисніть «Завантажити 400+ груп» для імпорту.' : 'Немає доступних каналів. Зверніться до адміністратора.')
+              : 'Нічого не знайдено за вашим запитом.'}
           </p>
         </div>
       ) : (
-        <div className="flex flex-col gap-2">
-          {channels.map((ch) => (
+        <>
+          <p className="text-[10px] text-muted-foreground px-1">{filtered.length} {filtered.length !== channels.length ? `з ${channels.length}` : ''} каналів</p>
+          <div className="flex flex-col gap-2">
+          {filtered.map((ch) => (
             <div key={ch.id} className="glass-card p-3 rounded-xl flex items-center gap-3">
               <div className={cn(
                 'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold',
@@ -317,13 +382,13 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
               </div>
               <div className="flex-1 min-w-0">
                 <p className="text-xs font-medium truncate">{ch.title}</p>
-                <p className="text-[11px] text-muted-foreground truncate">{ch.usernameOrLink}</p>
-                <div className="flex gap-1.5 mt-0.5">
+                <p className="text-[11px] text-muted-foreground truncate">@{ch.usernameOrLink}</p>
+                <div className="flex flex-wrap gap-x-1.5 gap-y-0.5 mt-0.5">
                   <span className={cn('text-[10px] font-medium', ch.status === 'active' ? 'text-green-400' : 'text-muted-foreground')}>
                     {ch.status === 'active' ? 'Активний' : 'Неактивний'}
                   </span>
-                  {ch.language && <span className="text-[10px] text-muted-foreground">· {ch.language}</span>}
-                  {ch.category && <span className="text-[10px] text-muted-foreground">· {ch.category}</span>}
+                  {ch.notes && <span className="text-[10px] text-muted-foreground">· {ch.notes}</span>}
+                  {ch.category && <span className="text-[10px] text-muted-foreground/70">· {ch.category}</span>}
                 </div>
               </div>
               {isAdmin && (
@@ -333,7 +398,8 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
               )}
             </div>
           ))}
-        </div>
+          </div>
+        </>
       )}
     </div>
   );

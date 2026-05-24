@@ -1,6 +1,6 @@
 'use client';
 
-import { Home, Briefcase, Send, ScrollText, User2 } from 'lucide-react';
+import { Home, Briefcase, Send, ScrollText, User2, Shield } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 import type { NavTab } from '@/types';
@@ -9,6 +9,7 @@ interface NavItem {
   id: NavTab;
   label: string;
   icon: React.ElementType;
+  adminOnly?: boolean;
 }
 
 const NAV_ITEMS: NavItem[] = [
@@ -17,14 +18,17 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'campaigns', label: 'Campaigns', icon: Send },
   { id: 'logs',      label: 'Logs',      icon: ScrollText },
   { id: 'account',   label: 'Account',   icon: User2 },
+  { id: 'admin',     label: 'Admin',     icon: Shield, adminOnly: true },
 ];
 
 interface BottomNavigationProps {
   active: NavTab;
   onChange: (tab: NavTab) => void;
+  isAdmin?: boolean;
 }
 
-export function BottomNavigation({ active, onChange }: BottomNavigationProps) {
+export function BottomNavigation({ active, onChange, isAdmin = false }: BottomNavigationProps) {
+  const visibleItems = NAV_ITEMS.filter((item) => !item.adminOnly || isAdmin);
   return (
     <nav
       className="fixed bottom-0 left-0 right-0 z-40 safe-bottom"
@@ -36,7 +40,7 @@ export function BottomNavigation({ active, onChange }: BottomNavigationProps) {
       aria-label="Навігація"
     >
       <div className="flex items-stretch nav-h max-w-lg mx-auto">
-        {NAV_ITEMS.map(({ id, label, icon: Icon }) => {
+        {visibleItems.map(({ id, label, icon: Icon }) => {
           const isActive = active === id;
           return (
             <button

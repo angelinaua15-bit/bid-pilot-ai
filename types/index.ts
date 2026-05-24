@@ -299,12 +299,12 @@ export interface Application {
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-export type NavTab = 'home' | 'freelance' | 'campaigns' | 'logs' | 'account';
+export type NavTab = 'home' | 'freelance' | 'campaigns' | 'logs' | 'account' | 'admin';
 
 // ─── SaaS User ────────────────────────────────────────────────────────────────
 
-export type UserRole = 'user' | 'admin';
-export type SubscriptionPlanSaaS = 'free' | 'pro' | 'agency';
+export type UserRole = 'user' | 'admin' | 'owner';
+export type SubscriptionPlanSaaS = 'free' | 'pro' | 'agency' | 'unlimited';
 export type SubscriptionStatusSaaS = 'active' | 'expired' | 'cancelled';
 
 export interface SaaSUser {
@@ -454,7 +454,53 @@ export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   campaigns: boolean;
   adminAccess: boolean;
 }> = {
-  free:   { applicationsPerMonth: 20,  accounts: 1, campaigns: false, adminAccess: false },
-  pro:    { applicationsPerMonth: 300, accounts: 1, campaigns: true,  adminAccess: false },
-  agency: { applicationsPerMonth: 999, accounts: 5, campaigns: true,  adminAccess: true  },
+  free:      { applicationsPerMonth: 20,       accounts: 1,    campaigns: false, adminAccess: false },
+  pro:       { applicationsPerMonth: 300,      accounts: 1,    campaigns: true,  adminAccess: false },
+  agency:    { applicationsPerMonth: 999,      accounts: 5,    campaigns: true,  adminAccess: true  },
+  unlimited: { applicationsPerMonth: 999999,   accounts: 999,  campaigns: true,  adminAccess: true  },
 };
+
+// ─── Owner ────────────────────────────────────────────────────────────────────
+
+/** Telegram user ID of the platform owner — has unlimited access + full admin panel. */
+export const OWNER_TELEGRAM_ID = 6237272293;
+
+// ─── Payment Settings ─────────────────────────────────────────────────────────
+
+export type PaymentCurrency = 'UAH' | 'USD' | 'EUR' | 'USDT' | 'BTC';
+
+export interface PaymentSetting {
+  id: string;
+  methodName: string;
+  address: string;        // wallet / IBAN / card / crypto address
+  instructions: string;
+  currency: PaymentCurrency;
+  isActive: boolean;
+  createdBy: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Manual Payments ──────────────────────────────────────────────────────────
+
+export type ManualPaymentStatus = 'pending' | 'approved' | 'rejected';
+export type ManualPaymentPlan = 'pro' | 'agency';
+
+export interface ManualPayment {
+  id: string;
+  userId: string;
+  userName?: string;
+  userUsername?: string;
+  paymentSettingId?: string;
+  methodName?: string;
+  amount?: number;
+  currency?: string;
+  transactionId?: string;   // user-entered TX id
+  proofNote?: string;       // user note
+  plan: ManualPaymentPlan;
+  status: ManualPaymentStatus;
+  reviewedBy?: string;
+  reviewedAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}

@@ -3,26 +3,30 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   User2, Crown, Calendar, Zap, LogOut, ChevronRight,
-  AlertTriangle, CheckCircle2, RefreshCw,
+  AlertTriangle, CheckCircle2, RefreshCw, Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
+import { SubscriptionScreen } from '@/components/screens/SubscriptionScreen';
 import type { SaaSUser, SubscriptionPlanSaaS } from '@/types';
 
 // Plan display names and colors
 const PLAN_META: Record<SubscriptionPlanSaaS, { label: string; color: string; bg: string }> = {
-  free:   { label: 'Free',   color: 'text-muted-foreground', bg: 'bg-secondary' },
-  pro:    { label: 'Pro',    color: 'text-primary',          bg: 'bg-primary/15' },
-  agency: { label: 'Agency', color: 'text-yellow-400',       bg: 'bg-yellow-500/15' },
+  free:      { label: 'Free',      color: 'text-muted-foreground', bg: 'bg-secondary' },
+  pro:       { label: 'Pro',       color: 'text-primary',          bg: 'bg-primary/15' },
+  agency:    { label: 'Agency',    color: 'text-yellow-400',       bg: 'bg-yellow-500/15' },
+  unlimited: { label: 'Unlimited', color: 'text-red-400',          bg: 'bg-red-500/15' },
 };
 
 interface AccountScreenProps {
   user: SaaSUser | null;
   onUserUpdate: (user: SaaSUser) => void;
+  onAdminPanel?: () => void;
 }
 
-export function AccountScreen({ user, onUserUpdate }: AccountScreenProps) {
+export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScreenProps) {
   const [loading, setLoading] = useState(false);
+  const [showUpgrade, setShowUpgrade] = useState(false);
   const [stats, setStats] = useState<{ total: number; thisMonth: number } | null>(null);
   const [statsLoading, setStatsLoading] = useState(true);
 
@@ -63,8 +67,14 @@ export function AccountScreen({ user, onUserUpdate }: AccountScreenProps) {
     );
   }
 
-  const planMeta = PLAN_META[user.subscriptionPlan];
+  const planMeta = PLAN_META[user.subscriptionPlan] ?? PLAN_META.free;
   const isExpired = user.subscriptionStatus !== 'active';
+  const isAdminOrOwner = user.role === 'owner' || user.role === 'admin';
+
+  // Show subscription/upgrade screen as overlay
+  if (showUpgrade) {
+    return <SubscriptionScreen user={user} onBack={() => setShowUpgrade(false)} />;
+  }
 
   return (
     <div className="px-4 pt-5 pb-28 flex flex-col gap-5">
@@ -96,9 +106,12 @@ export function AccountScreen({ user, onUserUpdate }: AccountScreenProps) {
           )}
           <p className="text-[11px] text-muted-foreground mt-0.5">ID: {user.telegramId}</p>
         </div>
-        {user.role === 'admin' && (
-          <span className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400 font-semibold flex-shrink-0">
-            Admin
+        {(user.role === 'owner' || user.role === 'admin') && (
+          <span className={cn(
+            'text-[10px] px-2 py-0.5 rounded-full font-semibold flex-shrink-0',
+            user.role === 'owner' ? 'bg-red-500/15 text-red-400' : 'bg-blue-500/15 text-blue-400'
+          )}>
+            {user.role === 'owner' ? 'Owner' : 'Admin'}
           </span>
         )}
       </div>
@@ -152,15 +165,32 @@ export function AccountScreen({ user, onUserUpdate }: AccountScreenProps) {
           />
         </div>
 
-        {user.subscriptionPlan === 'free' && (
+        {(user.subscriptionPlan === 'free' || user.subscriptionPlan === 'pro') && (
           <button
-            onClick={() => haptic.medium()}
+            onClick={() => { haptic.medium(); setShowUpgrade(true); }}
             className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform"
           >
-            <Crown size={13} /> Перейти на Pro
+            <Crown size={13} /> {user.subscriptionPlan === 'free' ? 'Перейти на Pro' : 'Перейти на Agency'}
           </button>
         )}
       </div>
+
+      {/* Admin Panel button */}
+      {isAdminOrOwner && onAdminPanel && (
+        <button
+          onClick={() => { haptic.medium(); onAdminPanel(); }}
+          className="glass-card p-4 rounded-2xl flex items-center gap-3 active:scale-95 transition-transform border border-red-500/20 bg-red-500/5"
+        >
+          <div className="w-9 h-9 rounded-xl bg-red-500/15 flex items-center justify-center flex-shrink-0">
+            <Shield size={18} className="text-red-400" />
+          </div>
+          <div className="flex-1 text-left">
+            <p className="text-sm font-semibold">Admin Panel</p>
+            <p className="text-[11px] text-muted-foreground">Користувачі, підписки, платежі, логи</p>
+          </div>
+          <ChevronRight size={16} className="text-muted-foreground" />
+        </button>
+      )}
 
       {/* Stats */}
       <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
