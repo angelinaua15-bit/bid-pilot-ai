@@ -299,4 +299,162 @@ export interface Application {
 
 // ─── Navigation ──────────────────────────────────────────────────────────────
 
-export type NavTab = 'home' | 'projects' | 'settings' | 'logs' | 'history' | 'profile';
+export type NavTab = 'home' | 'freelance' | 'campaigns' | 'logs' | 'account';
+
+// ─── SaaS User ────────────────────────────────────────────────────────────────
+
+export type UserRole = 'user' | 'admin';
+export type SubscriptionPlanSaaS = 'free' | 'pro' | 'agency';
+export type SubscriptionStatusSaaS = 'active' | 'expired' | 'cancelled';
+
+export interface SaaSUser {
+  id: string;
+  telegramId: number;
+  name: string;
+  username?: string;
+  avatarUrl?: string;
+  role: UserRole;
+  subscriptionPlan: SubscriptionPlanSaaS;
+  subscriptionStatus: SubscriptionStatusSaaS;
+  subscriptionExpiresAt?: string;
+  applicationsThisMonth: number;
+  isDisabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Freelance Account ────────────────────────────────────────────────────────
+
+export type FreelanceAccountStatus = 'connected' | 'expired' | 'error' | 'disconnected';
+
+export interface FreelanceAccount {
+  id: string;
+  userId: string;
+  platform: string;
+  accountName?: string;
+  status: FreelanceAccountStatus;
+  lastLoginAt?: string;
+  lastCheckAt?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Freelance Filter ─────────────────────────────────────────────────────────
+
+export interface FreelanceFilter {
+  id: string;
+  userId: string;
+  minBudgetUah: number;
+  minBudgetUsd: number;
+  allowedKeywords: string[];
+  blockedKeywords: string[];
+  allowedCategories: string[];
+  blockedCategories: string[];
+  aiScoreMin: number;
+  dailyLimit: number;
+  proposalStyle: ProposalTone;
+  isEnabled: boolean;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Telegram Channel ─────────────────────────────────────────────────────────
+
+export type ChannelType = 'channel' | 'group';
+export type ChannelStatus = 'active' | 'inactive';
+export type PostingMethod = 'bot' | 'admin' | 'manual';
+
+export interface TelegramChannel {
+  id: string;
+  title: string;
+  usernameOrLink: string;
+  type: ChannelType;
+  category?: string;
+  language: string;
+  status: ChannelStatus;
+  postingMethod: PostingMethod;
+  membersCount?: number;
+  notes?: string;
+  createdBy?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Telegram Bot ─────────────────────────────────────────────────────────────
+
+export type BotStatus = 'connected' | 'expired' | 'error';
+
+export interface TelegramBot {
+  id: string;
+  userId: string;
+  name?: string;
+  botUsername?: string;
+  status: BotStatus;
+  createdAt: string;
+}
+
+// ─── Campaign ─────────────────────────────────────────────────────────────────
+
+export type CampaignStatus = 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'failed';
+export type ScheduleType = 'now' | 'scheduled' | 'interval';
+
+export interface Campaign {
+  id: string;
+  userId: string;
+  title: string;
+  messageText: string;
+  mediaUrl?: string;
+  targetChannelIds: string[];
+  status: CampaignStatus;
+  scheduleType: ScheduleType;
+  scheduledAt?: string;
+  delayMinSeconds: number;
+  delayMaxSeconds: number;
+  sentCount: number;
+  failedCount: number;
+  totalCount: number;
+  createdAt: string;
+  updatedAt: string;
+}
+
+// ─── Campaign Message ─────────────────────────────────────────────────────────
+
+export type CampaignMessageStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+
+export interface CampaignMessage {
+  id: string;
+  campaignId: string;
+  channelId: string;
+  channelTitle?: string;
+  status: CampaignMessageStatus;
+  errorReason?: string;
+  sentAt?: string;
+  createdAt: string;
+}
+
+// ─── Dashboard Stats (SaaS) ───────────────────────────────────────────────────
+
+export interface SaaSDashboardStats {
+  sentTotal: number;
+  sentToday: number;
+  sentUnconfirmed: number;
+  failed: number;
+  skipped: number;
+  applicationsThisMonth: number;
+  monthlyLimit: number;
+  isWorkerRunning: boolean;
+  accountStatus: FreelanceAccountStatus | null;
+}
+
+// ─── Plan limits ──────────────────────────────────────────────────────────────
+
+export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
+  applicationsPerMonth: number;
+  accounts: number;
+  campaigns: boolean;
+  adminAccess: boolean;
+}> = {
+  free:   { applicationsPerMonth: 20,  accounts: 1, campaigns: false, adminAccess: false },
+  pro:    { applicationsPerMonth: 300, accounts: 1, campaigns: true,  adminAccess: false },
+  agency: { applicationsPerMonth: 999, accounts: 5, campaigns: true,  adminAccess: true  },
+};
