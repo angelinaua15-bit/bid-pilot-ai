@@ -20,10 +20,11 @@ const STATUS_FILTERS: { id: BidStatus | 'all'; label: string }[] = [
 ];
 
 const STATUS_STYLE: Record<BidStatus, { label: string; cls: string }> = {
-  draft:   { label: 'Чернетка',   cls: 'bg-secondary text-muted-foreground' },
-  sent:    { label: 'Відправлено', cls: 'bg-blue-500/15 text-blue-400' },
-  replied: { label: 'Відповідь',  cls: 'bg-green-500/15 text-green-400' },
-  skipped: { label: 'Пропущено',  cls: 'bg-secondary text-muted-foreground' },
+  draft:            { label: 'Чернетка',     cls: 'bg-secondary text-muted-foreground' },
+  sent:             { label: 'Відправлено',  cls: 'bg-blue-500/15 text-blue-400' },
+  sent_unconfirmed: { label: 'Надіслано?',   cls: 'bg-blue-500/10 text-blue-400/70' },
+  replied:          { label: 'Відповідь',    cls: 'bg-green-500/15 text-green-400' },
+  skipped:          { label: 'Пропущено',    cls: 'bg-secondary text-muted-foreground' },
 };
 
 export function HistoryScreen() {

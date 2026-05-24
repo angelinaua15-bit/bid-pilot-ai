@@ -51,7 +51,7 @@ function isQuotaError(err: unknown): boolean {
       return true;
     }
     // Check OpenAI SDK typed error
-    const asAny = err as Record<string, unknown>;
+    const asAny = err as unknown as Record<string, unknown>;
     if (typeof asAny.status === 'number' && asAny.status === 429) return true;
     if (typeof asAny.code === 'string' && asAny.code === 'insufficient_quota') return true;
   }
@@ -126,7 +126,7 @@ const FALLBACK_UA =
   'Готова обговорити деталі й одразу почати.';
 
 const FALLBACK_RU =
-  'Здравствуйте! У меня есть релевантный опыт в похожих задачах, готова взяться за ваш проект. ' +
+  'Здравствуйте! У меня есть релевантный оп��т в похожих задачах, готова взяться за ваш проект. ' +
   'Могу быстро разобраться в требованиях, предложить оптимальное решение и выполнить работу качественно. ' +
   'Готова обсудить детали и начать.';
 
@@ -192,7 +192,7 @@ function buildTemplateBid(project: Project, _profile?: CompanyProfile): Generate
     ? ['Есть ли техническое задание или макет?', 'Какие сроки критичны для запуска?']
     : lang === 'en'
       ? ['Do you have a technical spec or design mockup?', 'What are the critical deadlines?']
-      : ['Чи є технічне завдання або Figma-макет?', 'Які терміни критичні для запуску?'];
+      : ['Чи є технічне завдання або Figma-макет?', '��кі терміни критичні для запуску?'];
 
   return {
     id: `bid_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`,

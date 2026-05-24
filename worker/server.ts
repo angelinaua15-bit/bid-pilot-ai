@@ -225,8 +225,9 @@ async function runAutoLoop() {
     cycleCounters.failed    = Number(result.errors        ?? cycleCounters.failed)
 
     // Track processed projects so duplicates are never re-submitted
-    if (Array.isArray(result.processedIds)) {
-      for (const id of result.processedIds) processedProjectIds.add(String(id))
+    const resultAny = result as unknown as Record<string, unknown>;
+    if (Array.isArray(resultAny.processedIds)) {
+      for (const id of resultAny.processedIds) processedProjectIds.add(String(id))
     }
 
     addLog({
