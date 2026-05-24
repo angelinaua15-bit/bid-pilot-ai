@@ -5,7 +5,7 @@ import {
   User2, Crown, Calendar, Zap, LogOut, ChevronRight,
   AlertTriangle, CheckCircle2, RefreshCw, Shield,
 } from 'lucide-react';
-import { cn } from '@/lib/utils';
+import { cn, isOwner, isAdminUser } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 import { SubscriptionScreen } from '@/components/screens/SubscriptionScreen';
 import type { SaaSUser, SubscriptionPlanSaaS } from '@/types';
@@ -68,8 +68,9 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
   }
 
   const planMeta = PLAN_META[user.subscriptionPlan] ?? PLAN_META.free;
-  const isExpired = user.subscriptionStatus !== 'active';
-  const isAdminOrOwner = user.role === 'owner' || user.role === 'admin';
+  const userIsOwner = isOwner(user);
+  const isExpired = !userIsOwner && user.subscriptionStatus !== 'active';
+  const isAdminOrOwner = isAdminUser(user);
 
   // Show subscription/upgrade screen as overlay
   if (showUpgrade) {
@@ -149,23 +150,23 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
             plan={user.subscriptionPlan}
             feature="applications"
             label="Заявок на місяць"
-            values={{ free: '20', pro: '300', agency: '999' }}
+            values={{ free: '20', pro: '300', agency: '999', unlimited: 'Необмежено' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="campaigns"
             label="Telegram campaigns"
-            values={{ free: 'Недоступно', pro: 'Доступно', agency: 'Доступно' }}
+            values={{ free: 'Недоступно', pro: 'Доступно', agency: 'Доступно', unlimited: 'Доступно' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="accounts"
             label="Акаунтів"
-            values={{ free: '1', pro: '1', agency: '5' }}
+            values={{ free: '1', pro: '1', agency: '5', unlimited: 'Необмежено' }}
           />
         </div>
 
-        {(user.subscriptionPlan === 'free' || user.subscriptionPlan === 'pro') && (
+        {!userIsOwner && (user.subscriptionPlan === 'free' || user.subscriptionPlan === 'pro') && (
           <button
             onClick={() => { haptic.medium(); setShowUpgrade(true); }}
             className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform"
@@ -229,10 +230,10 @@ function PlanFeatureRow({
   plan: SubscriptionPlanSaaS;
   feature: string;
   label: string;
-  values: Record<SubscriptionPlanSaaS, string>;
+  values: Partial<Record<SubscriptionPlanSaaS, string>>;
 }) {
   void feature;
-  const val = values[plan];
+  const val = values[plan] ?? values.agency ?? '';
   const isPositive = val !== 'Недоступно';
   return (
     <div className="flex items-center justify-between text-xs">
@@ -240,7 +241,7 @@ function PlanFeatureRow({
       <span className={cn('font-semibold', isPositive ? 'text-foreground' : 'text-muted-foreground/50')}>
         {isPositive ? (
           <span className="flex items-center gap-1">
-            {val === 'Доступно' && <CheckCircle2 size={11} className="text-green-400" />}
+            {(val === 'Доступно' || val === 'Необмежено') && <CheckCircle2 size={11} className="text-green-400" />}
             {val}
           </span>
         ) : (
