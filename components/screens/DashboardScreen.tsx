@@ -7,6 +7,7 @@ import {
   Clock, CheckCircle2, XCircle,
 } from 'lucide-react';
 import type { SaaSUser, SaaSDashboardStats, FreelanceAccount, Application, NavTab } from '@/types';
+import { haptic } from '@/lib/telegram';
 
 
 
