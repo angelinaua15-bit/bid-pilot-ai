@@ -190,9 +190,15 @@ export interface PlaywrightBidOptions {
 
 export interface PlaywrightBidResult {
   success: boolean;
+  /** true = submit was clicked but no definitive success signal — treat as sent_unconfirmed, not failed */
+  unconfirmed?: boolean;
   strategy: 'playwright';
   bidId?: string;
   screenshotPath?: string;
+  /** URL of the page before submit — for logging */
+  preSubmitUrl?: string;
+  /** URL of the page after submit — for logging */
+  postSubmitUrl?: string;
 }
 
 export async function submitBidViaPlaywright(
@@ -585,52 +591,99 @@ export async function submitBidViaPlaywright(
       throw new Error(`SUBMIT_NOT_FOUND: No submit button on ${opts.projectUrl}`);
     }
 
-    // ── 9. Wait for success confirmation ─────────────────────────────────────
-    log('info', '[BID] Waiting for success confirmation...');
-    await page.waitForTimeout(2_500);
+    // ── 9. Confirm outcome — do NOT mark as failed just because success text is absent ─
+    log('info', '[BID] Waiting for post-submit navigation (up to 30s)...');
 
-    const postUrl  = page.url();
-    const postText = (await page.evaluate(() => document.body.innerText).catch(() => '')).toLowerCase();
+    // Save pre-submit URL for comparison
+    const preSubmitUrl = currentUrl;
 
-    // Real confirmation phrases
-    const successPhrases = [
-      'заявку подано', 'ставку подано', 'відгук надіслано',
-      'ваша заявка', 'ваша ставка',
-      'bid submitted', 'application sent', 'proposal sent',
-      'дякуємо', 'успішно',
+    // Wait for either network idle or a URL change — whichever comes first
+    await Promise.race([
+      page.waitForNavigation({ waitUntil: 'networkidle', timeout: 30_000 }).catch(() => {}),
+      page.waitForURL((url) => url.toString() !== preSubmitUrl, { timeout: 30_000 }).catch(() => {}),
+      page.waitForTimeout(5_000),   // fallback: at least 5s
+    ]);
+
+    const postSubmitUrl  = page.url();
+    const postSubmitText = (await page.evaluate(() => document.body.innerText).catch(() => '')).toLowerCase();
+
+    log('info', `[BID] Post-submit — url:${postSubmitUrl} (was:${preSubmitUrl})`);
+    log('info', `[BID] Post-submit text (600): ${postSubmitText.slice(0, 600)}`);
+
+    // ── Tier 1: real error signals — only these cause FAILED ─────────────────
+    // Captcha / verification / validation / session errors
+    const hardErrorPhrases: Array<[string, string]> = [
+      ['captcha',                   'CAPTCHA_REQUIRED'],
+      ['верифікац',                 'VERIFY_REQUIRED'],
+      ['підтвердіть акаунт',        'VERIFY_REQUIRED'],
+      ['verify your account',       'VERIFY_REQUIRED'],
+      ['заповніть поле',            'VALIDATION_ERROR'],
+      ['це поле обов',              'VALIDATION_ERROR'],
+      ['помилка',                   'FORM_ERROR'],
+      ['неможливо подати',          'UNAVAILABLE'],
+      ['неможливо залишити',        'UNAVAILABLE'],
+      ['недостатньо коштів',        'INSUFFICIENT_FUNDS'],
+      ['insufficient funds',        'INSUFFICIENT_FUNDS'],
+      ['you already applied',       'ALREADY_BID'],
+      ['вже подали заявку',         'ALREADY_BID'],
+      ['ставка вже подана',         'ALREADY_BID'],
+      ['login required',            'SESSION_EXPIRED'],
+      ['потрібно увійти',           'SESSION_EXPIRED'],
+      ['увійдіть',                  'SESSION_EXPIRED'],
     ];
-    let confirmed = successPhrases.some((p) => postText.includes(p));
 
-    // Redirect away from /bids/new = success
-    if (!confirmed && postUrl !== currentUrl) {
-      const redirectedFromBidForm =
-        currentUrl.includes('/bids/new') && !postUrl.includes('/bids/new');
-      const redirectedToProjectOrFeed =
-        postUrl.includes('/projects') || postUrl.includes('/my/') || postUrl.includes('/project/');
-      if (redirectedFromBidForm || redirectedToProjectOrFeed) {
-        log('info', `[BID] Redirect after submit — success. old:${currentUrl} new:${postUrl}`);
-        confirmed = true;
+    for (const [phrase, code] of hardErrorPhrases) {
+      if (postSubmitText.includes(phrase)) {
+        if (code === 'ALREADY_BID') {
+          log('info', `[BID] Already bid detected post-submit ("${phrase}") — skipping silently`);
+          return { success: false, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
+        }
+        await saveFailureScreenshot(`error-${code.toLowerCase()}`);
+        log('error', `[BID] REAL ERROR after submit — ${code}: "${phrase}" | url:${postSubmitUrl}`);
+        throw new Error(`${code}: "${phrase}" detected after submit on ${opts.projectUrl}`);
       }
     }
 
-    // Form disappearing = submission accepted
-    if (!confirmed) {
-      const formGone = !(await page.locator('textarea, [contenteditable="true"]').first().isVisible({ timeout: 1_200 }).catch(() => false));
-      if (formGone) {
-        log('info', '[BID] Bid form closed after submit — treating as success');
-        confirmed = true;
-      }
+    // ── Tier 2: positive confirmation phrases → sent ──────────────────────────
+    const successPhrases = [
+      'заявку подано', 'ставку подано', 'ставку додано', 'додано ставку',
+      'відгук надіслано', 'відгук відправлено', 'заявку надіслано',
+      'proposal submitted', 'bid submitted', 'application sent',
+      'дякуємо', 'успішно', 'your bid',
+    ];
+    const hasSuccessText = successPhrases.some((p) => postSubmitText.includes(p));
+    if (hasSuccessText) {
+      log('success', `[BID] CONFIRMED by success text — url:${postSubmitUrl}`);
+      return { success: true, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
     }
 
-    if (!confirmed) {
-      await saveFailureScreenshot('no-confirm');
-      log('error', `[BID] NO_CONFIRM — url:${postUrl}`);
-      log('error', `[BID] Post-submit text: ${postText.slice(0, 600)}`);
-      throw new Error(`NO_CONFIRM: Bid submitted but no success state detected on ${opts.projectUrl}`);
+    // ── Tier 3: redirect away from /bids/new → sent ───────────────────────────
+    const urlChanged = postSubmitUrl !== preSubmitUrl;
+    const leftBidForm = preSubmitUrl.includes('/bids/new') && !postSubmitUrl.includes('/bids/new');
+    if (urlChanged && leftBidForm) {
+      log('success', `[BID] CONFIRMED by redirect from /bids/new — new url:${postSubmitUrl}`);
+      return { success: true, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
     }
 
-    log('success', `[BID] SUCCESS — bid submitted: ${opts.projectUrl}`);
-    return { success: true, strategy: 'playwright' };
+    // ── Tier 4: form disappeared after submit → sent ──────────────────────────
+    const formGone = !(await page.locator('textarea, [contenteditable="true"]').first()
+      .isVisible({ timeout: 1_500 }).catch(() => false));
+    if (formGone) {
+      log('success', `[BID] CONFIRMED by form disappearance — url:${postSubmitUrl}`);
+      return { success: true, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
+    }
+
+    // ── Tier 5: URL changed at all (any redirect) → sent ─────────────────────
+    if (urlChanged) {
+      log('success', `[BID] CONFIRMED by any URL change — old:${preSubmitUrl} new:${postSubmitUrl}`);
+      return { success: true, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
+    }
+
+    // ── Tier 6: submit was clicked, no error found → sent_unconfirmed ─────────
+    // Do NOT throw. Do NOT screenshot. Just flag as unconfirmed.
+    log('warning', `[BID] SENT_UNCONFIRMED — submit clicked, no error found, no clear success signal | url:${postSubmitUrl}`);
+    log('warning', `[BID] Post-submit text snapshot: ${postSubmitText.slice(0, 400)}`);
+    return { success: true, unconfirmed: true, strategy: 'playwright', preSubmitUrl, postSubmitUrl };
 
   } catch (err) {
     await page.screenshot({ path: screenshotPath, fullPage: true }).catch(() => {});

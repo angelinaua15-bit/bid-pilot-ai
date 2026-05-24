@@ -125,7 +125,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
   const [runResult, setRunResult] = useState<{ submitted: number; skipped: number } | null>(null);
   const [runError, setRunError] = useState<string | null>(null);
   const [applications, setApplications] = useState<Application[]>([]);
-  const [appTab, setAppTab] = useState<'sent' | 'skipped' | 'all'>('sent');
+  const [appTab, setAppTab] = useState<'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all'>('sent');
   const [appLoading, setAppLoading] = useState(false);
 
   const loadData = useCallback(async () => {
@@ -190,7 +190,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
     }
   }, []);
 
-  const loadApplications = useCallback(async (tab: 'sent' | 'skipped' | 'all') => {
+  const loadApplications = useCallback(async (tab: 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all') => {
     setAppLoading(true);
     try {
       const res = await fetch(`/api/applications?status=${tab}&limit=20`).then((r) => r.json()).catch(() => null);
@@ -622,8 +622,14 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             </div>
 
             {/* Tabs */}
-            <div className="flex gap-1 mb-2">
-              {(['sent', 'skipped', 'all'] as const).map((tab) => (
+            <div className="flex flex-wrap gap-1 mb-2">
+              {([
+                ['sent',             'Відправлені'],
+                ['sent_unconfirmed', 'Непідтверджені'],
+                ['skipped',          'Пропущені'],
+                ['failed',           'Помилки'],
+                ['all',              'Всі'],
+              ] as const).map(([tab, label]) => (
                 <button
                   key={tab}
                   onClick={() => { haptic.light(); setAppTab(tab); }}
@@ -634,7 +640,7 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                       : 'bg-secondary text-muted-foreground'
                   )}
                 >
-                  {tab === 'sent' ? 'Відправлені' : tab === 'skipped' ? 'Пропущені' : 'Всі'}
+                  {label}
                 </button>
               ))}
             </div>
@@ -646,11 +652,11 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
             ) : applications.length === 0 ? (
               <div className="glass-card rounded-2xl p-4 text-center">
                 <p className="text-xs text-muted-foreground leading-relaxed">
-                  {appTab === 'sent'
-                    ? 'Ще немає відправлених заявок. Запустіть worker або зачекайте нові релевантні проєкти.'
-                    : appTab === 'skipped'
-                      ? 'Немає пропущених проєктів.'
-                      : 'Немає заявок. Запустіть worker для обробки проєктів.'}
+                  {appTab === 'sent'             ? 'Ще немає відправлених заявок. Запустіть worker або зачекайте нові релевантні проєкти.' :
+                   appTab === 'sent_unconfirmed' ? 'Немає непідтверджених заявок.' :
+                   appTab === 'skipped'          ? 'Немає пропущених проєктів.' :
+                   appTab === 'failed'           ? 'Немає помилок — все добре.' :
+                                                  'Немає заявок. Запустіть worker для обробки проєктів.'}
                 </p>
               </div>
             ) : (
@@ -660,13 +666,15 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                     <div className="flex items-start gap-3">
                       <div className={cn(
                         'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5',
-                        app.status === 'sent'    ? 'bg-green-500/15' :
-                        app.status === 'skipped' ? 'bg-yellow-500/15' :
-                                                   'bg-red-500/15'
+                        app.status === 'sent'             ? 'bg-green-500/15' :
+                        app.status === 'sent_unconfirmed' ? 'bg-blue-500/15' :
+                        app.status === 'skipped'          ? 'bg-yellow-500/15' :
+                                                            'bg-red-500/15'
                       )}>
-                        {app.status === 'sent'    ? <CheckCircle2 size={13} className="text-green-400" /> :
-                         app.status === 'skipped' ? <Clock size={13} className="text-yellow-400" /> :
-                                                    <XCircle size={13} className="text-red-400" />}
+                        {app.status === 'sent'             ? <CheckCircle2 size={13} className="text-green-400" /> :
+                         app.status === 'sent_unconfirmed' ? <CheckCircle2 size={13} className="text-blue-400" /> :
+                         app.status === 'skipped'          ? <Clock size={13} className="text-yellow-400" /> :
+                                                             <XCircle size={13} className="text-red-400" />}
                       </div>
                       <div className="flex-1 min-w-0">
                         <p className="text-xs font-medium truncate">{app.title}</p>
@@ -681,11 +689,16 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                             <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>
                           )}
                         </div>
-                        {app.status === 'skipped' && app.skippedReason && (
+                        {(app.status === 'skipped' || app.status === 'failed') && app.skippedReason && (
                           <p className="text-[10px] text-muted-foreground truncate mt-0.5 opacity-70">
-                            {app.skippedReason.length > 60
-                              ? app.skippedReason.slice(0, 60) + '…'
+                            {app.skippedReason.length > 70
+                              ? app.skippedReason.slice(0, 70) + '…'
                               : app.skippedReason}
+                          </p>
+                        )}
+                        {app.status === 'sent_unconfirmed' && (
+                          <p className="text-[10px] text-blue-400/70 mt-0.5">
+                            Відправлено, підтвердження не отримано
                           </p>
                         )}
                         {app.matchedKeywords && app.matchedKeywords.length > 0 && (
@@ -697,11 +710,15 @@ export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
                       <div className="flex flex-col items-end gap-1 flex-shrink-0">
                         <span className={cn(
                           'text-[10px] font-semibold',
-                          app.status === 'sent'    ? 'text-green-400' :
-                          app.status === 'skipped' ? 'text-yellow-400' :
-                                                     'text-red-400'
+                          app.status === 'sent'             ? 'text-green-400' :
+                          app.status === 'sent_unconfirmed' ? 'text-blue-400' :
+                          app.status === 'skipped'          ? 'text-yellow-400' :
+                                                              'text-red-400'
                         )}>
-                          {app.status === 'sent' ? 'Відправлено' : app.status === 'skipped' ? 'Пропущено' : 'Помилка'}
+                          {app.status === 'sent'             ? 'Відправлено' :
+                           app.status === 'sent_unconfirmed' ? 'Надіслано?' :
+                           app.status === 'skipped'          ? 'Пропущено' :
+                                                               'Помилка'}
                         </span>
                         <span className="text-[10px] text-muted-foreground">
                           {formatDistanceToNow(new Date(app.sentAt ?? app.createdAt), { addSuffix: true, locale: uk })}

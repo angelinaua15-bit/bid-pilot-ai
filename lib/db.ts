@@ -302,7 +302,7 @@ export async function saveApplication(app: Application): Promise<void> {
 
 export async function getApplications(options?: {
   limit?: number;
-  status?: 'sent' | 'skipped' | 'failed' | 'all';
+  status?: 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all';
 }): Promise<{ applications: Application[]; total: number }> {
   const limit = Math.min(options?.limit ?? 50, 500);
   const statusFilter = options?.status === 'all' ? undefined : options?.status;
