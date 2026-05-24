@@ -12,7 +12,12 @@
  */
 
 import { defaultAutoBidSettings, mockLogs, mockBids } from '@/lib/mock-data';
-import type { AutoBidSettings, AutoBidLog, GeneratedBid, Application } from '@/types';
+import type {
+  AutoBidSettings, AutoBidLog, GeneratedBid, Application,
+  SaaSUser, FreelanceAccount, FreelanceFilter,
+  TelegramChannel, TelegramBot, Campaign, CampaignMessage,
+  SaaSDashboardStats,
+} from '@/types';
 
 // ─── In-memory fallback store ─────────────────────────────────────────────────
 
@@ -361,6 +366,400 @@ export async function getApplications(options?: {
     if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
     return { applications: apps.slice(0, limit), total: apps.length };
   }
+}
+
+// ─── SaaS: Users ─────────────────────────────────────────────────────────────
+
+export async function getOrCreateUser(telegramId: number, name: string, username?: string): Promise<SaaSUser | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data: existing } = await db.from('users').select('*').eq('telegram_id', telegramId).maybeSingle();
+    if (existing) return mapUser(existing);
+    const { data: created, error } = await db.from('users')
+      .insert({ telegram_id: telegramId, name, username: username ?? null })
+      .select('*').single();
+    if (error) throw error;
+    return mapUser(created);
+  } catch (err) { console.error('[db] getOrCreateUser error:', err); return null; }
+}
+
+export async function getUserById(id: string): Promise<SaaSUser | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('users').select('*').eq('id', id).maybeSingle();
+    return data ? mapUser(data) : null;
+  } catch (err) { console.error('[db] getUserById error:', err); return null; }
+}
+
+export async function getAllUsers(limit = 100): Promise<SaaSUser[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db.from('users').select('*').order('created_at', { ascending: false }).limit(limit);
+    return (data ?? []).map(mapUser);
+  } catch (err) { console.error('[db] getAllUsers error:', err); return []; }
+}
+
+export async function updateUserPlan(id: string, plan: string, expiresAt?: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('users').update({
+      subscription_plan: plan,
+      subscription_status: 'active',
+      subscription_expires_at: expiresAt ?? null,
+      updated_at: new Date().toISOString(),
+    }).eq('id', id);
+  } catch (err) { console.error('[db] updateUserPlan error:', err); }
+}
+
+export async function disableUser(id: string, disabled: boolean): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('users').update({ is_disabled: disabled, updated_at: new Date().toISOString() }).eq('id', id);
+  } catch (err) { console.error('[db] disableUser error:', err); }
+}
+
+function mapUser(r: Record<string, unknown>): SaaSUser {
+  return {
+    id:                     r.id as string,
+    telegramId:             r.telegram_id as number,
+    name:                   r.name as string,
+    username:               r.username as string | undefined,
+    avatarUrl:              r.avatar_url as string | undefined,
+    role:                   (r.role as string ?? 'user') as SaaSUser['role'],
+    subscriptionPlan:       (r.subscription_plan as string ?? 'free') as SaaSUser['subscriptionPlan'],
+    subscriptionStatus:     (r.subscription_status as string ?? 'active') as SaaSUser['subscriptionStatus'],
+    subscriptionExpiresAt:  r.subscription_expires_at as string | undefined,
+    applicationsThisMonth:  (r.applications_this_month as number) ?? 0,
+    isDisabled:             (r.is_disabled as boolean) ?? false,
+    createdAt:              r.created_at as string,
+    updatedAt:              r.updated_at as string,
+  };
+}
+
+// ─── SaaS: Freelance Accounts ─────────────────────────────────────────────────
+
+export async function getFreelanceAccount(userId: string): Promise<FreelanceAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('freelance_accounts').select('*').eq('user_id', userId).maybeSingle();
+    return data ? mapFreelanceAccount(data) : null;
+  } catch (err) { console.error('[db] getFreelanceAccount error:', err); return null; }
+}
+
+export async function upsertFreelanceAccount(acc: Partial<FreelanceAccount> & { userId: string }): Promise<FreelanceAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const { data: existing } = await db.from('freelance_accounts').select('*').eq('user_id', acc.userId).maybeSingle();
+    if (existing) {
+      const { data, error } = await db.from('freelance_accounts').update({
+        account_name: acc.accountName ?? existing.account_name,
+        status: acc.status ?? existing.status,
+        last_login_at: acc.lastLoginAt ?? existing.last_login_at,
+        last_check_at: acc.lastCheckAt ?? existing.last_check_at,
+        updated_at: now,
+      }).eq('user_id', acc.userId).select('*').single();
+      if (error) throw error;
+      return mapFreelanceAccount(data);
+    } else {
+      const { data, error } = await db.from('freelance_accounts').insert({
+        user_id: acc.userId,
+        platform: acc.platform ?? 'freelancehunt',
+        account_name: acc.accountName ?? null,
+        status: acc.status ?? 'disconnected',
+        last_login_at: acc.lastLoginAt ?? null,
+        created_at: now,
+        updated_at: now,
+      }).select('*').single();
+      if (error) throw error;
+      return mapFreelanceAccount(data);
+    }
+  } catch (err) { console.error('[db] upsertFreelanceAccount error:', err); return null; }
+}
+
+function mapFreelanceAccount(r: Record<string, unknown>): FreelanceAccount {
+  return {
+    id:           r.id as string,
+    userId:       r.user_id as string,
+    platform:     r.platform as string,
+    accountName:  r.account_name as string | undefined,
+    status:       (r.status as string ?? 'disconnected') as FreelanceAccount['status'],
+    lastLoginAt:  r.last_login_at as string | undefined,
+    lastCheckAt:  r.last_check_at as string | undefined,
+    createdAt:    r.created_at as string,
+    updatedAt:    r.updated_at as string,
+  };
+}
+
+// ─── SaaS: Freelance Filters ──────────────────────────────────────────────────
+
+export async function getFreelanceFilter(userId: string): Promise<FreelanceFilter | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('freelance_filters').select('*').eq('user_id', userId).maybeSingle();
+    return data ? mapFreelanceFilter(data) : null;
+  } catch (err) { console.error('[db] getFreelanceFilter error:', err); return null; }
+}
+
+export async function upsertFreelanceFilter(f: Partial<FreelanceFilter> & { userId: string }): Promise<FreelanceFilter | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const payload: Record<string, unknown> = {
+      user_id:           f.userId,
+      min_budget_uah:    f.minBudgetUah    ?? 2000,
+      min_budget_usd:    f.minBudgetUsd    ?? 50,
+      allowed_keywords:  f.allowedKeywords ?? [],
+      blocked_keywords:  f.blockedKeywords ?? [],
+      allowed_categories: f.allowedCategories ?? [],
+      blocked_categories: f.blockedCategories ?? [],
+      ai_score_min:      f.aiScoreMin      ?? 0,
+      daily_limit:       f.dailyLimit      ?? 20,
+      proposal_style:    f.proposalStyle   ?? 'expert',
+      is_enabled:        f.isEnabled       ?? false,
+      updated_at:        now,
+    };
+    const { data, error } = await db.from('freelance_filters')
+      .upsert(payload, { onConflict: 'user_id' })
+      .select('*').single();
+    if (error) throw error;
+    return mapFreelanceFilter(data);
+  } catch (err) { console.error('[db] upsertFreelanceFilter error:', err); return null; }
+}
+
+function mapFreelanceFilter(r: Record<string, unknown>): FreelanceFilter {
+  return {
+    id:                r.id as string,
+    userId:            r.user_id as string,
+    minBudgetUah:      (r.min_budget_uah as number) ?? 2000,
+    minBudgetUsd:      (r.min_budget_usd as number) ?? 50,
+    allowedKeywords:   (r.allowed_keywords as string[]) ?? [],
+    blockedKeywords:   (r.blocked_keywords as string[]) ?? [],
+    allowedCategories: (r.allowed_categories as string[]) ?? [],
+    blockedCategories: (r.blocked_categories as string[]) ?? [],
+    aiScoreMin:        (r.ai_score_min as number) ?? 0,
+    dailyLimit:        (r.daily_limit as number) ?? 20,
+    proposalStyle:     (r.proposal_style as FreelanceFilter['proposalStyle']) ?? 'expert',
+    isEnabled:         (r.is_enabled as boolean) ?? false,
+    createdAt:         r.created_at as string,
+    updatedAt:         r.updated_at as string,
+  };
+}
+
+// ─── SaaS: Telegram Channels ──────────────────────────────────────────────────
+
+export async function getTelegramChannels(options?: { status?: string; limit?: number }): Promise<TelegramChannel[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    let query = db.from('telegram_channels').select('*').order('created_at', { ascending: false }).limit(options?.limit ?? 200);
+    if (options?.status) query = query.eq('status', options.status);
+    const { data } = await query;
+    return (data ?? []).map(mapChannel);
+  } catch (err) { console.error('[db] getTelegramChannels error:', err); return []; }
+}
+
+export async function upsertTelegramChannel(ch: Partial<TelegramChannel>): Promise<TelegramChannel | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const payload: Record<string, unknown> = {
+      title:             ch.title ?? '',
+      username_or_link:  ch.usernameOrLink ?? '',
+      type:              ch.type ?? 'channel',
+      category:          ch.category ?? null,
+      language:          ch.language ?? 'uk',
+      status:            ch.status ?? 'active',
+      posting_method:    ch.postingMethod ?? 'bot',
+      members_count:     ch.membersCount ?? null,
+      notes:             ch.notes ?? null,
+      created_by:        ch.createdBy ?? null,
+      updated_at:        now,
+    };
+    if (ch.id) {
+      const { data, error } = await db.from('telegram_channels').update(payload).eq('id', ch.id).select('*').single();
+      if (error) throw error;
+      return mapChannel(data);
+    } else {
+      const { data, error } = await db.from('telegram_channels').insert({ ...payload, created_at: now }).select('*').single();
+      if (error) throw error;
+      return mapChannel(data);
+    }
+  } catch (err) { console.error('[db] upsertTelegramChannel error:', err); return null; }
+}
+
+export async function deleteTelegramChannel(id: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('telegram_channels').delete().eq('id', id);
+  } catch (err) { console.error('[db] deleteTelegramChannel error:', err); }
+}
+
+function mapChannel(r: Record<string, unknown>): TelegramChannel {
+  return {
+    id:             r.id as string,
+    title:          r.title as string,
+    usernameOrLink: r.username_or_link as string,
+    type:           (r.type as TelegramChannel['type']) ?? 'channel',
+    category:       r.category as string | undefined,
+    language:       (r.language as string) ?? 'uk',
+    status:         (r.status as TelegramChannel['status']) ?? 'active',
+    postingMethod:  (r.posting_method as TelegramChannel['postingMethod']) ?? 'bot',
+    membersCount:   r.members_count as number | undefined,
+    notes:          r.notes as string | undefined,
+    createdBy:      r.created_by as string | undefined,
+    createdAt:      r.created_at as string,
+    updatedAt:      r.updated_at as string,
+  };
+}
+
+// ─── SaaS: Campaigns ─────────────────────────────────────────────────────────
+
+export async function getCampaigns(userId: string, limit = 50): Promise<Campaign[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db.from('campaigns').select('*').eq('user_id', userId).order('created_at', { ascending: false }).limit(limit);
+    return (data ?? []).map(mapCampaign);
+  } catch (err) { console.error('[db] getCampaigns error:', err); return []; }
+}
+
+export async function getCampaignById(id: string): Promise<Campaign | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('campaigns').select('*').eq('id', id).maybeSingle();
+    return data ? mapCampaign(data) : null;
+  } catch (err) { console.error('[db] getCampaignById error:', err); return null; }
+}
+
+export async function createCampaign(c: Omit<Campaign, 'id' | 'createdAt' | 'updatedAt' | 'sentCount' | 'failedCount' | 'totalCount'>): Promise<Campaign | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const { data, error } = await db.from('campaigns').insert({
+      user_id:            c.userId,
+      title:              c.title,
+      message_text:       c.messageText,
+      media_url:          c.mediaUrl ?? null,
+      target_channel_ids: c.targetChannelIds,
+      status:             c.status ?? 'draft',
+      schedule_type:      c.scheduleType ?? 'now',
+      scheduled_at:       c.scheduledAt ?? null,
+      delay_min_seconds:  c.delayMinSeconds ?? 3,
+      delay_max_seconds:  c.delayMaxSeconds ?? 10,
+      sent_count:         0,
+      failed_count:       0,
+      total_count:        c.targetChannelIds.length,
+      created_at:         now,
+      updated_at:         now,
+    }).select('*').single();
+    if (error) throw error;
+    return mapCampaign(data);
+  } catch (err) { console.error('[db] createCampaign error:', err); return null; }
+}
+
+export async function updateCampaignStatus(id: string, status: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('campaigns').update({ status, updated_at: new Date().toISOString() }).eq('id', id);
+  } catch (err) { console.error('[db] updateCampaignStatus error:', err); }
+}
+
+export async function getCampaignMessages(campaignId: string): Promise<CampaignMessage[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db.from('campaign_messages').select('*').eq('campaign_id', campaignId).order('created_at', { ascending: true });
+    return (data ?? []).map(mapCampaignMessage);
+  } catch (err) { console.error('[db] getCampaignMessages error:', err); return []; }
+}
+
+function mapCampaign(r: Record<string, unknown>): Campaign {
+  return {
+    id:               r.id as string,
+    userId:           r.user_id as string,
+    title:            r.title as string,
+    messageText:      r.message_text as string,
+    mediaUrl:         r.media_url as string | undefined,
+    targetChannelIds: (r.target_channel_ids as string[]) ?? [],
+    status:           (r.status as Campaign['status']) ?? 'draft',
+    scheduleType:     (r.schedule_type as Campaign['scheduleType']) ?? 'now',
+    scheduledAt:      r.scheduled_at as string | undefined,
+    delayMinSeconds:  (r.delay_min_seconds as number) ?? 3,
+    delayMaxSeconds:  (r.delay_max_seconds as number) ?? 10,
+    sentCount:        (r.sent_count as number) ?? 0,
+    failedCount:      (r.failed_count as number) ?? 0,
+    totalCount:       (r.total_count as number) ?? 0,
+    createdAt:        r.created_at as string,
+    updatedAt:        r.updated_at as string,
+  };
+}
+
+function mapCampaignMessage(r: Record<string, unknown>): CampaignMessage {
+  return {
+    id:           r.id as string,
+    campaignId:   r.campaign_id as string,
+    channelId:    r.channel_id as string,
+    status:       (r.status as CampaignMessage['status']) ?? 'pending',
+    errorReason:  r.error_reason as string | undefined,
+    sentAt:       r.sent_at as string | undefined,
+    createdAt:    r.created_at as string,
+  };
+}
+
+// ─── SaaS: Dashboard Stats ────────────────────────────────────────────────────
+
+export async function getSaaSDashboardStats(userId: string): Promise<SaaSDashboardStats> {
+  const fallback: SaaSDashboardStats = {
+    sentTotal: 0, sentToday: 0, sentUnconfirmed: 0, failed: 0, skipped: 0,
+    applicationsThisMonth: 0, monthlyLimit: 20, isWorkerRunning: false, accountStatus: null,
+  };
+  if (!isSupabaseConfigured) return fallback;
+  try {
+    const db = getDb(); if (!db) return fallback;
+    const today = new Date(); today.setHours(0, 0, 0, 0);
+    const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).toISOString();
+
+    const [appsRes, acctRes, userRes] = await Promise.all([
+      db.from('applications').select('status, created_at, sent_at').eq('user_id', userId),
+      db.from('freelance_accounts').select('status').eq('user_id', userId).maybeSingle(),
+      db.from('users').select('applications_this_month, subscription_plan').eq('id', userId).maybeSingle(),
+    ]);
+
+    const apps = appsRes.data ?? [];
+    const sentTotal       = apps.filter((a: Record<string,string>) => a.status === 'sent' || a.status === 'sent_unconfirmed').length;
+    const sentToday       = apps.filter((a: Record<string,string>) => (a.status === 'sent' || a.status === 'sent_unconfirmed') && new Date(a.sent_at ?? a.created_at) >= today).length;
+    const sentUnconfirmed = apps.filter((a: Record<string,string>) => a.status === 'sent_unconfirmed').length;
+    const failed          = apps.filter((a: Record<string,string>) => a.status === 'failed').length;
+    const skipped         = apps.filter((a: Record<string,string>) => a.status === 'skipped').length;
+    const thisMonth       = apps.filter((a: Record<string,string>) => new Date(a.created_at) >= new Date(startOfMonth)).length;
+
+    const plan = (userRes.data?.subscription_plan ?? 'free') as string;
+    const limits: Record<string, number> = { free: 20, pro: 300, agency: 999 };
+    const monthlyLimit = limits[plan] ?? 20;
+
+    return {
+      sentTotal, sentToday, sentUnconfirmed, failed, skipped,
+      applicationsThisMonth: thisMonth,
+      monthlyLimit,
+      isWorkerRunning: false,
+      accountStatus: (acctRes.data?.status as SaaSDashboardStats['accountStatus']) ?? null,
+    };
+  } catch (err) { console.error('[db] getSaaSDashboardStats error:', err); return fallback; }
 }
 
 export async function getBids(options?: {

@@ -2,27 +2,46 @@
 
 import { useEffect, useState, useCallback } from 'react';
 import {
-  Bot, TrendingUp, Zap, AlertTriangle,
-  ArrowRight, RefreshCw, Activity, Play,
-  Square, CheckCircle2, XCircle, Clock,
-  Database, MessageCircle, Cpu, Globe,
+  TrendingUp, AlertTriangle, RefreshCw,
+  Send, SkipForward, Play, Square, Wifi, WifiOff,
 } from 'lucide-react';
-import { haptic } from '@/lib/telegram';
-import { StatCard } from '@/components/shared/StatCard';
-import { LoadingState } from '@/components/shared/LoadingState';
-import { EmptyState } from '@/components/shared/EmptyState';
-import type { AutoBidSettings, AutoBidLog, Application, NavTab } from '@/types';
 
-interface RealStats {
-  sentTotal: number;
-  sentToday: number;
-  draftTotal: number;
-  errorCount: number;
-  successCount: number;
-}
+
+
+
 import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
 import { cn } from '@/lib/utils';
+
+// ── Account status badge ──────────────────────────────────────────────────────
+function AccountStatusBadge({ status }: { status: FreelanceAccount['status'] | null }) {
+  if (!status) return <span className="flex items-center gap-1 text-[11px] text-muted-foreground"><WifiOff size={11} /> Не підключено</span>;
+  const map = {
+    connected:    { cls: 'text-green-400',  Icon: Wifi,    label: 'Підключено' },
+    disconnected: { cls: 'text-muted-foreground', Icon: WifiOff, label: 'Відключено' },
+    expired:      { cls: 'text-yellow-400', Icon: WifiOff, label: 'Сесія закінчилась' },
+    error:        { cls: 'text-red-400',    Icon: WifiOff, label: 'Помилка' },
+  } as const;
+  const { cls, Icon, label } = map[status] ?? map.disconnected;
+  return <span className={cn('flex items-center gap-1 text-[11px] font-medium', cls)}><Icon size={11} /> {label}</span>;
+}
+
+// ── Stat card ─────────────────────────────────────────────────────────────────
+function StatCard({ label, value, icon: Icon, color }: { label: string; value: number; icon: React.ElementType; color: string }) {
+  return (
+    <div className="glass-card p-3 rounded-xl flex flex-col gap-1.5">
+      <div className={cn('w-7 h-7 rounded-lg flex items-center justify-center', color)}><Icon size={13} /></div>
+      <p className="text-xl font-bold leading-none">{value}</p>
+      <p className="text-[11px] text-muted-foreground leading-tight">{label}</p>
+    </div>
+  );
+}
+
+// ── Props ─────────────────────────────────────────────────────────────────────
+interface DashboardScreenProps {
+  user: SaaSUser | null;
+  onNavigate: (tab: NavTab) => void;
+}
 
 interface IntegrationCheck {
   ok: boolean;
@@ -111,627 +130,212 @@ const LOG_ICONS: Record<string, React.ElementType> = {
   error:   XCircle,
 };
 
-interface DashboardScreenProps {
-  onNavigate: (tab: NavTab) => void;
-}
-
-export function DashboardScreen({ onNavigate }: DashboardScreenProps) {
-  const [settings, setSettings] = useState<AutoBidSettings | null>(null);
-  const [recentLogs, setRecentLogs] = useState<AutoBidLog[]>([]);
-  const [status, setStatus] = useState<StatusData | null>(null);
-  const [realStats, setRealStats] = useState<RealStats>({ sentTotal: 0, sentToday: 0, draftTotal: 0, errorCount: 0, successCount: 0 });
+export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
+  const [stats, setStats]     = useState<SaaSDashboardStats | null>(null);
+  const [account, setAccount] = useState<FreelanceAccount | null>(null);
+  const [apps, setApps]       = useState<Application[]>([]);
   const [loading, setLoading] = useState(true);
-  const [running, setRunning] = useState(false);
-  const [runResult, setRunResult] = useState<{ submitted: number; skipped: number } | null>(null);
-  const [runError, setRunError] = useState<string | null>(null);
-  const [applications, setApplications] = useState<Application[]>([]);
-  const [appTab, setAppTab] = useState<'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all'>('sent');
-  const [appLoading, setAppLoading] = useState(false);
+  const [appLoading, setAppLoading] = useState(true);
+  const [workerBusy, setWorkerBusy] = useState(false);
+  const [appTab, setAppTab]   = useState<Application['status'] | 'all'>('sent');
+  const userId = user?.id;
 
-  const loadData = useCallback(async () => {
-    setLoading(true);
+  const loadStats = useCallback(async () => {
+    if (!userId) { setLoading(false); return; }
     try {
-      const [settingsRes, logsRes, statusRes, statsRes] = await Promise.all([
-        fetch('/api/auto-bid/settings').then((r) => r.json()),
-        fetch('/api/logs?limit=5').then((r) => r.json()),
-        fetch('/api/status').then((r) => r.json()).catch(() => null),
-        fetch('/api/stats').then((r) => r.json()).catch(() => null),
-      ]);
-      if (settingsRes.ok) setSettings(settingsRes.data);
-      if (logsRes.ok) setRecentLogs(logsRes.data);
-      if (statusRes) {
-        // Always probe the local worker from the browser — process.env is server-only.
-        // If the local worker responds it takes full priority over whatever the server reported
-        // (server-side probes to localhost:8080 always fail when running on Vercel).
-        const localWorker = await probeLocalWorker();
-        if (localWorker) {
-          statusRes.localWorkerDetected = true;
-          statusRes.workerMode = true;
-          statusRes.workerModeLabel = 'local';
-          statusRes.checks.freelancehunt = {
-            ...statusRes.checks.freelancehunt,
-            ok: localWorker.connected,
-            mode: 'local_worker',
-            cookieCount: localWorker.cookieCount,
-            sessionPath: localWorker.sessionPath,
-            storageStateExists: localWorker.storageStateExists,
-            sessionValid: localWorker.sessionValid,
-            error: localWorker.connected
-              ? undefined
-              : localWorker.storageStateExists
-                ? 'Freelancehunt session expired — reconnect required'
-                : 'Local worker: storageState.json not found',
-          };
-          if (localWorker.autoLoop) statusRes.autoLoop = localWorker.autoLoop;
-          // Merge real-time counters from local worker into stats
-          if (localWorker.counters) {
-            setRealStats((prev) => ({
-              ...prev,
-              sentTotal:    localWorker.counters?.bidsSubmitted ?? prev.sentTotal,
-              sentToday:    localWorker.counters?.bidsSubmitted ?? prev.sentToday,
-              errorCount:   localWorker.counters?.errors        ?? prev.errorCount,
-              successCount: localWorker.counters?.bidsSubmitted ?? prev.successCount,
-            }));
-          }
-        } else if (statusRes.workerMode && statusRes.checks?.freelancehunt?.ok) {
-          // Fallback: fetch autoLoop from /api/freelancehunt/status for Railway mode
-          try {
-            const workerStatusRes = await fetch('/api/freelancehunt/status').then((r) => r.json()).catch(() => null);
-            if (workerStatusRes?.ok && workerStatusRes.data?.autoLoop) {
-              statusRes.autoLoop = workerStatusRes.data.autoLoop;
-            }
-          } catch { /* ignore */ }
-        }
-        setStatus(statusRes);
-      }
-      if (statsRes?.ok && statsRes.data) setRealStats(statsRes.data);
-    } finally {
-      setLoading(false);
-    }
-  }, []);
+      const res = await fetch(`/api/dashboard?userId=${userId}`).then((r) => r.json()).catch(() => null);
+      if (res?.ok) { setStats(res.stats); setAccount(res.account ?? null); }
+    } finally { setLoading(false); }
+  }, [userId]);
 
-  const loadApplications = useCallback(async (tab: 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all') => {
+  const loadApps = useCallback(async (status: typeof appTab) => {
+    if (!userId) { setAppLoading(false); return; }
     setAppLoading(true);
     try {
-      const res = await fetch(`/api/applications?status=${tab}&limit=20`).then((r) => r.json()).catch(() => null);
-      if (res?.ok && Array.isArray(res.data)) {
-        setApplications(res.data);
-      } else {
-        setApplications([]);
-      }
-    } finally {
-      setAppLoading(false);
-    }
-  }, []);
+      const res = await fetch(`/api/applications?userId=${userId}&status=${status}&limit=20`).then((r) => r.json()).catch(() => null);
+      setApps(res?.ok && Array.isArray(res.data) ? res.data : []);
+    } finally { setAppLoading(false); }
+  }, [userId]);
 
-  useEffect(() => { loadData(); }, [loadData]);
-  useEffect(() => { loadApplications(appTab); }, [loadApplications, appTab]);
+  useEffect(() => { loadStats(); }, [loadStats]);
+  useEffect(() => { loadApps(appTab); }, [loadApps, appTab]);
 
-  const handleToggleAutoBid = async () => {
-    if (!settings) return;
+  const handleToggleWorker = async () => {
+    if (!userId) return;
     haptic.medium();
-    const next = !settings.enabled;
-    const res = await fetch('/api/auto-bid/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: next }),
-    }).then((r) => r.json());
-    if (res.ok) setSettings(res.data);
-  };
-
-  const handleRunNow = async () => {
-    haptic.medium();
-    setRunning(true);
-    setRunResult(null);
-    setRunError(null);
+    setWorkerBusy(true);
     try {
-      const res = await fetch('/api/auto-bid/run', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({}),
-      }).then((r) => r.json());
-      if (res.ok) {
-  setRunResult({ submitted: res.data.bidsSubmitted, skipped: res.data.bidsSkipped });
-  haptic.success();
-  await loadData();
-  await loadApplications(appTab);
-      } else {
-        setRunError(res.error ?? 'Unknown error');
-        haptic.error();
-      }
-    } finally {
-      setRunning(false);
-    }
+      const isRunning = stats?.isWorkerRunning;
+      await fetch(isRunning ? '/api/freelance/stop' : '/api/freelance/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId }),
+      });
+      await loadStats();
+    } finally { setWorkerBusy(false); }
   };
 
-  const handleEmergencyStop = async () => {
-    haptic.error();
-    // POST /api/auto-bid/stop delegates to worker when in worker mode,
-    // otherwise sets emergencyStop flag in local DB settings.
-    await fetch('/api/auto-bid/stop', { method: 'POST' });
-    // Also update local settings state to reflect the stop
-    await fetch('/api/auto-bid/settings', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ enabled: false, emergencyStop: true }),
-    }).then((r) => r.json()).then((r) => { if (r.ok) setSettings(r.data); });
-  };
-
-  const dailyPercent = settings
-    ? Math.min(Math.round((realStats.sentToday / settings.dailyLimit) * 100), 100)
-    : 0;
+  const tabs: Array<{ id: typeof appTab; label: string }> = [
+    { id: 'sent', label: 'Надіслані' },
+    { id: 'sent_unconfirmed', label: 'Непідтверджені' },
+    { id: 'skipped', label: 'Пропущені' },
+    { id: 'failed', label: 'Помилки' },
+    { id: 'all', label: 'Всі' },
+  ];
 
   return (
-    <div className="flex flex-col pb-nav px-4 pt-4 fade-in gap-4">
+    <div className="px-4 pt-5 pb-28 flex flex-col gap-5">
       {/* Header */}
-      <div className="flex items-center justify-between">
+      <div className="flex items-start justify-between">
         <div>
-          <h1 className="text-xl font-bold text-balance">Auto-Bid Dashboard</h1>
-          <div className="flex items-center gap-1.5 mt-0.5">
-            <span className="w-1.5 h-1.5 rounded-full bg-green-400 inline-block" />
-            <p className="text-[11px] text-muted-foreground">Internal system — connected to main account</p>
-          </div>
+          <h1 className="text-lg font-bold">BidPilot</h1>
+          <p className="text-xs text-muted-foreground mt-0.5">
+            {user ? `${user.name} · план ${user.subscriptionPlan}` : 'Завантаження...'}
+          </p>
         </div>
         <button
-          onClick={() => { haptic.light(); loadData(); }}
-          disabled={loading}
-          className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center text-muted-foreground disabled:opacity-50"
+          onClick={() => { haptic.light(); loadStats(); loadApps(appTab); }}
+          className="w-8 h-8 rounded-lg bg-secondary flex items-center justify-center text-muted-foreground active:scale-90 transition-transform"
         >
-          <RefreshCw size={16} className={loading ? 'animate-spin' : ''} />
+          <RefreshCw size={14} className={loading ? 'animate-spin' : ''} />
         </button>
       </div>
 
-      {/* Auto-bid status toggle */}
-      <div className={cn(
-        'glass-card p-4 rounded-2xl',
-        settings?.enabled && !settings.emergencyStop && 'ring-1 ring-green-500/30',
-        settings?.emergencyStop && 'ring-1 ring-red-500/40',
-      )}>
-        <div className="flex items-center justify-between mb-3">
-          <div className="flex items-center gap-2">
-            <Bot size={18} className={settings?.enabled && !settings.emergencyStop ? 'text-green-400' : 'text-muted-foreground'} />
-            <span className="font-semibold text-sm">Auto-Bid</span>
-            {settings?.emergencyStop && (
-              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-red-500/15 text-red-400 font-medium">STOP</span>
-            )}
-          </div>
-          <button
-            onClick={handleToggleAutoBid}
-            disabled={!settings}
-            className={cn(
-              'relative w-12 h-6 rounded-full transition-all duration-300',
-              settings?.enabled && !settings.emergencyStop ? 'bg-green-500' : 'bg-secondary'
-            )}
-          >
-            <span className={cn(
-              'absolute top-0.5 w-5 h-5 rounded-full bg-white shadow transition-all duration-300',
-              settings?.enabled && !settings.emergencyStop ? 'left-6' : 'left-0.5'
-            )} />
-          </button>
-        </div>
-
-        <div className="flex items-center justify-between text-xs text-muted-foreground mb-2">
-          <span>Заявок сьогодні: {realStats.sentToday} / {settings?.dailyLimit ?? '—'}</span>
-          <span>{dailyPercent}%</span>
-        </div>
-        <div className="h-1.5 bg-secondary rounded-full overflow-hidden mb-3">
-          <div
-            className="h-full bg-green-500 rounded-full transition-all duration-500"
-            style={{ width: `${dailyPercent}%` }}
-          />
-        </div>
-
-        {/* Worker mode label */}
-        {status && (
-          <div className="flex flex-wrap items-center gap-x-1.5 gap-y-0.5 mb-2 px-0.5">
-            <span className={cn(
-              'w-1.5 h-1.5 rounded-full flex-shrink-0',
-              status.checks.freelancehunt.ok ? 'bg-green-400'
-                : status.localWorkerDetected ? 'bg-yellow-400'
-                : 'bg-red-400'
-            )} />
-            <span className="text-[10px] font-semibold text-primary">
-              {status.workerModeLabel === 'railway' ? 'Railway worker'
-                : status.workerModeLabel === 'local' ? 'Local worker connected'
-                : 'No worker'}
-            </span>
-            {status.checks.freelancehunt.ok ? (
-              <>
-                <span className="text-[10px] text-muted-foreground">·</span>
-                <span className="text-[10px] text-green-400 font-medium">Freelancehunt connected</span>
-                <span className="text-[10px] text-muted-foreground">·</span>
-                <span className="text-[10px] text-muted-foreground">
-                  storageState: {status.checks.freelancehunt.storageStateExists ? 'loaded' : 'missing'}
-                </span>
-                {status.checks.freelancehunt.cookieCount !== undefined && (
-                  <>
-                    <span className="text-[10px] text-muted-foreground">·</span>
-                    <span className="text-[10px] text-muted-foreground">{status.checks.freelancehunt.cookieCount} cookies</span>
-                  </>
-                )}
-              </>
-            ) : status.localWorkerDetected ? (
-              <>
-                <span className="text-[10px] text-muted-foreground">·</span>
-                <span className="text-[10px] text-yellow-400">
-                  {status.checks.freelancehunt.storageStateExists
-                    ? 'session expired — reconnect required'
-                    : 'storageState not found'}
-                </span>
-              </>
-            ) : (
-              <span className="text-[10px] text-muted-foreground">· session not found</span>
-            )}
-          </div>
-        )}
-
-        <div className="flex gap-2">
-          <button
-            onClick={handleRunNow}
-            disabled={running || !settings || !!settings.emergencyStop}
-            className="flex-1 py-2 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-1.5 disabled:opacity-40 transition-all active:scale-95 brand-glow"
-          >
-            {running ? (
-              <><RefreshCw size={13} className="animate-spin" />Запуск...</>
-            ) : (
-              <><Play size={13} />Start worker</>
-            )}
-          </button>
-          <button
-            onClick={() => { haptic.light(); onNavigate('settings'); }}
-            className="py-2 px-3 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold flex items-center gap-1 transition-all active:scale-95"
-          >
-            Налаштування
-          </button>
-          {settings?.enabled && (
-            <button
-              onClick={handleEmergencyStop}
-              title="Аварійна зупинка"
-              className="w-9 h-9 rounded-xl bg-red-500/10 text-red-400 flex items-center justify-center transition-all active:scale-95 flex-shrink-0"
-            >
-              <Square size={14} />
-            </button>
+      {/* Account status + worker toggle */}
+      <div className="glass-card p-4 rounded-2xl flex items-center justify-between gap-3">
+        <div className="flex flex-col gap-1">
+          <p className="text-xs font-semibold">Freelancehunt</p>
+          <AccountStatusBadge status={account?.status ?? null} />
+          {account?.accountName && (
+            <p className="text-[11px] text-muted-foreground">@{account.accountName}</p>
           )}
         </div>
-
-        {runResult && (
-          <div className="mt-2 text-xs text-center text-green-400 font-medium">
-            Цикл завершено — відправлено: {runResult.submitted}, пропущено: {runResult.skipped}
-          </div>
-        )}
-        {runError && (
-          <div className="mt-2 text-xs text-red-400 font-medium text-center leading-snug">
-            {runError}
-          </div>
+        {account?.status === 'connected' ? (
+          <button
+            onClick={handleToggleWorker}
+            disabled={workerBusy}
+            className={cn(
+              'flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-50',
+              stats?.isWorkerRunning
+                ? 'bg-red-500/15 text-red-400 border border-red-500/20'
+                : 'bg-green-500/15 text-green-400 border border-green-500/20'
+            )}
+          >
+            {stats?.isWorkerRunning ? <Square size={12} /> : <Play size={12} />}
+            {stats?.isWorkerRunning ? 'Зупинити' : 'Запустити'}
+          </button>
+        ) : (
+          <button
+            onClick={() => { haptic.light(); onNavigate('freelance'); }}
+            className="px-4 py-2 rounded-xl text-xs font-semibold bg-primary/15 text-primary border border-primary/20 active:scale-95 transition-transform"
+          >
+            Підключити
+          </button>
         )}
       </div>
 
-      {loading ? <LoadingState rows={2} /> : (
-        <>
-          {/* Stats — only shown when DB is connected and has real data */}
-          {status?.checks.database.ok ? (
-            <div className="grid grid-cols-2 gap-3">
-              <StatCard label="Відправлено сьогодні" value={realStats.sentToday} icon={<Zap size={16} />} accent />
-              <StatCard label="Всього відправлено" value={realStats.sentTotal} icon={<TrendingUp size={16} />} />
-              <StatCard label="Успішних (24h)" value={realStats.successCount} icon={<CheckCircle2 size={16} />} />
-              <StatCard label="Помилок (24h)" value={realStats.errorCount} icon={<Activity size={16} />} sublabel="за 24 год" />
-            </div>
-          ) : (
-            <EmptyState
-              icon={<Activity size={22} />}
-              title="Не підключено"
-              description="Статистика доступна після підключення бази даних"
-            />
-          )}
-
-          {/* Freelancehunt session status — always shown */}
-          {status && (
-            <div className={cn(
-              'glass-card rounded-2xl p-3 border',
-              status.checks.freelancehunt.ok
-                ? 'border-green-500/20 bg-green-500/5'
-                : status.checks.freelancehunt.storageStateExists
-                  ? 'border-yellow-500/20 bg-yellow-500/5'
-                  : 'border-border/50'
-            )}>
-              <div className="flex items-center gap-3">
-                <span className={cn(
-                  'w-2.5 h-2.5 rounded-full flex-shrink-0',
-                  status.checks.freelancehunt.ok ? 'bg-green-400'
-                    : status.checks.freelancehunt.storageStateExists ? 'bg-yellow-400'
-                    : 'bg-muted-foreground'
-                )} />
-                <div className="flex-1 min-w-0">
-                  <p className="text-xs font-semibold">
-                    {status.checks.freelancehunt.ok
-                      ? 'Freelancehunt Connected'
-                      : status.checks.freelancehunt.storageStateExists
-                        ? 'Freelancehunt session expired'
-                        : 'Freelancehunt session not found'}
-                  </p>
-                  <p className="text-[11px] text-muted-foreground truncate">
-                    {status.checks.freelancehunt.ok
-                      ? `storageState loaded · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
-                      : (status.checks.freelancehunt.error ?? 'Run: npm run login:freelancehunt')}
-                  </p>
-                </div>
-                {status.checks.freelancehunt.ok && (
-                  <CheckCircle2 size={14} className="text-green-400 flex-shrink-0" />
-                )}
-              </div>
-              {/* Auto-loop status row */}
-              {status.autoLoop && (
-                <div className="mt-2 pt-2 border-t border-border/50 flex items-center justify-between gap-2">
-                  <div className="flex items-center gap-1.5">
-                    <span className={cn(
-                      'w-1.5 h-1.5 rounded-full flex-shrink-0',
-                      status.autoLoop.enabled ? 'bg-green-400 animate-pulse' : 'bg-muted-foreground'
-                    )} />
-                    <span className="text-[11px] text-muted-foreground">
-                      Auto-loop {status.autoLoop.enabled ? `running (every ${status.autoLoop.intervalMs / 1000}s)` : 'stopped'}
-                    </span>
-                  </div>
-                  {status.autoLoop.lastCheckedAt && (
-                    <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                      {formatDistanceToNow(new Date(status.autoLoop.lastCheckedAt), { addSuffix: true, locale: uk })}
-                    </span>
-                  )}
-                </div>
-              )}
-              {status.autoLoop?.lastError && (
-                <p className="text-[11px] text-red-400 mt-1.5 leading-snug">{status.autoLoop.lastError}</p>
-              )}
-              {/* Navigate to account page */}
-              {!status.checks.freelancehunt.ok && (
-                <button
-                  onClick={() => { haptic.light(); onNavigate('profile'); }}
-                  className="mt-2 text-[11px] text-primary font-medium flex items-center gap-1"
-                >
-                  Connect account <ArrowRight size={10} />
-                </button>
-              )}
-            </div>
-          )}
-
-          {/* Setup instructions — only shown when no session and no worker URL */}
-          {status && !status.workerMode && !status.checks.freelancehunt.ok && (
-            <div className="glass-card rounded-2xl p-4 border border-yellow-500/20 bg-yellow-500/5">
-              <p className="text-xs font-semibold text-yellow-400 mb-2">Automation worker not configured</p>
-              <p className="text-[11px] text-muted-foreground mb-3 leading-relaxed">
-                Bids are submitted via Playwright browser automation (the Freelancehunt REST API for bid submission was removed). A saved session is required.
-              </p>
-              <div className="flex flex-col gap-1.5">
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">1</span>
-                  <p className="text-[11px] text-muted-foreground">Save your Freelancehunt session (run once locally):<br />
-                    <code className="font-mono text-foreground">npm run login:freelancehunt</code>
-                  </p>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">2</span>
-                  <p className="text-[11px] text-muted-foreground">Copy <code className="font-mono text-foreground">storageState.json</code> to the Railway deployment root (or set <code className="font-mono text-foreground">FREELANCEHUNT_SESSION_PATH</code>).</p>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">3</span>
-                  <p className="text-[11px] text-muted-foreground">Start the worker:<br />
-                    <code className="font-mono text-foreground">npm run worker:start</code>
-                  </p>
-                </div>
-                <div className="flex items-start gap-2">
-                  <span className="text-[10px] text-muted-foreground font-mono bg-secondary px-1.5 py-0.5 rounded flex-shrink-0">4</span>
-                  <p className="text-[11px] text-muted-foreground">Set in Vercel env vars:<br />
-                    <code className="font-mono text-foreground">AUTOMATION_WORKER_URL=http://YOUR_IP:3001</code><br />
-                    <code className="font-mono text-foreground">AUTOMATION_SECRET=your-secret</code>
-                  </p>
-                </div>
-              </div>
-            </div>
-          )}
-
-          {/* Integration status */}
-          {status && (
-            <div>
-              <h2 className="text-sm font-semibold mb-2">Integrations</h2>
-              <div className="glass-card rounded-2xl overflow-hidden divide-y divide-border">
-                {([
-                  { key: 'openai',        label: 'OpenAI',        icon: Cpu,           sub: status.checks.openai.model },
-                  { key: 'telegram',      label: 'Telegram',      icon: MessageCircle, sub: status.checks.telegram.chatId ? `chat ${status.checks.telegram.chatId}` : undefined },
-                  { key: 'database',      label: 'Database',      icon: Database,      sub: status.checks.database.backend },
-                  {
-                    key: 'freelancehunt',
-                    label: status.workerModeLabel === 'local'
-                      ? 'Freelancehunt (local worker)'
-                      : status.workerModeLabel === 'railway'
-                        ? 'Freelancehunt (Railway worker)'
-                        : 'Freelancehunt',
-                    icon: Globe,
-                    sub: status.checks.freelancehunt.ok
-                      ? `storageState loaded · ${status.checks.freelancehunt.cookieCount ?? 0} cookies`
-                      : (status.checks.freelancehunt.error ?? 'session not found'),
-                  },
-                ] as const).map(({ key, label, icon: Icon, sub }) => {
-                  const check = status.checks[key as keyof typeof status.checks];
-                  return (
-                    <div key={key} className="flex items-center gap-3 px-3 py-2.5">
-                      <Icon size={14} className="text-muted-foreground flex-shrink-0" />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium">{label}</p>
-                        {(sub || check.error) && (
-                          <p className="text-[11px] text-muted-foreground truncate">
-                            {check.error ?? sub}
-                          </p>
-                        )}
-                      </div>
-                      <span className={cn(
-                        'w-2 h-2 rounded-full flex-shrink-0',
-                        check.ok ? 'bg-green-400' : 'bg-red-400'
-                      )} />
-                    </div>
-                  );
-                })}
-              </div>
-            </div>
-          )}
-
-          {/* Recent logs */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold">Останні дії</h2>
-              <button
-                onClick={() => { haptic.light(); onNavigate('logs'); }}
-                className="text-xs text-primary font-medium flex items-center gap-1"
-              >
-                Всі логи <ArrowRight size={12} />
-              </button>
-            </div>
-            {recentLogs.length === 0 ? (
-              <p className="text-xs text-muted-foreground px-1">Немає даних</p>
-            ) : (
-              <div className="flex flex-col gap-1.5">
-                {recentLogs.slice(0, 5).map((log) => {
-                  const Icon = LOG_ICONS[log.level] ?? Clock;
-                  return (
-                    <div key={log.id} className="glass-card px-3 py-2.5 rounded-xl flex items-start gap-2.5">
-                      <Icon size={13} className={cn('mt-0.5 flex-shrink-0', LOG_COLORS[log.level])} />
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs leading-snug truncate">{log.message}</p>
-                        {log.projectTitle && (
-                          <p className="text-[11px] text-muted-foreground truncate mt-0.5">{log.projectTitle}</p>
-                        )}
-                      </div>
-                      <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                        {formatDistanceToNow(new Date(log.timestamp), { addSuffix: true, locale: uk })}
-                      </span>
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-
-          {/* Recent applications — real worker output only, no mock data */}
-          <div>
-            <div className="flex items-center justify-between mb-2">
-              <h2 className="text-sm font-semibold">Останні заявки</h2>
-              <button
-                onClick={() => { haptic.light(); onNavigate('history'); }}
-                className="text-xs text-primary font-medium flex items-center gap-1"
-              >
-                Всі <ArrowRight size={12} />
-              </button>
-            </div>
-
-            {/* Tabs */}
-            <div className="flex flex-wrap gap-1 mb-2">
-              {([
-                ['sent',             'Відправлені'],
-                ['sent_unconfirmed', 'Непідтверджені'],
-                ['skipped',          'Пропущені'],
-                ['failed',           'Помилки'],
-                ['all',              'Всі'],
-              ] as const).map(([tab, label]) => (
-                <button
-                  key={tab}
-                  onClick={() => { haptic.light(); setAppTab(tab); }}
-                  className={cn(
-                    'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
-                    appTab === tab
-                      ? 'bg-primary text-primary-foreground'
-                      : 'bg-secondary text-muted-foreground'
-                  )}
-                >
-                  {label}
-                </button>
-              ))}
-            </div>
-
-            {appLoading ? (
-              <div className="flex items-center justify-center py-6">
-                <RefreshCw size={14} className="animate-spin text-muted-foreground" />
-              </div>
-            ) : applications.length === 0 ? (
-              <div className="glass-card rounded-2xl p-4 text-center">
-                <p className="text-xs text-muted-foreground leading-relaxed">
-                  {appTab === 'sent'             ? 'Ще немає відправлених заявок. Запустіть worker або зачекайте нові релевантні проєкти.' :
-                   appTab === 'sent_unconfirmed' ? 'Немає непідтверджених заявок.' :
-                   appTab === 'skipped'          ? 'Немає пропущених проєктів.' :
-                   appTab === 'failed'           ? 'Немає помилок — все добре.' :
-                                                  'Немає заявок. Запустіть worker для обробки проєктів.'}
-                </p>
-              </div>
-            ) : (
-              <div className="flex flex-col gap-2">
-                {applications.map((app) => (
-                  <div key={app.id} className="glass-card p-3 rounded-xl">
-                    <div className="flex items-start gap-3">
-                      <div className={cn(
-                        'w-7 h-7 rounded-lg flex items-center justify-center flex-shrink-0 mt-0.5',
-                        app.status === 'sent'             ? 'bg-green-500/15' :
-                        app.status === 'sent_unconfirmed' ? 'bg-blue-500/15' :
-                        app.status === 'skipped'          ? 'bg-yellow-500/15' :
-                                                            'bg-red-500/15'
-                      )}>
-                        {app.status === 'sent'             ? <CheckCircle2 size={13} className="text-green-400" /> :
-                         app.status === 'sent_unconfirmed' ? <CheckCircle2 size={13} className="text-blue-400" /> :
-                         app.status === 'skipped'          ? <Clock size={13} className="text-yellow-400" /> :
-                                                             <XCircle size={13} className="text-red-400" />}
-                      </div>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-xs font-medium truncate">{app.title}</p>
-                        <div className="flex flex-wrap gap-x-2 gap-y-0.5 mt-0.5">
-                          <span className="text-[11px] text-muted-foreground">
-                            {app.budget} {app.currency}
-                          </span>
-                          {app.deadline && (
-                            <span className="text-[11px] text-muted-foreground">· {app.deadline}</span>
-                          )}
-                          {app.aiScore !== undefined && (
-                            <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>
-                          )}
-                        </div>
-                        {(app.status === 'skipped' || app.status === 'failed') && app.skippedReason && (
-                          <p className="text-[10px] text-muted-foreground truncate mt-0.5 opacity-70">
-                            {app.skippedReason.length > 70
-                              ? app.skippedReason.slice(0, 70) + '…'
-                              : app.skippedReason}
-                          </p>
-                        )}
-                        {app.status === 'sent_unconfirmed' && (
-                          <p className="text-[10px] text-blue-400/70 mt-0.5">
-                            Відправлено, підтвердження не отримано
-                          </p>
-                        )}
-                        {app.matchedKeywords && app.matchedKeywords.length > 0 && (
-                          <p className="text-[10px] text-primary/60 truncate mt-0.5">
-                            {app.matchedKeywords.slice(0, 3).join(', ')}
-                          </p>
-                        )}
-                      </div>
-                      <div className="flex flex-col items-end gap-1 flex-shrink-0">
-                        <span className={cn(
-                          'text-[10px] font-semibold',
-                          app.status === 'sent'             ? 'text-green-400' :
-                          app.status === 'sent_unconfirmed' ? 'text-blue-400' :
-                          app.status === 'skipped'          ? 'text-yellow-400' :
-                                                              'text-red-400'
-                        )}>
-                          {app.status === 'sent'             ? 'Відправлено' :
-                           app.status === 'sent_unconfirmed' ? 'Надіслано?' :
-                           app.status === 'skipped'          ? 'Пропущено' :
-                                                               'Помилка'}
-                        </span>
-                        <span className="text-[10px] text-muted-foreground">
-                          {formatDistanceToNow(new Date(app.sentAt ?? app.createdAt), { addSuffix: true, locale: uk })}
-                        </span>
-                      </div>
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        </>
+      {/* Stats grid */}
+      {loading ? (
+        <div className="grid grid-cols-2 gap-3">
+          {[...Array(4)].map((_, i) => (
+            <div key={i} className="glass-card p-3 rounded-xl h-20 animate-pulse bg-secondary/30" />
+          ))}
+        </div>
+      ) : (
+        <div className="grid grid-cols-2 gap-3">
+          <StatCard label="Надіслано всього" value={stats?.sentTotal ?? 0} icon={Send} color="bg-green-500/15 text-green-400" />
+          <StatCard label="Сьогодні" value={stats?.sentToday ?? 0} icon={TrendingUp} color="bg-primary/15 text-primary" />
+          <StatCard label="Пропущено" value={stats?.skipped ?? 0} icon={SkipForward} color="bg-secondary text-muted-foreground" />
+          <StatCard label="Помилки" value={stats?.failed ?? 0} icon={AlertTriangle} color="bg-red-500/15 text-red-400" />
+        </div>
       )}
+
+      {/* Monthly quota */}
+      {stats && (
+        <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
+          <div className="flex items-center justify-between text-xs">
+            <span className="text-muted-foreground">Ліміт цього місяця</span>
+            <span className="font-semibold">{stats.applicationsThisMonth} / {stats.monthlyLimit}</span>
+          </div>
+          <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+            <div
+              className="h-full rounded-full bg-primary transition-all"
+              style={{ width: `${Math.min(100, (stats.applicationsThisMonth / stats.monthlyLimit) * 100)}%` }}
+            />
+          </div>
+        </div>
+      )}
+
+      {/* Recent applications */}
+      <div>
+        <p className="text-xs font-semibold mb-2">Останні заявки</p>
+        <div className="flex flex-wrap gap-1 mb-3">
+          {tabs.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => { haptic.light(); setAppTab(id); }}
+              className={cn(
+                'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
+                appTab === id ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'
+              )}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {appLoading ? (
+          <div className="flex items-center justify-center py-8">
+            <RefreshCw size={14} className="animate-spin text-muted-foreground" />
+          </div>
+        ) : apps.length === 0 ? (
+          <div className="glass-card rounded-2xl p-5 text-center">
+            <p className="text-xs text-muted-foreground leading-relaxed">
+              {appTab === 'sent' ? 'Ще немає надісланих заявок.' :
+               appTab === 'sent_unconfirmed' ? 'Немає непідтверджених заявок.' :
+               appTab === 'skipped' ? 'Немає пропущених проєктів.' :
+               appTab === 'failed' ? 'Немає помилок — все добре.' :
+               'Запустіть worker для обробки проєктів.'}
+            </p>
+          </div>
+        ) : (
+          <div className="flex flex-col gap-2">
+            {apps.map((app) => (
+              <AppRow key={app.id} app={app} />
+            ))}
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function AppRow({ app }: { app: Application }) {
+  const statusColor = app.status === 'sent' ? 'text-green-400' :
+    app.status === 'sent_unconfirmed' ? 'text-blue-400' :
+    app.status === 'skipped' ? 'text-yellow-400' : 'text-red-400';
+  const statusLabel = app.status === 'sent' ? 'Надіслано' :
+    app.status === 'sent_unconfirmed' ? 'Надіслано?' :
+    app.status === 'skipped' ? 'Пропущено' : 'Помилка';
+  return (
+    <div className="glass-card p-3 rounded-xl">
+      <div className="flex items-start gap-2.5">
+        <div className="flex-1 min-w-0">
+          <p className="text-xs font-medium truncate">{app.title}</p>
+          <div className="flex flex-wrap gap-x-2 mt-0.5">
+            <span className="text-[11px] text-muted-foreground">{app.budget} {app.currency}</span>
+            {app.aiScore !== undefined && <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>}
+          </div>
+          {app.skippedReason && (
+            <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">{app.skippedReason}</p>
+          )}
+        </div>
+        <div className="flex flex-col items-end gap-0.5 flex-shrink-0">
+          <span className={cn('text-[10px] font-semibold', statusColor)}>{statusLabel}</span>
+          <span className="text-[10px] text-muted-foreground">
+            {formatDistanceToNow(new Date(app.sentAt ?? app.createdAt), { addSuffix: true, locale: uk })}
+          </span>
+        </div>
+      </div>
     </div>
   );
 }
