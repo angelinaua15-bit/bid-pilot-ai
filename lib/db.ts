@@ -16,8 +16,9 @@ import type {
   AutoBidSettings, AutoBidLog, GeneratedBid, Application,
   SaaSUser, FreelanceAccount, FreelanceFilter,
   TelegramChannel, TelegramBot, Campaign, CampaignMessage,
-  SaaSDashboardStats,
+  SaaSDashboardStats, PaymentSetting, ManualPayment, ManualPaymentPlan,
 } from '@/types';
+import { OWNER_TELEGRAM_ID } from '@/types';
 
 // ─── In-memory fallback store ─────────────────────────────────────────────────
 
@@ -374,10 +375,29 @@ export async function getOrCreateUser(telegramId: number, name: string, username
   if (!isSupabaseConfigured) return null;
   try {
     const db = getDb(); if (!db) return null;
+    const isOwner = telegramId === OWNER_TELEGRAM_ID;
+
     const { data: existing } = await db.from('users').select('*').eq('telegram_id', telegramId).maybeSingle();
-    if (existing) return mapUser(existing);
+    if (existing) {
+      // Always enforce owner privileges for the owner account
+      if (isOwner && (existing.role !== 'owner' || existing.subscription_plan !== 'unlimited')) {
+        const { data: updated } = await db.from('users')
+          .update({ role: 'owner', subscription_plan: 'unlimited', subscription_status: 'active', updated_at: new Date().toISOString() })
+          .eq('id', existing.id).select('*').single();
+        if (updated) return mapUser(updated);
+      }
+      return mapUser(existing);
+    }
+
     const { data: created, error } = await db.from('users')
-      .insert({ telegram_id: telegramId, name, username: username ?? null })
+      .insert({
+        telegram_id: telegramId,
+        name,
+        username: username ?? null,
+        role: isOwner ? 'owner' : 'user',
+        subscription_plan: isOwner ? 'unlimited' : 'free',
+        subscription_status: 'active',
+      })
       .select('*').single();
     if (error) throw error;
     return mapUser(created);
@@ -762,6 +782,140 @@ export async function getSaaSDashboardStats(userId: string): Promise<SaaSDashboa
       accountStatus: (acctRes.data?.status as SaaSDashboardStats['accountStatus']) ?? null,
     };
   } catch (err) { console.error('[db] getSaaSDashboardStats error:', err); return fallback; }
+}
+
+// ─── Payment Settings ─────────────────────────────────────────────────────────
+
+function mapPaymentSetting(r: Record<string, unknown>): PaymentSetting {
+  return {
+    id:           r.id as string,
+    methodName:   r.method_name as string,
+    address:      r.address as string,
+    instructions: r.instructions as string,
+    currency:     r.currency as PaymentSetting['currency'],
+    isActive:     Boolean(r.is_active),
+    createdBy:    r.created_by as string,
+    createdAt:    r.created_at as string,
+    updatedAt:    r.updated_at as string,
+  };
+}
+
+export async function getPaymentSettings(onlyActive = false): Promise<PaymentSetting[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    let q = db.from('payment_settings').select('*').order('created_at', { ascending: true });
+    if (onlyActive) q = q.eq('is_active', true);
+    const { data } = await q;
+    return (data ?? []).map(mapPaymentSetting);
+  } catch (err) { console.error('[db] getPaymentSettings error:', err); return []; }
+}
+
+export async function upsertPaymentSetting(s: Partial<PaymentSetting> & { createdBy: string }): Promise<PaymentSetting | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    if (s.id) {
+      const { data, error } = await db.from('payment_settings').update({
+        method_name: s.methodName, address: s.address, instructions: s.instructions,
+        currency: s.currency, is_active: s.isActive, updated_at: now,
+      }).eq('id', s.id).select('*').single();
+      if (error) throw error;
+      return mapPaymentSetting(data);
+    } else {
+      const { data, error } = await db.from('payment_settings').insert({
+        method_name: s.methodName, address: s.address, instructions: s.instructions,
+        currency: s.currency ?? 'UAH', is_active: s.isActive ?? true,
+        created_by: s.createdBy, created_at: now, updated_at: now,
+      }).select('*').single();
+      if (error) throw error;
+      return mapPaymentSetting(data);
+    }
+  } catch (err) { console.error('[db] upsertPaymentSetting error:', err); return null; }
+}
+
+export async function deletePaymentSetting(id: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('payment_settings').delete().eq('id', id);
+  } catch (err) { console.error('[db] deletePaymentSetting error:', err); }
+}
+
+// ─── Manual Payments ──────────────────────────────────────────────────────────
+
+function mapManualPayment(r: Record<string, unknown>): ManualPayment {
+  return {
+    id:                r.id as string,
+    userId:            r.user_id as string,
+    userName:          r.user_name as string | undefined,
+    userUsername:      r.user_username as string | undefined,
+    paymentSettingId:  r.payment_setting_id as string | undefined,
+    methodName:        r.method_name as string | undefined,
+    amount:            r.amount as number | undefined,
+    currency:          r.currency as string | undefined,
+    transactionId:     r.transaction_id as string | undefined,
+    proofNote:         r.proof_note as string | undefined,
+    plan:              r.plan as ManualPaymentPlan,
+    status:            r.status as ManualPayment['status'],
+    reviewedBy:        r.reviewed_by as string | undefined,
+    reviewedAt:        r.reviewed_at as string | undefined,
+    createdAt:         r.created_at as string,
+    updatedAt:         r.updated_at as string,
+  };
+}
+
+export async function createManualPayment(p: Omit<ManualPayment, 'id' | 'status' | 'reviewedBy' | 'reviewedAt' | 'createdAt' | 'updatedAt'>): Promise<ManualPayment | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const { data, error } = await db.from('manual_payments').insert({
+      user_id: p.userId, user_name: p.userName ?? null, user_username: p.userUsername ?? null,
+      payment_setting_id: p.paymentSettingId ?? null, method_name: p.methodName ?? null,
+      amount: p.amount ?? null, currency: p.currency ?? null,
+      transaction_id: p.transactionId ?? null, proof_note: p.proofNote ?? null,
+      plan: p.plan, status: 'pending', created_at: now, updated_at: now,
+    }).select('*').single();
+    if (error) throw error;
+    return mapManualPayment(data);
+  } catch (err) { console.error('[db] createManualPayment error:', err); return null; }
+}
+
+export async function getManualPayments(options?: { status?: string; userId?: string; limit?: number }): Promise<ManualPayment[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    let q = db.from('manual_payments').select('*').order('created_at', { ascending: false }).limit(options?.limit ?? 100);
+    if (options?.status) q = q.eq('status', options.status);
+    if (options?.userId) q = q.eq('user_id', options.userId);
+    const { data } = await q;
+    return (data ?? []).map(mapManualPayment);
+  } catch (err) { console.error('[db] getManualPayments error:', err); return []; }
+}
+
+export async function reviewManualPayment(id: string, status: 'approved' | 'rejected', reviewedBy: string): Promise<ManualPayment | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const { data: payment } = await db.from('manual_payments').select('*').eq('id', id).single();
+    if (!payment) return null;
+
+    const { data, error } = await db.from('manual_payments').update({
+      status, reviewed_by: reviewedBy, reviewed_at: now, updated_at: now,
+    }).eq('id', id).select('*').single();
+    if (error) throw error;
+
+    // If approved — upgrade the user subscription
+    if (status === 'approved') {
+      const expiresAt = new Date(Date.now() + 30 * 24 * 60 * 60 * 1000).toISOString();
+      await updateUserPlan(payment.user_id, payment.plan, expiresAt);
+    }
+
+    return mapManualPayment(data);
+  } catch (err) { console.error('[db] reviewManualPayment error:', err); return null; }
 }
 
 export async function getBids(options?: {

@@ -8,6 +8,7 @@ import { FreelanceScreen } from '@/components/screens/FreelanceScreen';
 import { CampaignsScreen } from '@/components/screens/CampaignsScreen';
 import { LogsScreen } from '@/components/screens/LogsScreen';
 import { AccountScreen } from '@/components/screens/AccountScreen';
+import { AdminScreen } from '@/components/screens/AdminScreen';
 import type { NavTab, SaaSUser } from '@/types';
 
 // ── App shell ────────────────────────────────────────────────────────────────
@@ -79,12 +80,25 @@ function AppShell() {
         )}
         {activeTab === 'account' && (
           <div className="h-full overflow-y-auto fade-in">
-            <AccountScreen user={saasUser} onUserUpdate={setSaasUser} />
+            <AccountScreen
+              user={saasUser}
+              onUserUpdate={setSaasUser}
+              onAdminPanel={() => setActiveTab('admin')}
+            />
+          </div>
+        )}
+        {activeTab === 'admin' && (
+          <div className="h-full overflow-y-auto fade-in">
+            <AdminScreen user={saasUser} />
           </div>
         )}
       </main>
 
-      <BottomNavigation active={activeTab} onChange={setActiveTab} />
+      <BottomNavigation
+        active={activeTab}
+        onChange={setActiveTab}
+        isAdmin={saasUser?.role === 'owner' || saasUser?.role === 'admin'}
+      />
     </div>
   );
 }
