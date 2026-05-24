@@ -26,7 +26,7 @@ function useToast() {
 
 import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
-import { cn } from '@/lib/utils';
+import { cn, isOwner } from '@/lib/utils';
 
 // ── Account status badge ──────────────────────────────────────────────────────
 function AccountStatusBadge({ status }: { status: FreelanceAccount['status'] | null }) {
@@ -325,14 +325,20 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
         <div className="glass-card p-3 rounded-xl flex flex-col gap-2">
           <div className="flex items-center justify-between text-xs">
             <span className="text-muted-foreground">Ліміт цього місяця</span>
-            <span className="font-semibold">{stats.applicationsThisMonth} / {stats.monthlyLimit}</span>
+            {isOwner(user) ? (
+              <span className="font-semibold text-green-400">Необмежено</span>
+            ) : (
+              <span className="font-semibold">{stats.applicationsThisMonth} / {stats.monthlyLimit}</span>
+            )}
           </div>
-          <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
-            <div
-              className="h-full rounded-full bg-primary transition-all"
-              style={{ width: `${Math.min(100, (stats.applicationsThisMonth / stats.monthlyLimit) * 100)}%` }}
-            />
-          </div>
+          {!isOwner(user) && (
+            <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+              <div
+                className="h-full rounded-full bg-primary transition-all"
+                style={{ width: `${Math.min(100, (stats.applicationsThisMonth / stats.monthlyLimit) * 100)}%` }}
+              />
+            </div>
+          )}
         </div>
       )}
 
