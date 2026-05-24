@@ -252,7 +252,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
         <div>
           <h1 className="text-lg font-bold">BidPilot</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {user ? `${user.name} \u00B7 \u043F\u043B\u0430\u043D ${user.subscriptionPlan}` : 'Завантаження...'}
+            {user ? `${user.name} · п��ан ${user.subscriptionPlan}` : 'Завантаження...'}
           </p>
         </div>
         <button
