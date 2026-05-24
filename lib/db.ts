@@ -734,10 +734,11 @@ export async function getSaaSDashboardStats(userId: string): Promise<SaaSDashboa
     const today = new Date(); today.setHours(0, 0, 0, 0);
     const startOfMonth = new Date(today.getFullYear(), today.getMonth(), 1).toISOString();
 
-    const [appsRes, acctRes, userRes] = await Promise.all([
+    const [appsRes, acctRes, userRes, filterRes] = await Promise.all([
       db.from('applications').select('status, created_at, sent_at').eq('user_id', userId),
       db.from('freelance_accounts').select('status').eq('user_id', userId).maybeSingle(),
       db.from('users').select('applications_this_month, subscription_plan').eq('id', userId).maybeSingle(),
+      db.from('freelance_filters').select('is_enabled').eq('user_id', userId).maybeSingle(),
     ]);
 
     const apps = appsRes.data ?? [];
@@ -751,12 +752,13 @@ export async function getSaaSDashboardStats(userId: string): Promise<SaaSDashboa
     const plan = (userRes.data?.subscription_plan ?? 'free') as string;
     const limits: Record<string, number> = { free: 20, pro: 300, agency: 999 };
     const monthlyLimit = limits[plan] ?? 20;
+    const isWorkerRunning = Boolean(filterRes.data?.is_enabled);
 
     return {
       sentTotal, sentToday, sentUnconfirmed, failed, skipped,
       applicationsThisMonth: thisMonth,
       monthlyLimit,
-      isWorkerRunning: false,
+      isWorkerRunning,
       accountStatus: (acctRes.data?.status as SaaSDashboardStats['accountStatus']) ?? null,
     };
   } catch (err) { console.error('[db] getSaaSDashboardStats error:', err); return fallback; }

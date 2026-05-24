@@ -9,6 +9,18 @@ import {
 import type { SaaSUser, SaaSDashboardStats, FreelanceAccount, Application, NavTab } from '@/types';
 import { haptic } from '@/lib/telegram';
 
+// ── Minimal toast ─────────────────────────────────────────────────────────────
+let _toastTimer: ReturnType<typeof setTimeout> | null = null;
+function useToast() {
+  const [toast, setToast] = useState<{ message: string; type: 'success' | 'error' } | null>(null);
+  const show = useCallback((message: string, type: 'success' | 'error' = 'success') => {
+    setToast({ message, type });
+    if (_toastTimer) clearTimeout(_toastTimer);
+    _toastTimer = setTimeout(() => setToast(null), 3000);
+  }, []);
+  return { toast, show };
+}
+
 
 
 
@@ -141,6 +153,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
   const [appLoading, setAppLoading] = useState(true);
   const [workerBusy, setWorkerBusy] = useState(false);
   const [appTab, setAppTab]   = useState<Application['status'] | 'all'>('sent');
+  const { toast, show: showToast } = useToast();
   const userId = user?.id;
 
   const loadStats = useCallback(async () => {
@@ -165,16 +178,52 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
 
   const handleToggleWorker = async () => {
     if (!userId) return;
+    const isRunning = stats?.isWorkerRunning ?? false;
+    console.log('[DashboardScreen] handleToggleWorker clicked, isRunning:', isRunning, 'userId:', userId);
+
     haptic.medium();
     setWorkerBusy(true);
+
+    // Optimistic update so UI responds immediately
+    setStats((prev) => prev ? { ...prev, isWorkerRunning: !isRunning } : prev);
+
     try {
-      const isRunning = stats?.isWorkerRunning;
-      await fetch(isRunning ? '/api/freelance/stop' : '/api/freelance/start', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
+      const endpoint = isRunning ? '/api/freelance/stop' : '/api/freelance/start';
+      const res = await fetch(endpoint, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
+      }).then((r) => r.json()).catch((err) => {
+        console.error('[DashboardScreen] fetch error:', err);
+        return null;
       });
-      await loadStats();
-    } finally { setWorkerBusy(false); }
+
+      console.log('[DashboardScreen] API response:', res);
+
+      if (res?.ok) {
+        haptic.success();
+        showToast(
+          isRunning ? 'Автоматизацію зупинено' : 'Автоматизацію запущено',
+          'success',
+        );
+        // Refresh from server to confirm saved state
+        await loadStats();
+      } else {
+        haptic.error();
+        const errMsg = res?.error ?? 'Невідома помилка';
+        console.error('[DashboardScreen] toggle failed:', errMsg);
+        showToast(`Помилка: ${errMsg}`, 'error');
+        // Revert optimistic update
+        setStats((prev) => prev ? { ...prev, isWorkerRunning: isRunning } : prev);
+      }
+    } catch (err) {
+      haptic.error();
+      console.error('[DashboardScreen] unexpected error:', err);
+      showToast('Помилка запиту. Спробуйте ще раз.', 'error');
+      setStats((prev) => prev ? { ...prev, isWorkerRunning: isRunning } : prev);
+    } finally {
+      setWorkerBusy(false);
+    }
   };
 
   const tabs: Array<{ id: typeof appTab; label: string }> = [
@@ -187,6 +236,17 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
 
   return (
     <div className="px-4 pt-5 pb-28 flex flex-col gap-5">
+
+      {/* Toast notification */}
+      {toast && (
+        <div className={cn(
+          'fixed top-4 left-4 right-4 z-50 px-4 py-3 rounded-xl text-xs font-medium shadow-lg transition-all duration-300',
+          toast.type === 'success' ? 'bg-green-500 text-white' : 'bg-red-500 text-white'
+        )}>
+          {toast.message}
+        </div>
+      )}
+
       {/* Header */}
       <div className="flex items-start justify-between">
         <div>
@@ -217,14 +277,22 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
             onClick={handleToggleWorker}
             disabled={workerBusy}
             className={cn(
-              'flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-50',
+              'flex items-center gap-2 px-4 py-2 rounded-xl text-xs font-semibold transition-all active:scale-95 disabled:opacity-60',
               stats?.isWorkerRunning
                 ? 'bg-red-500/15 text-red-400 border border-red-500/20'
                 : 'bg-green-500/15 text-green-400 border border-green-500/20'
             )}
           >
-            {stats?.isWorkerRunning ? <Square size={12} /> : <Play size={12} />}
-            {stats?.isWorkerRunning ? 'Зупинити' : 'Запустити'}
+            {workerBusy ? (
+              <RefreshCw size={12} className="animate-spin" />
+            ) : stats?.isWorkerRunning ? (
+              <Square size={12} />
+            ) : (
+              <Play size={12} />
+            )}
+            {workerBusy
+              ? (stats?.isWorkerRunning ? 'Зупиняємо...' : 'Запускаємо...')
+              : stats?.isWorkerRunning ? 'Зупинити' : 'Запустити'}
           </button>
         ) : (
           <button
