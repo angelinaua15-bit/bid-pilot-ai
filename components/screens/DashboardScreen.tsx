@@ -4,7 +4,9 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   TrendingUp, AlertTriangle, RefreshCw,
   Send, SkipForward, Play, Square, Wifi, WifiOff,
+  Clock, CheckCircle2, XCircle,
 } from 'lucide-react';
+import type { SaaSUser, SaaSDashboardStats, FreelanceAccount, Application, NavTab } from '@/types';
 
 
 
@@ -189,7 +191,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
         <div>
           <h1 className="text-lg font-bold">BidPilot</h1>
           <p className="text-xs text-muted-foreground mt-0.5">
-            {user ? `${user.name} · план ${user.subscriptionPlan}` : 'Завантаження...'}
+            {user ? `${user.name} · п��ан ${user.subscriptionPlan}` : 'Завантаження...'}
           </p>
         </div>
         <button
