@@ -13,29 +13,36 @@ import { UA_EUROPE_CHANNELS, extractUsername, type SeedChannel } from '@/scripts
 interface JsonChannel {
   title: string;
   link?: string;
-  peer?: string;
+  peer?: string;          // "Channel" | "Group" | "Megagroup" etc.
   category?: string;
   country?: string;
   language?: string;
+  members_count?: number;
 }
 
-/** Map JSON category names to shorter Ukrainian labels */
+/** Exact category names from the JSON → short Ukrainian labels */
 const CATEGORY_MAP: Record<string, string> = {
-  'Бизнес / финансы / инвестиции / крипта': 'Бізнес / Фінанси',
-  'Новости / политика': 'Новини / Політика',
-  'Развлечения / юмор': 'Розваги / Гумор',
-  'Технологии / IT': 'Діджитал / IT',
-  'Образование / наука': 'Освіта / Наука',
-  'Здоровье / красота': 'Б\'юті / Послуги',
-  'Спорт': 'Спорт',
-  'Путешествия': 'Подорожі',
-  'Кулинария': 'Кулінарія',
-  'Другое': 'Різне',
+  'Бизнес / финансы / инвестиции / крипта':                     'Бізнес / Фінанси / Крипта',
+  'Строительство / недвижимость / ремонт / дизайн':              'Нерухомість / Ремонт',
+  'Кулинария / еда / рецепты':                                   'Кулінарія / Їжа',
+  'Животные / природа / экология':                               'Тварини / Природа',
+  'Образование / самообразование / курсы / карьера':             'Освіта / Кар\'єра',
+  'Развлечения / юмор / мемы / шоу-бизнес':                     'Розваги / Гумор',
+  'Здоровье / спорт / фитнес / психология':                     'Здоров\'я / Спорт',
+  'Технологии / IT / ШИ / гаджеты':                             'Технології / IT / AI',
+  'Мода / стиль / краса / товары / шоппинг':                    'Мода / Краса / Шопінг',
+  'Медиа / новости / блог / личный бренд / lifestyle':           'Медіа / Новини / Lifestyle',
 };
+
+function peerToType(peer?: string): 'channel' | 'group' {
+  if (!peer) return 'channel';
+  const p = peer.toLowerCase();
+  if (p.includes('group') || p.includes('mega')) return 'group';
+  return 'channel';
+}
 
 function parseJsonChannels(): SeedChannel[] {
   try {
-    // Import JSON at runtime — Next.js supports JSON imports natively
     // eslint-disable-next-line @typescript-eslint/no-require-imports
     const raw = require('@/data/channels-catalogue.json') as {
       categories: Record<string, { channels: { channels: JsonChannel[] } }>;
@@ -50,20 +57,23 @@ function parseJsonChannels(): SeedChannel[] {
       for (const ch of channels) {
         if (!ch.link || !ch.title) continue;
         const key = extractUsername(ch.link).toLowerCase();
-        if (seen.has(key)) continue;
+        if (!key || seen.has(key)) continue;
         seen.add(key);
         result.push({
-          title: ch.title,
+          title: ch.title.trim(),
           link: ch.link,
           country: ch.country ?? 'Ukraine',
           city: '',
           category: uaCategory,
-        });
+          // carry peer type through for upsert
+          _peer: peerToType(ch.peer),
+        } as SeedChannel & { _peer: 'channel' | 'group' });
       }
     }
+    console.log(`[seed] parsed ${result.length} unique channels from JSON catalogue`);
     return result;
-  } catch {
-    console.error('[seed] failed to load channels-catalogue.json');
+  } catch (err) {
+    console.error('[seed] failed to load channels-catalogue.json:', err);
     return [];
   }
 }
@@ -89,10 +99,12 @@ export async function POST(req: NextRequest) {
     let inserted = 0;
     for (const ch of all) {
       const usernameOrLink = extractUsername(ch.link);
+      if (!usernameOrLink) continue;
+      const chWithPeer = ch as SeedChannel & { _peer?: 'channel' | 'group' };
       const result = await upsertTelegramChannel({
         title: ch.title,
         usernameOrLink,
-        type: (ch as SeedChannel & { peer?: string }).peer?.toLowerCase() === 'channel' ? 'channel' : 'group',
+        type: chWithPeer._peer ?? 'group',
         category: ch.category,
         language: 'uk',
         status: 'active',
