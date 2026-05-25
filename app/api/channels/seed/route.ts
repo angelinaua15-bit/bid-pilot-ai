@@ -1,29 +1,98 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { upsertTelegramChannel } from '@/lib/db';
-import { UA_EUROPE_CHANNELS, extractUsername } from '@/scripts/seed-channels';
+import { UA_EUROPE_CHANNELS, extractUsername, type SeedChannel } from '@/scripts/seed-channels';
 
 /**
  * POST /api/channels/seed
- * Bulk-inserts ~400 Ukrainian-in-Europe Telegram groups.
- * Safe to call multiple times — existing channels are updated in place.
+ * Seeds all channels:
+ *   1. ~240 Ukrainian-in-Europe groups + digital communities (from seed-channels.ts)
+ *   2. 2366 Ukrainian Telegram channels from the categorized JSON catalogue
+ * Safe to call multiple times — upsert on username_or_link.
  */
+
+interface JsonChannel {
+  title: string;
+  link?: string;
+  peer?: string;
+  category?: string;
+  country?: string;
+  language?: string;
+}
+
+/** Map JSON category names to shorter Ukrainian labels */
+const CATEGORY_MAP: Record<string, string> = {
+  'Бизнес / финансы / инвестиции / крипта': 'Бізнес / Фінанси',
+  'Новости / политика': 'Новини / Політика',
+  'Развлечения / юмор': 'Розваги / Гумор',
+  'Технологии / IT': 'Діджитал / IT',
+  'Образование / наука': 'Освіта / Наука',
+  'Здоровье / красота': 'Б\'юті / Послуги',
+  'Спорт': 'Спорт',
+  'Путешествия': 'Подорожі',
+  'Кулинария': 'Кулінарія',
+  'Другое': 'Різне',
+};
+
+function parseJsonChannels(): SeedChannel[] {
+  try {
+    // Import JSON at runtime — Next.js supports JSON imports natively
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const raw = require('@/data/channels-catalogue.json') as {
+      categories: Record<string, { channels: { channels: JsonChannel[] } }>;
+    };
+
+    const result: SeedChannel[] = [];
+    const seen = new Set<string>();
+
+    for (const [catName, catData] of Object.entries(raw.categories)) {
+      const uaCategory = CATEGORY_MAP[catName] ?? catName;
+      const channels: JsonChannel[] = catData?.channels?.channels ?? [];
+      for (const ch of channels) {
+        if (!ch.link || !ch.title) continue;
+        const key = extractUsername(ch.link).toLowerCase();
+        if (seen.has(key)) continue;
+        seen.add(key);
+        result.push({
+          title: ch.title,
+          link: ch.link,
+          country: ch.country ?? 'Ukraine',
+          city: '',
+          category: uaCategory,
+        });
+      }
+    }
+    return result;
+  } catch {
+    console.error('[seed] failed to load channels-catalogue.json');
+    return [];
+  }
+}
+
 export async function POST(req: NextRequest) {
   try {
-    // Simple admin guard via secret header or query param
     const { searchParams } = new URL(req.url);
     const secret = req.headers.get('x-seed-secret') ?? searchParams.get('secret');
     if (secret !== process.env.SEED_SECRET && process.env.NODE_ENV === 'production') {
       return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
 
-    let inserted = 0;
+    // Merge both sources, deduplicate by username/link
+    const jsonChannels = parseJsonChannels();
+    const allSeedKeys = new Set(UA_EUROPE_CHANNELS.map((c) => extractUsername(c.link).toLowerCase()));
+    const uniqueJsonChannels = jsonChannels.filter(
+      (c) => !allSeedKeys.has(extractUsername(c.link).toLowerCase()),
+    );
+    const all: SeedChannel[] = [...UA_EUROPE_CHANNELS, ...uniqueJsonChannels];
 
-    for (const ch of UA_EUROPE_CHANNELS) {
+    console.log(`[seed] starting — ${UA_EUROPE_CHANNELS.length} Europe groups + ${uniqueJsonChannels.length} JSON channels = ${all.length} total`);
+
+    let inserted = 0;
+    for (const ch of all) {
       const usernameOrLink = extractUsername(ch.link);
       const result = await upsertTelegramChannel({
         title: ch.title,
         usernameOrLink,
-        type: 'group',
+        type: (ch as SeedChannel & { peer?: string }).peer?.toLowerCase() === 'channel' ? 'channel' : 'group',
         category: ch.category,
         language: 'uk',
         status: 'active',
@@ -33,8 +102,14 @@ export async function POST(req: NextRequest) {
       if (result) inserted++;
     }
 
-    console.log(`[seed] done — inserted/updated ${inserted} of ${UA_EUROPE_CHANNELS.length} channels`);
-    return NextResponse.json({ ok: true, total: UA_EUROPE_CHANNELS.length, inserted });
+    console.log(`[seed] done — inserted/updated ${inserted} of ${all.length}`);
+    return NextResponse.json({
+      ok: true,
+      total: all.length,
+      inserted,
+      europeGroups: UA_EUROPE_CHANNELS.length,
+      catalogueChannels: uniqueJsonChannels.length,
+    });
   } catch (err) {
     console.error('[seed] error:', err);
     return NextResponse.json(
