@@ -19,10 +19,10 @@ import type {
 // ─── Mock Telegram User ───────────────────────────────────────────────────────
 
 export const mockTelegramUser = {
-  id: 123456789,
-  first_name: 'Олексій',
-  last_name: 'Ковальчук',
-  username: 'alexkovalchuk',
+  id: 6237272293,
+  first_name: 'Angel',
+  last_name: '',
+  username: 'angeixxxx',
   photo_url: '',
   language_code: 'uk',
   is_premium: true,

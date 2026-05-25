@@ -21,7 +21,7 @@ export function CampaignsScreen({ user }: Props) {
   const [loading, setLoading]     = useState(true);
 
   const userId = user?.id;
-  const isPro  = user?.subscriptionPlan === 'pro' || user?.subscriptionPlan === 'agency';
+  const isPro  = user?.subscriptionPlan === 'pro' || user?.subscriptionPlan === 'agency' || user?.subscriptionPlan === 'unlimited' || user?.role === 'owner' || user?.role === 'admin';
 
   const load = useCallback(async () => {
     if (!userId) { setLoading(false); return; }
