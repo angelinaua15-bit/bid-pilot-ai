@@ -94,7 +94,7 @@ export function CampaignsScreen({ user }: Props) {
       ) : (
         <>
           {subTab === 'campaigns' && <CampaignsList campaigns={campaigns} userId={userId} onRefresh={load} />}
-          {subTab === 'channels'  && <ChannelsList channels={channels} onRefresh={load} isAdmin={user?.role === 'admin'} />}
+          {subTab === 'channels'  && <ChannelsList channels={channels} onRefresh={load} isAdmin={user?.role === 'admin' || user?.role === 'owner'} />}
           {subTab === 'create'    && (
             <CreateCampaignForm userId={userId} channels={channels} onCreated={() => { setSubTab('campaigns'); load(); }} />
           )}
@@ -257,10 +257,14 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
       const res = await fetch('/api/channels/seed', { method: 'POST' }).then((r) => r.json());
       if (res.ok) {
         haptic.success();
-        setSeedMsg(`Додано ${res.inserted} з ${res.total} каналів`);
+        const parts: string[] = [`Завантажено ${res.inserted} каналів`];
+        if (res.europeGroups)      parts.push(`${res.europeGroups} груп українців в Європі`);
+        if (res.catalogueChannels) parts.push(`${res.catalogueChannels} з тематичного каталогу`);
+        setSeedMsg(parts.join(' · '));
         onRefresh();
       } else {
-        setSeedMsg(`Помилка: ${res.error}`);
+        haptic.error();
+        setSeedMsg(`Помилка: ${res.error ?? 'невідома'}`);
       }
     } finally { setSeeding(false); }
   };
@@ -288,7 +292,7 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
           <button onClick={handleSeed} disabled={seeding}
             className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-green-500/15 text-green-400 text-xs font-semibold self-start active:scale-95 transition-transform disabled:opacity-50">
             <RefreshCw size={12} className={seeding ? 'animate-spin' : ''} />
-            {seeding ? 'Завантаження...' : 'Завантажити 400+ груп'}
+            {seeding ? 'Завантаження...' : 'Завантажити 2600+ каналів'}
           </button>
         </div>
       )}
@@ -364,7 +368,7 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
         <div className="glass-card p-6 rounded-2xl text-center">
           <p className="text-xs text-muted-foreground">
             {channels.length === 0
-              ? (isAdmin ? 'Немає каналів. Натисніть «Завантажити 400+ груп» для імпорту.' : 'Немає доступних каналів. Зверніться до адміністратора.')
+              ? (isAdmin ? 'Немає каналів. Натисніть «Завантажити 2600+ каналів» для імпорту.' : 'Немає доступних каналів. Зверніться до адміністратора.')
               : 'Нічого не знайдено за вашим запитом.'}
           </p>
         </div>
