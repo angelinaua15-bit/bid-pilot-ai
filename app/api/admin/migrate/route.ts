@@ -4,13 +4,13 @@
  * Only callable by the owner account.
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { getUserById } from '@/lib/db';
+import { assertAdmin } from '@/lib/auth';
 import { OWNER_TELEGRAM_ID } from '@/types';
 
 export async function POST(req: NextRequest) {
   try {
     const { requesterId } = await req.json();
-    const user = await getUserById(requesterId);
+    const user = await assertAdmin(requesterId);
     if (!user || user.role !== 'owner') {
       return NextResponse.json({ ok: false, error: 'Forbidden — owner only' }, { status: 403 });
     }

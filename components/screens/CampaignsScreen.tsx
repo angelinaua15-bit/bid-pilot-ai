@@ -94,7 +94,7 @@ export function CampaignsScreen({ user }: Props) {
       ) : (
         <>
           {subTab === 'campaigns' && <CampaignsList campaigns={campaigns} userId={userId} onRefresh={load} />}
-          {subTab === 'channels'  && <ChannelsList channels={channels} onRefresh={load} isAdmin={user?.role === 'admin' || user?.role === 'owner'} />}
+          {subTab === 'channels'  && <ChannelsList channels={channels} onRefresh={load} isAdmin={user?.role === 'admin' || user?.role === 'owner'} userId={userId} />}
           {subTab === 'create'    && (
             <CreateCampaignForm userId={userId} channels={channels} onCreated={() => { setSubTab('campaigns'); load(); }} />
           )}
@@ -220,8 +220,8 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
 }
 
 // ── Channels list ─────────────────────────────────────────────────────────────
-function ChannelsList({ channels, onRefresh, isAdmin }: {
-  channels: TelegramChannel[]; onRefresh: () => void; isAdmin: boolean;
+function ChannelsList({ channels, onRefresh, isAdmin, userId }: {
+  channels: TelegramChannel[]; onRefresh: () => void; isAdmin: boolean; userId?: string;
 }) {
   const [showForm, setShowForm]   = useState(false);
   const [form, setForm]           = useState({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
@@ -254,7 +254,8 @@ function ChannelsList({ channels, onRefresh, isAdmin }: {
     setSeeding(true);
     setSeedMsg('');
     try {
-      const res = await fetch('/api/channels/seed', { method: 'POST' }).then((r) => r.json());
+      const url = userId ? `/api/channels/seed?requesterId=${encodeURIComponent(userId)}` : '/api/channels/seed';
+      const res = await fetch(url, { method: 'POST' }).then((r) => r.json());
       if (res.ok) {
         haptic.success();
         const parts: string[] = [`Завантажено ${res.inserted} каналів`];

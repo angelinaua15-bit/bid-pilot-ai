@@ -1,10 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getPaymentSettings, upsertPaymentSetting, deletePaymentSetting, getUserById } from '@/lib/db';
-
-async function assertAdmin(requesterId: string) {
-  const user = await getUserById(requesterId);
-  return user?.role === 'owner' || user?.role === 'admin' ? user : null;
-}
+import { getPaymentSettings, upsertPaymentSetting, deletePaymentSetting } from '@/lib/db';
+import { assertAdmin } from '@/lib/auth';
 
 export async function GET(req: NextRequest) {
   try {

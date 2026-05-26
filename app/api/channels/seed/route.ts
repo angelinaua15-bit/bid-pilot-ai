@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { upsertTelegramChannel } from '@/lib/db';
+import { assertAdmin } from '@/lib/auth';
 import { UA_EUROPE_CHANNELS, extractUsername, type SeedChannel } from '@/scripts/seed-channels';
 
 /**
@@ -81,8 +82,11 @@ function parseJsonChannels(): SeedChannel[] {
 export async function POST(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const secret = req.headers.get('x-seed-secret') ?? searchParams.get('secret');
-    if (secret !== process.env.SEED_SECRET && process.env.NODE_ENV === 'production') {
+    const secret     = req.headers.get('x-seed-secret') ?? searchParams.get('secret');
+    const requesterId = searchParams.get('requesterId') ?? '';
+    const isValidSecret = process.env.SEED_SECRET && secret === process.env.SEED_SECRET;
+    const admin = requesterId ? await assertAdmin(requesterId) : null;
+    if (!isValidSecret && !admin) {
       return NextResponse.json({ ok: false, error: 'Unauthorized' }, { status: 401 });
     }
 
