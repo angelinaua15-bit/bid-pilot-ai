@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Wifi, WifiOff, RefreshCw, Plus, Settings2, Trash2,
   CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp,
-  Play, Square,
+  Play, Square, KeyRound,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -107,11 +107,14 @@ export function FreelanceScreen({ user }: Props) {
 function ConnectPanel({ userId, account, onRefresh }: {
   userId?: string; account: FreelanceAccount | null; onRefresh: () => void;
 }) {
-  const [token, setToken]   = useState('');
-  const [saving, setSaving] = useState(false);
-  const [error, setError]   = useState<string | null>(null);
+  const [token, setToken]         = useState('');
+  const [showTokenInput, setShowTokenInput] = useState(false);
+  const [saving, setSaving]       = useState(false);
+  const [error, setError]         = useState<string | null>(null);
   const [workerBusy, setWorkerBusy] = useState(false);
-  const [runResult, setRunResult]   = useState<string | null>(null);
+  const [runResult, setRunResult] = useState<{ ok: boolean; msg: string } | null>(null);
+
+  const isConnected = account?.status === 'connected' && !!account?.apiToken;
 
   const handleConnect = async () => {
     if (!userId || !token.trim()) return;
@@ -123,8 +126,15 @@ function ConnectPanel({ userId, account, onRefresh }: {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId, token: token.trim() }),
       }).then((r) => r.json());
-      if (res.ok) { haptic.success(); setToken(''); onRefresh(); }
-      else { setError(res.error ?? 'Помилка підключення'); haptic.error(); }
+      if (res.ok) {
+        haptic.success();
+        setToken('');
+        setShowTokenInput(false);
+        onRefresh();
+      } else {
+        setError(res.error ?? 'Помилка підключення');
+        haptic.error();
+      }
     } finally { setSaving(false); }
   };
 
@@ -135,6 +145,7 @@ function ConnectPanel({ userId, account, onRefresh }: {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId }),
     });
+    setShowTokenInput(false);
     onRefresh();
   };
 
@@ -145,54 +156,63 @@ function ConnectPanel({ userId, account, onRefresh }: {
       const res = await fetch(start ? '/api/freelance/start' : '/api/freelance/stop', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
-      }).then((r) => r.json()).catch(() => ({ ok: false }));
+      }).then((r) => r.json()).catch(() => ({ ok: false, error: 'Помилка мережі' }));
+
       if (start && res.ok) {
         haptic.success();
-        setRunResult(`Знайдено ${res.found ?? 0} проектів, надіслано ${res.submitted ?? 0} заявок`);
-        setTimeout(() => setRunResult(null), 5000);
-      } else if (!res.ok) {
-        setRunResult(res.error ?? 'Помилка');
+        setRunResult({ ok: true, msg: `Знайдено ${res.found ?? 0} проектів, надіслано ${res.submitted ?? 0} заявок` });
+        setTimeout(() => setRunResult(null), 6000);
+      } else {
+        const msg = res.error ?? 'Помилка запуску';
+        setRunResult({ ok: false, msg });
         haptic.error();
+        // If token is missing / invalid — show connect form
+        if (res.setupRequired) setShowTokenInput(true);
       }
       onRefresh();
     } finally { setWorkerBusy(false); }
   };
 
   const statusMap = {
-    connected:    { icon: Wifi,       cls: 'text-green-400',  bg: 'bg-green-500/10 border-green-500/20', label: 'Підключено' },
-    disconnected: { icon: WifiOff,    cls: 'text-muted-foreground', bg: 'bg-secondary border-border', label: 'Не підключено' },
-    expired:      { icon: Clock,      cls: 'text-yellow-400', bg: 'bg-yellow-500/10 border-yellow-500/20', label: 'Сесія закінчилась' },
-    error:        { icon: XCircle,    cls: 'text-red-400',    bg: 'bg-red-500/10 border-red-500/20', label: 'Помилка' },
+    connected:    { icon: Wifi,    cls: 'text-green-400',         bg: 'bg-green-500/10 border-green-500/20',   label: 'Підключено' },
+    disconnected: { icon: WifiOff, cls: 'text-muted-foreground',  bg: 'bg-secondary border-border',            label: 'Не підключено' },
+    expired:      { icon: Clock,   cls: 'text-yellow-400',        bg: 'bg-yellow-500/10 border-yellow-500/20', label: 'Сесія закінчилась' },
+    error:        { icon: XCircle, cls: 'text-red-400',           bg: 'bg-red-500/10 border-red-500/20',       label: 'Помилка' },
   } as const;
 
-  const s = account ? (statusMap[account.status] ?? statusMap.disconnected) : statusMap.disconnected;
+  const statusKey = (isConnected ? 'connected' : (account?.status ?? 'disconnected')) as keyof typeof statusMap;
+  const s    = statusMap[statusKey] ?? statusMap.disconnected;
   const Icon = s.icon;
 
   return (
     <div className="flex flex-col gap-4">
       {/* Status card */}
       <div className={cn('p-4 rounded-2xl border flex items-center gap-3', s.bg)}>
-        <div className={cn('w-9 h-9 rounded-xl flex items-center justify-center', s.cls === 'text-green-400' ? 'bg-green-500/20' : 'bg-secondary')}>
+        <div className={cn(
+          'w-9 h-9 rounded-xl flex items-center justify-center',
+          isConnected ? 'bg-green-500/20' : 'bg-secondary',
+        )}>
           <Icon size={16} className={s.cls} />
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold">{s.label}</p>
-          {account?.accountName && (
-            <p className="text-[11px] text-muted-foreground">@{account.accountName}</p>
+          {isConnected && account?.accountName && (
+            <p className="text-[11px] text-muted-foreground truncate">@{account.accountName}</p>
           )}
-          {account?.lastCheckAt && (
+          {isConnected && account?.lastCheckAt && (
             <p className="text-[11px] text-muted-foreground">
               Перевірено: {new Date(account.lastCheckAt).toLocaleString('uk-UA')}
             </p>
           )}
+          {!isConnected && (
+            <p className="text-[11px] text-muted-foreground">Додайте API токен для роботи</p>
+          )}
         </div>
-        {account?.status === 'connected' && (
-          <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
-        )}
+        {isConnected && <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />}
       </div>
 
-      {/* Auto-bid trigger — only when connected */}
-      {account?.status === 'connected' && (
+      {/* Auto-bid trigger — only when truly connected with token */}
+      {isConnected && (
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
             <button
@@ -212,46 +232,71 @@ function ConnectPanel({ userId, account, onRefresh }: {
             </button>
           </div>
           {runResult && (
-            <p className="text-[11px] text-center text-muted-foreground px-2">{runResult}</p>
+            <p className={cn('text-[11px] text-center px-2', runResult.ok ? 'text-green-400' : 'text-red-400')}>
+              {runResult.msg}
+            </p>
           )}
         </div>
       )}
 
-      {/* Connect form */}
-      <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
-        <p className="text-xs font-semibold">
-          {account?.status === 'connected' ? 'Оновити токен' : 'Підключити Freelancehunt'}
-        </p>
-        <p className="text-[11px] text-muted-foreground leading-relaxed">
-          Введіть ваш Freelancehunt API токен. Він зберігається в зашифрованому вигляді.
-          Отримати токен: Профіль → Налаштування → API.
-        </p>
-        <input
-          type="password"
-          value={token}
-          onChange={(e) => setToken(e.target.value)}
-          placeholder="fh_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-          className="w-full bg-secondary rounded-xl px-3 py-2.5 text-xs font-mono outline-none border border-border focus:border-primary transition-colors"
-        />
-        {error && <p className="text-xs text-red-400">{error}</p>}
-        <button
-          onClick={handleConnect}
-          disabled={saving || !token.trim()}
-          className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-        >
-          {saving ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}
-          {account?.status === 'connected' ? 'Оновити токен' : 'Підключити'}
-        </button>
-      </div>
+      {/* Connect / update token form */}
+      {(!isConnected || showTokenInput) && (
+        <div className="rounded-2xl border border-border bg-card p-4 flex flex-col gap-3">
+          <div className="flex items-center justify-between">
+            <p className="text-xs font-semibold">
+              {isConnected ? 'Оновити API токен' : 'Підключити Freelancehunt'}
+            </p>
+            {showTokenInput && isConnected && (
+              <button onClick={() => { setShowTokenInput(false); setError(null); }} className="text-[11px] text-muted-foreground">Скасувати</button>
+            )}
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Введіть ваш Freelancehunt API токен. Токен безпечно зберігається на сервері.{'\n'}
+            Де взяти: <span className="text-foreground">freelancehunt.com → Профіль → Налаштування → API</span>
+          </p>
+          <input
+            type="password"
+            value={token}
+            onChange={(e) => { setToken(e.target.value); setError(null); }}
+            onKeyDown={(e) => { if (e.key === 'Enter') handleConnect(); }}
+            placeholder="Вставте токен тут…"
+            autoComplete="off"
+            className="w-full bg-secondary rounded-xl px-3 py-2.5 text-xs font-mono outline-none border border-border focus:border-primary transition-colors"
+          />
+          {error && (
+            <div className="flex items-start gap-1.5 text-red-400">
+              <XCircle size={12} className="mt-0.5 flex-shrink-0" />
+              <p className="text-[11px]">{error}</p>
+            </div>
+          )}
+          <button
+            onClick={handleConnect}
+            disabled={saving || !token.trim()}
+            className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+          >
+            {saving ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}
+            {saving ? 'Перевірка токену...' : isConnected ? 'Оновити токен' : 'Підключити'}
+          </button>
+        </div>
+      )}
 
-      {/* Disconnect */}
-      {account?.status === 'connected' && (
-        <button
-          onClick={handleDisconnect}
-          className="flex items-center gap-2 text-xs text-red-400/80 hover:text-red-400 transition-colors self-start"
-        >
-          <Trash2 size={12} /> Відключити акаунт
-        </button>
+      {/* Update token button — when connected and form is hidden */}
+      {isConnected && !showTokenInput && (
+        <div className="flex items-center gap-3">
+          <button
+            onClick={() => { setShowTokenInput(true); }}
+            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
+          >
+            <Settings2 size={12} /> Оновити токен
+          </button>
+          <span className="text-border">·</span>
+          <button
+            onClick={handleDisconnect}
+            className="flex items-center gap-2 text-xs text-red-400/70 hover:text-red-400 transition-colors"
+          >
+            <Trash2 size={12} /> Відключити
+          </button>
+        </div>
       )}
     </div>
   );
