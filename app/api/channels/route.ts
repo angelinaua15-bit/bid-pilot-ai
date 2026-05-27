@@ -1,13 +1,55 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getTelegramChannels, upsertTelegramChannel } from '@/lib/db';
+import {
+  getTelegramChannelsPaginated,
+  getTelegramChannelCount,
+  upsertTelegramChannel,
+} from '@/lib/db';
 import type { ChannelType } from '@/types';
 
-export async function GET(_req: NextRequest) {
+/**
+ * GET /api/channels
+ * Supports pagination, search and category filtering.
+ * ?page=1&pageSize=50&search=...&category=...&status=active
+ *
+ * Also supports:
+ * ?count=1  — returns only { ok, total } (fast HEAD-like query)
+ */
+export async function GET(req: NextRequest) {
   try {
-    const channels = await getTelegramChannels();
-    return NextResponse.json({ ok: true, channels, data: channels });
+    const sp       = req.nextUrl.searchParams;
+    const countOnly = sp.get('count') === '1';
+
+    if (countOnly) {
+      const total = await getTelegramChannelCount({
+        status:   sp.get('status')   ?? undefined,
+        category: sp.get('category') ?? undefined,
+      });
+      return NextResponse.json({ ok: true, total });
+    }
+
+    const page     = Math.max(1,   Number(sp.get('page'))     || 1);
+    const pageSize = Math.min(100, Number(sp.get('pageSize')) || 50);
+    const search   = sp.get('search')   ?? undefined;
+    const category = sp.get('category') ?? undefined;
+    const status   = sp.get('status')   ?? undefined;
+
+    const { channels, total } = await getTelegramChannelsPaginated({
+      page, pageSize, search, category, status,
+    });
+
+    return NextResponse.json({
+      ok: true,
+      channels,
+      total,
+      page,
+      pageSize,
+      hasMore: page * pageSize < total,
+    });
   } catch (err) {
-    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err instanceof Error ? err.message : 'error' },
+      { status: 500 },
+    );
   }
 }
 
@@ -30,16 +72,19 @@ export async function POST(req: NextRequest) {
     const channel = await upsertTelegramChannel({
       title,
       usernameOrLink,
-      type: type ?? 'channel',
+      type:     type     ?? 'channel',
       language: language ?? 'uk',
       category,
       membersCount,
-      status: 'active',
+      status:        'active',
       postingMethod: 'bot',
     });
 
     return NextResponse.json({ ok: true, channel });
   } catch (err) {
-    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });
+    return NextResponse.json(
+      { ok: false, error: err instanceof Error ? err.message : 'error' },
+      { status: 500 },
+    );
   }
 }
