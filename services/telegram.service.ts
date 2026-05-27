@@ -59,6 +59,8 @@ const TELEGRAM_API = (token: string) =>
 /**
  * Send a message via Telegram Bot API.
  */
+const TELEGRAM_SEND_TIMEOUT_MS = 8_000;
+
 export async function sendTelegramMessage(
   chatId: number,
   text: string,
@@ -75,17 +77,27 @@ export async function sendTelegramMessage(
   }
 
   try {
-    const res = await fetch(`${TELEGRAM_API(token)}/sendMessage`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        chat_id: chatId,
-        text,
-        parse_mode: options?.parseMode ?? 'HTML',
-        disable_web_page_preview: options?.disableWebPagePreview ?? false,
-        ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
-      }),
-    });
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), TELEGRAM_SEND_TIMEOUT_MS);
+
+    let res: Response;
+    try {
+      res = await fetch(`${TELEGRAM_API(token)}/sendMessage`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        signal: controller.signal,
+        body: JSON.stringify({
+          chat_id: chatId,
+          text,
+          parse_mode: options?.parseMode ?? 'HTML',
+          disable_web_page_preview: options?.disableWebPagePreview ?? false,
+          ...(options?.replyMarkup ? { reply_markup: options.replyMarkup } : {}),
+        }),
+      });
+    } finally {
+      clearTimeout(timer);
+    }
+
     const json = await res.json();
     if (!json.ok) {
       console.error('[TelegramService] sendMessage error:', json);
@@ -93,7 +105,12 @@ export async function sendTelegramMessage(
     }
     return true;
   } catch (err) {
-    console.error('[TelegramService] sendMessage exception:', err);
+    const msg = err instanceof Error ? err.message : String(err);
+    if (msg.includes('abort') || msg.includes('timeout')) {
+      console.warn(`[TelegramService] sendMessage timed out after ${TELEGRAM_SEND_TIMEOUT_MS}ms`);
+    } else {
+      console.error('[TelegramService] sendMessage exception:', err);
+    }
     return false;
   }
 }

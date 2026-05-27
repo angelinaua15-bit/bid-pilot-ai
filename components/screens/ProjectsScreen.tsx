@@ -165,7 +165,7 @@ export function ProjectsScreen({ onNavigate }: ProjectsScreenProps) {
               <ProjectCard
                 key={project.id}
                 project={project}
-                onGenerate={() => onNavigate('history')}
+                onGenerate={() => onNavigate('home')}
                 onSkip={(p) => setProjects((prev) => prev.filter((x) => x.id !== p.id))}
               />
             ))}

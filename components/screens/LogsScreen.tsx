@@ -20,7 +20,7 @@ const LEVEL_CONFIG: Record<LogLevel, { label: string; color: string; bg: string;
 
 const LEVELS: Array<LogLevel | 'all'> = ['all', 'success', 'info', 'warning', 'error'];
 
-export function LogsScreen() {
+export function LogsScreen({ userId: _userId }: { userId?: string }) {
   const [logs, setLogs] = useState<AutoBidLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

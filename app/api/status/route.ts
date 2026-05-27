@@ -3,8 +3,9 @@
  * Returns live health check for all integrations.
  *
  * Freelancehunt check behaviour:
- *   - If AUTOMATION_WORKER_URL is set → call GET {worker}/status
- *   - Otherwise → check FREELANCEHUNT_TOKEN in env
+ *   - If AUTOMATION_WORKER_URL or LOCAL_WORKER_URL is set → call GET {worker}/status
+ *   - Otherwise → check storageState.json exists (local Playwright session)
+ *   - Fallback → check FREELANCEHUNT_TOKEN in env
  */
 
 import { NextResponse } from 'next/server';
@@ -56,6 +57,52 @@ async function checkDatabase(): Promise<{ ok: boolean; backend?: string; error?:
   }
 }
 
+async function probeWorker(url: string): Promise<{
+  ok: boolean;
+  mode: string;
+  username?: string;
+  cookieCount?: number;
+  sessionPath?: string;
+  workerUrl: string;
+  storageStateExists?: boolean;
+  sessionValid?: boolean;
+  autoLoop?: Record<string, unknown>;
+  error?: string;
+} | null> {
+  try {
+    const secret = process.env.AUTOMATION_SECRET ?? '';
+    const res = await fetch(`${url}/status`, {
+      headers: secret ? { Authorization: `Bearer ${secret}` } : {},
+      signal: AbortSignal.timeout(3_000),
+    });
+    if (!res.ok) return null;
+    const data = await res.json() as Record<string, unknown>;
+    const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
+    const connected = Boolean(fh.connected);
+    // storageState file exists if sessionPath is populated (even when session is expired)
+    const storageStateExists = Boolean(fh.sessionPath) || connected;
+    const sessionValid = connected && Number(fh.cookieCount ?? 0) > 0;
+    return {
+      ok: connected,
+      mode: 'local_worker',
+      username: fh.username as string | undefined,
+      cookieCount: fh.cookieCount as number | undefined,
+      sessionPath: fh.sessionPath as string | undefined,
+      workerUrl: url,
+      storageStateExists,
+      sessionValid,
+      autoLoop: data.autoLoop as Record<string, unknown> | undefined,
+      error: connected
+        ? undefined
+        : storageStateExists
+          ? 'Freelancehunt session expired — reconnect required'
+          : (fh.error as string | undefined ?? 'storageState.json not found'),
+    };
+  } catch {
+    return null;
+  }
+}
+
 async function checkFreelancehunt(): Promise<{
   ok: boolean;
   mode?: string;
@@ -64,40 +111,67 @@ async function checkFreelancehunt(): Promise<{
   checkedPaths?: string[];
   cookieCount?: number;
   workerUrl?: string;
+  storageStateExists?: boolean;
+  sessionValid?: boolean;
   error?: string;
 }> {
-  // ── Worker mode: delegate to external worker ──────────────────────────────
-  if (config.worker.enabled) {
+  // ── 1. Always try local worker first (http://localhost:8080) ─────────────
+  // LOCAL_WORKER_URL defaults to http://localhost:8080 if not set.
+  const localUrl = (process.env.LOCAL_WORKER_URL ?? 'http://localhost:8080').replace(/\/$/, '');
+  const localResult = await probeWorker(localUrl);
+  if (localResult) {
+    return localResult;
+  }
+
+  // ── 2. Railway / explicit remote worker ──────────────────────────────────
+  if (config.worker.enabled && config.worker.mode === 'railway') {
     try {
       const { getWorkerStatus } = await import('@/lib/worker-client');
       const status = await getWorkerStatus();
       const fh = status.freelancehunt;
       return {
         ok: fh.connected,
-        mode: 'worker',
+        mode: 'railway_worker',
         username: fh.username,
         cookieCount: fh.cookieCount,
         sessionPath: fh.sessionPath,
         workerUrl: config.worker.url,
-        error: fh.connected ? undefined : (fh.error ?? 'Worker reports Freelancehunt not connected'),
+        error: fh.connected ? undefined : (fh.error ?? 'Railway worker: session not found'),
       };
     } catch (err) {
       return {
         ok: false,
-        mode: 'worker',
+        mode: 'railway_worker',
         workerUrl: config.worker.url,
-        error: `Worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
+        error: `Railway worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
       };
     }
   }
 
-  // ── Local mode: check FREELANCEHUNT_TOKEN ───────────────────────────────
+  // ── Local mode: first check for storageState.json (Playwright session) ──────
+  try {
+    const { sessionExists, resolveSessionPath } = await import('@/services/playwright-browser.service');
+    if (sessionExists()) {
+      const sessionPath = resolveSessionPath();
+      return {
+        ok: true,
+        mode: 'playwright_session',
+        sessionPath,
+        // We only check file existence here (fast path).
+        // Deep verification (opening /my/) happens in /api/freelancehunt/status.
+      };
+    }
+  } catch {
+    // playwright-browser.service not available in this runtime — fall through
+  }
+
+  // ── Fallback: check FREELANCEHUNT_TOKEN ──────────────────────────────────
   const token = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (!token) {
     return {
       ok: false,
-      mode: 'api_token',
-      error: 'FREELANCEHUNT_TOKEN is not set. Add it to your environment variables.',
+      mode: 'none',
+      error: 'No session found. Run: npm run login:freelancehunt to save your Freelancehunt session, then start the worker.',
     };
   }
 
@@ -132,10 +206,19 @@ export async function GET() {
 
   const allOk = openai.ok && telegram.ok && freelancehunt.ok;
 
+  // Determine effective worker mode label — local_worker takes priority over config
+  const effectiveMode = freelancehunt.mode === 'local_worker'
+    ? 'local'
+    : freelancehunt.mode === 'railway_worker'
+      ? 'railway'
+      : config.worker.mode;
+
   return NextResponse.json({
     ok: allOk,
     configured,
-    workerMode: config.worker.enabled,
+    workerMode: config.worker.enabled || freelancehunt.mode === 'local_worker',
+    workerModeLabel: effectiveMode,   // 'railway' | 'local' | 'none'
+    localWorkerDetected: freelancehunt.mode === 'local_worker',
     checks: { openai, telegram, database, freelancehunt },
     timestamp: new Date().toISOString(),
   });

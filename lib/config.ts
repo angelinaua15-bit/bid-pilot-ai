@@ -30,14 +30,31 @@ export const config = {
   },
 
   /**
-   * External automation worker (VPS / Render / local machine).
-   * When set, all Freelancehunt work is delegated to the worker.
+   * External automation worker (VPS / Railway / local machine).
+   *
+   * Priority:
+   *   1. AUTOMATION_WORKER_URL   — explicit Railway / remote worker URL
+   *   2. LOCAL_WORKER_URL        — local worker running on same machine (default http://localhost:8080)
+   *
+   * When either is set, all Freelancehunt work is delegated to the worker.
    */
   worker: {
-    url: (process.env.AUTOMATION_WORKER_URL ?? '').replace(/\/$/, ''),
+    url: (
+      process.env.AUTOMATION_WORKER_URL ||
+      process.env.LOCAL_WORKER_URL ||
+      ''
+    ).replace(/\/$/, ''),
     secret: process.env.AUTOMATION_SECRET ?? '',
-    /** True when the worker URL is configured — enables worker-delegation mode. */
-    enabled: Boolean(process.env.AUTOMATION_WORKER_URL),
+    /** True when a worker URL is configured (remote or local). */
+    enabled: Boolean(
+      process.env.AUTOMATION_WORKER_URL || process.env.LOCAL_WORKER_URL
+    ),
+    /** 'railway' when AUTOMATION_WORKER_URL is set, 'local' when only LOCAL_WORKER_URL, 'none' otherwise */
+    mode: process.env.AUTOMATION_WORKER_URL
+      ? 'railway'
+      : process.env.LOCAL_WORKER_URL
+        ? 'local'
+        : 'none',
   },
 
   /** App base URL used for webhooks and callbacks. */
@@ -52,9 +69,12 @@ export function getIntegrationStatus() {
     openai:        Boolean(config.openai.apiKey),
     telegram:      Boolean(config.telegram.botToken) && config.telegram.chatId !== null,
     database:      config.db.isConfigured,
+    // Freelancehunt is "configured" when worker URL is set OR a token exists.
+    // Real session validity is checked at runtime via /api/freelancehunt/status.
     freelancehunt: config.worker.enabled
       ? Boolean(config.worker.url)
       : Boolean(config.freelancehunt.token),
     worker:        config.worker.enabled,
+    workerMode:    config.worker.mode,
   };
 }

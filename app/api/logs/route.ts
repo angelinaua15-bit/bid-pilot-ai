@@ -25,8 +25,8 @@ export async function GET(req: NextRequest) {
         // Normalise: worker may return .data or .logs — always expose as .data
         const data = Array.isArray(workerResult.data)
           ? workerResult.data
-          : Array.isArray((workerResult as Record<string, unknown>).logs)
-            ? (workerResult as Record<string, unknown>).logs as unknown[]
+          : Array.isArray((workerResult as unknown as Record<string, unknown>).logs)
+            ? (workerResult as unknown as Record<string, unknown>).logs as unknown[]
             : [];
         if (workerResult.ok) {
           return NextResponse.json({

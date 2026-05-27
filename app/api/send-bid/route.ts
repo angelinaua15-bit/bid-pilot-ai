@@ -1,58 +1,68 @@
 /**
  * POST /api/send-bid
- * Submits a single bid via the automation worker.
- *
- * Requires AUTOMATION_WORKER_URL — Playwright never runs on Vercel.
- * Body: { projectUrl: string, text: string, budget: number, days: number }
+ * Submits a bid directly via Freelancehunt REST API using the stored token.
+ * No worker/Playwright required.
+ * Body: { userId, projectId, text, budget, days }
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { config } from '@/lib/config';
+import { getFreelanceAccount, incrementBidCount } from '@/lib/db';
+
+const FH_BASE = 'https://api.freelancehunt.com/v2';
 
 export async function POST(req: NextRequest) {
   try {
-    if (!config.worker.enabled) {
-      return NextResponse.json(
-        {
-          ok: false,
-          error:
-            'Automation worker not configured. ' +
-            'Set AUTOMATION_WORKER_URL and start the worker on your local machine.',
-          setupRequired: true,
-        },
-        { status: 503 },
-      );
-    }
-
     const body = await req.json();
-    const { projectUrl, text, budget, days } = body;
+    const { userId, projectId, text, budget, days } = body;
 
-    if (!projectUrl || !text) {
+    if (!userId || !projectId || !text) {
       return NextResponse.json(
-        { ok: false, error: 'projectUrl and text are required' },
+        { ok: false, error: 'userId, projectId and text are required' },
         { status: 400 },
       );
     }
 
-    // Delegate to worker POST /send-bid
-    const { default: workerFetch } = await import('@/lib/worker-client');
-    // Use the generic workerFetch via the named startWorkerAutoBid pattern
-    const res = await fetch(`${config.worker.url}/send-bid`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: `Bearer ${config.worker.secret}`,
-      },
-      body: JSON.stringify({ projectUrl, text, budget, days }),
-      signal: AbortSignal.timeout(60_000),
-    });
-
-    const json = await res.json();
-    if (!res.ok) {
-      return NextResponse.json({ ok: false, error: json.error ?? `Worker HTTP ${res.status}` }, { status: res.status });
+    // Get the stored token
+    const account = await getFreelanceAccount(userId);
+    if (!account?.apiToken) {
+      return NextResponse.json(
+        { ok: false, error: 'Freelancehunt account not connected. Please connect your account first.' },
+        { status: 401 },
+      );
     }
 
-    return NextResponse.json({ ok: true, data: json });
+    const payload = {
+      data: {
+        type: 'bid',
+        attributes: {
+          comment:  text,
+          budget:   budget   ? Number(budget)  : undefined,
+          days:     days     ? Number(days)     : undefined,
+        },
+      },
+    };
+
+    const res = await fetch(`${FH_BASE}/projects/${projectId}/bids`, {
+      method: 'POST',
+      headers: {
+        Authorization:  `Bearer ${account.apiToken}`,
+        'Content-Type': 'application/json',
+      },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    });
+
+    const json = await res.json().catch(() => ({}));
+
+    if (!res.ok) {
+      const errMsg = json?.errors?.[0]?.detail ?? `Freelancehunt API error ${res.status}`;
+      return NextResponse.json({ ok: false, error: errMsg }, { status: res.status });
+    }
+
+    // Track bid count in DB
+    await incrementBidCount(userId).catch(() => {/* non-fatal */});
+
+    return NextResponse.json({ ok: true, data: json?.data });
   } catch (err) {
     console.error('[POST /api/send-bid]', err);
     return NextResponse.json(

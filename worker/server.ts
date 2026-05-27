@@ -35,7 +35,7 @@ if (!SECRET) {
 
 // ─── Auto-loop state ───────────────────────────────────────────────────────────
 // Runs a bid cycle every AUTO_LOOP_INTERVAL_MS when auto-bid is enabled.
-const AUTO_LOOP_INTERVAL_MS = Number(process.env.AUTO_LOOP_INTERVAL_MS || 20_000) // default: 20s (range: 15–30s)
+const AUTO_LOOP_INTERVAL_MS = Number(process.env.AUTO_LOOP_INTERVAL_MS || 60_000) // default: 60s
 let autoLoopTimer: ReturnType<typeof setInterval> | null = null
 let autoLoopEnabled = false
 let lastCheckedAt: string | null = null
@@ -225,8 +225,9 @@ async function runAutoLoop() {
     cycleCounters.failed    = Number(result.errors        ?? cycleCounters.failed)
 
     // Track processed projects so duplicates are never re-submitted
-    if (Array.isArray(result.processedIds)) {
-      for (const id of result.processedIds) processedProjectIds.add(String(id))
+    const resultAny = result as unknown as Record<string, unknown>;
+    if (Array.isArray(resultAny.processedIds)) {
+      for (const id of resultAny.processedIds) processedProjectIds.add(String(id))
     }
 
     addLog({
@@ -426,6 +427,16 @@ async function handleStatus(res: http.ServerResponse) {
   const sessionFound = sessionExists()
   const sessionPath = resolveSessionPath()
 
+  // Read cookie count from storageState.json for informational display
+  let cookieCount: number | undefined
+  if (sessionFound && sessionPath) {
+    try {
+      const raw = fs.readFileSync(sessionPath, 'utf-8')
+      const state = JSON.parse(raw)
+      cookieCount = (state.cookies ?? []).length
+    } catch { /* ignore */ }
+  }
+
   return json(res, 200, {
     ok: true,
     service: 'bid-pilot-worker',
@@ -444,6 +455,7 @@ async function handleStatus(res: http.ServerResponse) {
       connected:   sessionFound,
       authMode:    'playwright_session',
       sessionPath: sessionPath ?? null,
+      cookieCount: cookieCount ?? 0,
       error: sessionFound ? undefined : 'storageState.json not found. Run: npm run login:freelancehunt',
     },
     openai: {
@@ -620,39 +632,26 @@ function handleLogs(url: URL, res: http.ServerResponse) {
   })
 }
 
-async function handleGetProjects(url: URL, res: http.ServerResponse) {
-  const token = process.env.FREELANCEHUNT_TOKEN || ''
-
-  if (!token) {
-    return json(res, 503, {
-      ok: false,
-      error: 'FREELANCEHUNT_TOKEN is not set',
-      data: [],
-    })
-  }
-
+async function handleGetProjects(_url: URL, res: http.ServerResponse) {
+  // Use Playwright feed parser — no API token required.
+  // The parser opens freelancehunt.com/projects with the authenticated browser session.
   try {
-    const { fetchFreelancehuntProjects } = await import('../services/freelancehunt.service')
+    const { parseProjectsFromFeed } = await import('../services/playwright-browser.service')
 
-    const page = Number(url.searchParams.get('page') ?? '1')
-    const budgetMin = url.searchParams.get('budgetMin')
-      ? Number(url.searchParams.get('budgetMin'))
-      : undefined
-    const skills = url.searchParams.get('skills')?.split(',').filter(Boolean) ?? undefined
+    const feedLog = (level: LogEntry['level'], message: string) => {
+      addLog({ level, message: message || '(no message)' })
+    }
 
-    const projects = await fetchFreelancehuntProjects(token, {
-      page,
-      budgetMin,
-      skills,
-    })
+    const projects = await parseProjectsFromFeed(feedLog)
 
     return json(res, 200, {
       ok: true,
       data: projects,
-      page,
+      total: projects.length,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    addLog({ level: 'error', message: `[Projects] Parse failed: ${message}` })
 
     return json(res, 500, {
       ok: false,

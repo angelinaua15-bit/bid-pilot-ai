@@ -130,23 +130,212 @@ export function filterProject(
   return { passed: true, matchScore };
 }
 
+// ─── Blocked keywords — hard reject, checked BEFORE opening any browser page ──
+// Includes video, відео, монтаж, architect, interior, personal brand video, etc.
+
+export const BLOCKED_KEYWORDS: string[] = [
+  // Video / media production
+  'video', 'відео', 'монтаж', 'відеомонтаж', 'video editing', 'video edit',
+  'редагування відео', 'редагування-відео', 'reel', 'reels', 'рилс',
+  'tiktok', 'youtube channel', 'ютуб канал', 'ютуб',
+  // Photography
+  'фотограф', 'фотосесія', 'фоторетуш', 'photo retouch', 'photo editing',
+  'фото', 'photography',
+  // Animation / motion / 3D
+  'анімація', 'animation', '3d model', '3d render', 'motion graphic',
+  // Architecture / interior design
+  'архітект', 'інтер\'єр', 'interior design', 'дизайн інтер\'єру',
+  'дизайн квартири', 'дизайн будинку',
+  // Personal branding / non-dev branding
+  'особистий бренд', 'personal brand', 'brand video', 'бренд відео',
+  // Fashion / physical goods
+  'fashion', 'одяг', 'одежда', 'швейний', 'пошиття', 'тканина', 'вишивка',
+  // Gambling / betting (adult/illegal)
+  'гемблінг', 'gambling', 'беттинг', 'бетинг', 'ставки на спорт',
+  'казино', 'букмекер', 'betting',
+  // Pure copywriting / writing / translation
+  'copywriting', 'копірайтинг', 'копирайтинг',
+  'написання текстів', 'написання статей', 'написання постів',
+  'transcription', 'транскрибация', 'транскрипція',
+  'переклад', 'перевод', 'translation',
+  'редактура', 'коректура',
+  // Logo / print graphic design only
+  'логотип', 'лого', 'logo design', 'бренд-бук', 'brandbook',
+  'ілюстрація', 'illustration', 'поліграфія',
+  // Physical / construction / beauty services
+  'дерево', 'деревообробка', 'виробництво меблів',
+  'будівництво', 'ремонт квартири', 'ремонт офісу',
+  'масаж', 'манікюр', 'косметолог',
+  // Consulting / non-digital productivity
+  'notion шаблон', 'notion template', 'постачальник', 'поставщик', 'supplier',
+];
+
+// ─── Allowed IT/digital keywords — must match at least one ───────────────────
+
+export const ALLOWED_KEYWORDS: string[] = [
+  // CMS / e-commerce platforms
+  'wordpress', 'opencart', 'shopify', 'woocommerce', 'prestashop',
+  'bitrix', 'webflow', 'tilda', 'joomla', 'drupal',
+  // JS frameworks & languages
+  'react', 'next.js', 'nextjs', 'vue', 'nuxt', 'angular', 'svelte',
+  'javascript', 'typescript', 'html', 'css', 'tailwind',
+  // Backend
+  'php', 'laravel', 'symfony', 'yii',
+  'python', 'django', 'flask', 'fastapi',
+  'node.js', 'nodejs', 'express', 'nestjs',
+  'ruby on rails', 'golang', 'rust',
+  // Mobile
+  'flutter', 'react native', 'swift', 'kotlin',
+  // Infra / DevOps
+  'backend', 'frontend', 'fullstack', 'full stack', 'full-stack',
+  'api', 'rest api', 'graphql', 'webhook', 'docker', 'devops', 'serverless',
+  // Databases
+  'postgresql', 'mysql', 'mongodb', 'redis', 'firebase', 'supabase',
+  // Ads & analytics
+  'seo', 'google ads', 'meta ads', 'facebook ads',
+  'ga4', 'gtm', 'google tag manager', 'google analytics',
+  // Bots & automation
+  'telegram bot', 'telegram mini app', 'телеграм бот', 'chatbot',
+  'чат-бот', 'чатбот', 'бот', 'bot',
+  'automation', 'автоматизація', 'автоматизация',
+  'парсер', 'парсинг', 'scraping', 'parsing',
+  'zapier', 'make.com', 'n8n',
+  // AI / ML
+  'openai', 'chatgpt', 'gpt', 'llm', 'langchain', 'ai agent',
+  'штучний інтелект', 'нейромережа',
+  // CRM / integrations
+  'crm', 'інтеграція', 'интеграция', 'integration',
+  // Web & digital generic
+  'website', 'сайт', 'вебсайт', 'веб розробка', 'веб-розробка',
+  'landing page', 'лендінг', 'лендинг',
+  'saas', 'mvp', 'dashboard', 'admin panel', 'адмін панель',
+  'додаток', 'застосунок', 'мобільний додаток', 'web app', 'mobile app',
+  'верстка', 'верстання', 'figma', 'ui/ux',
+  // Generic IT
+  'розробка', 'разработка', 'програміст', 'программист', 'програмування',
+  'software', 'веб-додаток',
+];
+
+// ─── ApplyResult ──────────────────────────────────────────────────────────────
+
+export interface ShouldBidResult {
+  allowed: boolean;
+  reason: string;
+}
+
+export interface ApplyResult {
+  allowed: boolean;
+  reason: string;
+  stage: 'budget' | 'blocked_keyword' | 'no_allowed_keyword' | 'passed';
+  matchedKeywords: string[];
+  blockedKeywords: string[];
+  aiScore?: number;
+  budget: number;
+  currency: string;
+  category: string;
+}
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+function projectText(project: Project): string {
+  const skills = Array.isArray(project.skills)
+    ? project.skills.map((s) => safe(s)).join(' ')
+    : safe(project.skills ?? '');
+  return [safe(project.title), safe(project.description), safe(project.category ?? ''), skills]
+    .join(' ')
+    .toLowerCase();
+}
+
+function findMatches(text: string, keywords: string[]): string[] {
+  return keywords.filter((kw) => text.includes(kw.toLowerCase()));
+}
+
+export const MIN_BUDGET_UAH = 2000;
+export const MIN_BUDGET_USD = 50;
+
+function budgetTooLow(project: Project): boolean {
+  const cur = (project.currency ?? 'UAH').toUpperCase();
+  const b = project.budget ?? 0;
+  if (b === 0) return false; // no budget set — don't filter
+  if (cur === 'USD') return b < MIN_BUDGET_USD;
+  if (cur === 'UAH') return b < MIN_BUDGET_UAH;
+  // other currencies: convert roughly via UAH rate
+  return b * 40 < MIN_BUDGET_UAH;
+}
+
+// ─── shouldApply — runs BEFORE any browser page is opened ────────────────────
+
 /**
- * Filter a list of projects, returning only those that pass.
+ * Multi-stage synchronous filter. Call this before opening the browser.
+ *   Stage 1: budget minimum
+ *   Stage 2: blocked keywords (video, монтаж, архітектор, особистий бренд, …)
+ *   Stage 3: must match at least one IT/digital keyword
  */
+export async function shouldApply(
+  project: Project,
+  _useAIScore = false,
+): Promise<ApplyResult> {
+  const text     = projectText(project);
+  const budget   = project.budget ?? 0;
+  const currency = (project.currency ?? 'UAH').toUpperCase();
+  const category = safe(project.category ?? '').toLowerCase();
+
+  const base: Omit<ApplyResult, 'allowed' | 'reason' | 'stage'> = {
+    matchedKeywords: [],
+    blockedKeywords: [],
+    budget,
+    currency,
+    category,
+  };
+
+  // Stage 1 — budget minimum
+  if (budgetTooLow(project)) {
+    return { ...base, allowed: false, stage: 'budget',
+      reason: `Budget too low: ${budget} ${currency} (min ${MIN_BUDGET_UAH} UAH / ${MIN_BUDGET_USD} USD)` };
+  }
+
+  // Stage 2 — blocked keywords (hard reject, no browser opened)
+  const blocked = findMatches(text, BLOCKED_KEYWORDS);
+  if (blocked.length > 0) {
+    return { ...base, allowed: false, stage: 'blocked_keyword', blockedKeywords: blocked,
+      reason: `Blocked keyword: ${blocked.slice(0, 3).map((k) => `"${k}"`).join(', ')}` };
+  }
+
+  // Stage 3 — must match at least one allowed IT keyword
+  const matched = findMatches(text, ALLOWED_KEYWORDS);
+  if (matched.length === 0) {
+    return { ...base, allowed: false, stage: 'no_allowed_keyword',
+      reason: 'No IT/digital keywords found in title, description, or skills' };
+  }
+
+  return { ...base, allowed: true, stage: 'passed', matchedKeywords: matched,
+    reason: `Passed. Matched: [${matched.slice(0, 3).join(', ')}]` };
+}
+
+// ─── Legacy shouldBid (kept for backwards compatibility) ─────────────────────
+
+export function shouldBid(project: Project): ShouldBidResult {
+  const text = projectText(project);
+  const blocked = findMatches(text, BLOCKED_KEYWORDS);
+  if (blocked.length > 0) return { allowed: false, reason: `Blocked keyword: "${blocked[0]}"` };
+  const matched = findMatches(text, ALLOWED_KEYWORDS);
+  if (matched.length > 0) return { allowed: true, reason: `IT keyword: "${matched[0]}"` };
+  return { allowed: false, reason: 'No IT/digital keywords found' };
+}
+
+// ─── Filter a list of projects ────────────────────────────────────────────────
+
 export function filterProjects(
   projects: Project[],
   settings: AutoBidSettings,
   alreadyBidIds: Set<string>
 ): Array<Project & { matchScore: number }> {
   const results: Array<Project & { matchScore: number }> = [];
-
   for (const project of projects) {
     const result = filterProject(project, settings, alreadyBidIds);
     if (result.passed) {
       results.push({ ...project, matchScore: result.matchScore ?? 80 });
     }
   }
-
-  // Sort by matchScore descending
   return results.sort((a, b) => (b.matchScore ?? 0) - (a.matchScore ?? 0));
 }

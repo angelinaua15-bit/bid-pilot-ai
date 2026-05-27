@@ -21,13 +21,10 @@ import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
 import { submitBidViaPlaywright } from './playwright-browser.service';
 import { sendTelegramMessage } from './telegram.service';
-import { companyProfile } from '@/lib/mock-data';
+import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
-import { saveBid, appendLog as persistLog } from '@/lib/db';
+import { saveBid, saveApplication, appendLog as persistLog } from '@/lib/db';
 
-// NOTE: project-filter.service is intentionally NOT used here.
-// All category, budget, keyword, match-score, and working-hours filters are
-// disabled. Only the in-session duplicate check (alreadyBidIds) is applied.
 
 export interface AutoBidRunResult {
   logs: AutoBidLog[];
@@ -199,7 +196,7 @@ export async function runAutoBidCycle(
     externalStepLog?.(level, safeMsg, meta);
   };
 
-  // ── 1. Parse projects from API ──────────────────────────────────────────────
+  // ── 1. Parse projects from API ────────────────────────────���─────��───────────
   let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
   try {
     // Parse from website feed — no API token needed
@@ -258,20 +255,68 @@ export async function runAutoBidCycle(
     const projectUrl   = project.projectUrl ?? '';
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
-    // Cross-cycle dedup: skip if already submitted in this worker process run
-    if (
-      globalProcessedIds?.has(project.id) ||
-      (numericId && globalProcessedIds?.has(numericId)) ||
-      alreadyBidIds.has(project.id) ||
-      (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))
-    ) {
+    // ── In-cycle dedup ────────────────────────────────────────────────────────
+    if (alreadyBidIds.has(project.id) || (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))) {
       log(logs, 'info',
-        `[${i + 1}/${filtered.length}] SKIP (already processed): "${projectTitle}"`,
+        `[SKIP] Already bid in this cycle — "${projectTitle}"`,
         { projectId: project.id, projectTitle }
       );
       bidsSkipped++;
       continue;
     }
+
+    if (globalProcessedIds?.has(project.id) || (project.freelancehuntId && globalProcessedIds?.has(project.freelancehuntId))) {
+      log(logs, 'info',
+        `[SKIP] Already bid in this worker process — "${projectTitle}"`,
+        { projectId: project.id, projectTitle }
+      );
+      bidsSkipped++;
+      continue;
+    }
+
+    // ── Multi-stage filter: budget → blocked keywords → allowed keywords → AI score ─
+    const filter = await shouldApply(project, Boolean(process.env.OPENAI_API_KEY));
+    if (!filter.allowed) {
+      const detail = [
+        `stage=${filter.stage}`,
+        `budget=${filter.budget} ${filter.currency}`,
+        `category="${filter.category}"`,
+        filter.blockedKeywords.length > 0 ? `blocked=[${filter.blockedKeywords.slice(0, 3).join(', ')}]` : null,
+        filter.matchedKeywords.length > 0 ? `matched=[${filter.matchedKeywords.slice(0, 3).join(', ')}]` : null,
+        filter.aiScore !== undefined ? `ai_score=${filter.aiScore}` : null,
+      ].filter(Boolean).join(' | ');
+
+      log(logs, 'info',
+        `[SKIP] "${projectTitle}" — ${filter.reason} | ${detail}`,
+        { projectId: project.id, projectTitle, meta: { filterStage: filter.stage, aiScore: filter.aiScore } }
+      );
+
+      // Persist so Dashboard "Skipped" tab shows real data
+      await saveApplication({
+        id:              `app_skip_${project.id}_${Date.now()}`,
+        projectId:       project.id,
+        freelancehuntId: project.freelancehuntId ?? undefined,
+        title:           projectTitle,
+        url:             projectUrl,
+        budget:          filter.budget,
+        currency:        filter.currency,
+        status:          'skipped',
+        createdAt:       new Date().toISOString(),
+        aiScore:         filter.aiScore,
+        matchedKeywords: filter.matchedKeywords,
+        blockedKeywords: filter.blockedKeywords,
+        skippedReason:   filter.reason,
+        filterStage:     filter.stage,
+      }).catch(() => {});
+
+      bidsSkipped++;
+      continue;
+    }
+
+    log(logs, 'info',
+      `[FILTER PASS] "${projectTitle}" | keywords=[${filter.matchedKeywords.slice(0, 4).join(', ')}]${filter.aiScore !== undefined ? ` | ai_score=${filter.aiScore}` : ''} | budget=${filter.budget} ${filter.currency}`,
+      { projectId: project.id, projectTitle }
+    );
 
     log(logs, 'info',
       `[${i + 1}/${filtered.length}] Processing: "${projectTitle}" — ${projectUrl}`,
@@ -283,7 +328,7 @@ export async function runAutoBidCycle(
       projectId: project.id, projectTitle,
     });
 
-    const bid = await generateAutoBid(project, companyProfile);
+    const bid = await generateAutoBid(project);
 
     if (bid.usedFallback) {
       const reason =
@@ -377,18 +422,46 @@ export async function runAutoBidCycle(
         incrementDailyCount('bids');
         bidsSubmitted++;
 
+        const sentAt = new Date().toISOString();
+        const appStatus: import('@/types').ApplicationStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
+        const bidStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
+
         await saveBid({
           ...bid,
-          status: 'sent',
+          status: bidStatus,
           freelancehuntBidId: result.bidId,
-          sentAt: new Date().toISOString(),
+          sentAt,
         });
 
-        log(logs, 'success',
-          `BID SENT [${i + 1}/${filtered.length}] — via ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | "${projectTitle}"`,
+        // Also persist to applications table for Dashboard display
+        await saveApplication({
+          id:                 `app_sent_${project.id}_${Date.now()}`,
+          projectId:          project.id,
+          freelancehuntId:    project.freelancehuntId ?? undefined,
+          title:              projectTitle,
+          url:                projectUrl,
+          budget:             budgetAmount ?? project.budget,
+          currency:           project.currency ?? 'UAH',
+          deadline:           bid.deadline,
+          status:             appStatus,
+          createdAt:          bid.createdAt ?? sentAt,
+          sentAt,
+          proposalText:       bid.text,
+          proposalPrice:      bid.price,
+          freelancehuntBidId: result.bidId,
+          aiScore:            filter.aiScore,
+          matchedKeywords:    filter.matchedKeywords,
+          skippedReason:      result.unconfirmed
+            ? `Sent unconfirmed — submit clicked, no error. preUrl:${result.preSubmitUrl} postUrl:${result.postSubmitUrl}`
+            : undefined,
+        }).catch(() => {});
+
+        const statusLabel = result.unconfirmed ? 'SENT_UNCONFIRMED' : 'SUBMITTED';
+        log(logs, result.unconfirmed ? 'warning' : 'success',
+          `${statusLabel} [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | preUrl: ${result.preSubmitUrl ?? projectUrl} | postUrl: ${result.postSubmitUrl ?? projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy },
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy, unconfirmed: result.unconfirmed },
           }
         );
 
@@ -425,7 +498,7 @@ export async function runAutoBidCycle(
 
       if (isApiSkip) {
         log(logs, 'warning',
-          `[${i + 1}/${filtered.length}] SKIP (API reason): "${projectTitle}" — ${msg.slice(0, 200)}`,
+          `SKIPPED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | reason: ${msg.slice(0, 300)} | url: ${projectUrl}`,
           { projectId: project.id, projectTitle, meta: { projectUrl, reason: msg } }
         );
         bidsSkipped++;
@@ -435,9 +508,9 @@ export async function runAutoBidCycle(
         continue;
       }
 
-      // All other errors: log full API response, count as failure, continue to next project
+      // All other errors: log full error, count as failure, continue to next project
       log(logs, 'error',
-        `[${i + 1}/${filtered.length}] BID FAILED: "${projectTitle}" — ${msg}`,
+        `FAILED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | error: ${msg} | url: ${projectUrl}`,
         { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
       );
       errors++;
