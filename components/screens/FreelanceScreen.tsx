@@ -552,10 +552,10 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
                     {(app.skippedReason as string) && (
                       <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">{app.skippedReason as string}</p>
                     )}
-                    {app.url && (
-                      <a href={app.url as string} target="_blank" rel="noopener noreferrer"
+                    {typeof app.url === 'string' && app.url && (
+                      <a href={app.url} target="_blank" rel="noopener noreferrer"
                         className="text-[10px] text-primary mt-0.5 block truncate">
-                        {app.url as string}
+                        {app.url}
                       </a>
                     )}
                   </div>

@@ -112,7 +112,7 @@ export function ProfileScreen({ onNavigate, onOpenCompanyProfile }: ProfileScree
         <div className="flex items-center justify-between mb-2">
           <span className="text-sm font-semibold">AI-генерації</span>
           <button
-            onClick={() => { haptic.light(); onNavigate('history'); }}
+            onClick={() => { haptic.light(); onNavigate('account'); }}
             className="text-xs text-primary font-medium flex items-center gap-1"
           >
             Тариф <ChevronRight size={12} />
@@ -140,7 +140,7 @@ export function ProfileScreen({ onNavigate, onOpenCompanyProfile }: ProfileScree
         </p>
         {currentPlan && (
           <button
-            onClick={() => { haptic.medium(); onNavigate('history'); }}
+            onClick={() => { haptic.medium(); onNavigate('account'); }}
             className="mt-3 w-full py-2.5 rounded-xl bg-primary/10 border border-primary/30 text-primary text-xs font-semibold transition-all active:scale-95"
           >
             Оновити тариф — {currentPlan.price === 0 ? 'Безкоштовно' : `${currentPlan.price} грн/міс`}
