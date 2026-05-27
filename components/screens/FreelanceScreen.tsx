@@ -111,6 +111,7 @@ function ConnectPanel({ userId, account, onRefresh }: {
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
   const [workerBusy, setWorkerBusy] = useState(false);
+  const [runResult, setRunResult]   = useState<string | null>(null);
 
   const handleConnect = async () => {
     if (!userId || !token.trim()) return;
@@ -139,12 +140,20 @@ function ConnectPanel({ userId, account, onRefresh }: {
 
   const handleToggleWorker = async (start: boolean) => {
     if (!userId) return;
-    haptic.medium(); setWorkerBusy(true);
+    haptic.medium(); setWorkerBusy(true); setRunResult(null);
     try {
-      await fetch(start ? '/api/freelance/start' : '/api/freelance/stop', {
+      const res = await fetch(start ? '/api/freelance/start' : '/api/freelance/stop', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ userId }),
-      });
+      }).then((r) => r.json()).catch(() => ({ ok: false }));
+      if (start && res.ok) {
+        haptic.success();
+        setRunResult(`Знайдено ${res.found ?? 0} проектів, надіслано ${res.submitted ?? 0} заявок`);
+        setTimeout(() => setRunResult(null), 5000);
+      } else if (!res.ok) {
+        setRunResult(res.error ?? 'Помилка');
+        haptic.error();
+      }
       onRefresh();
     } finally { setWorkerBusy(false); }
   };
@@ -182,23 +191,29 @@ function ConnectPanel({ userId, account, onRefresh }: {
         )}
       </div>
 
-      {/* Worker toggle — only when connected */}
+      {/* Auto-bid trigger — only when connected */}
       {account?.status === 'connected' && (
-        <div className="flex gap-2">
-          <button
-            onClick={() => handleToggleWorker(true)}
-            disabled={workerBusy}
-            className="flex-1 py-3 rounded-xl bg-green-500/15 text-green-400 border border-green-500/20 text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-          >
-            <Play size={13} /> Запустити worker
-          </button>
-          <button
-            onClick={() => handleToggleWorker(false)}
-            disabled={workerBusy}
-            className="py-3 px-4 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold flex items-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-          >
-            <Square size={13} /> Зупинити
-          </button>
+        <div className="flex flex-col gap-2">
+          <div className="flex gap-2">
+            <button
+              onClick={() => handleToggleWorker(true)}
+              disabled={workerBusy}
+              className="flex-1 py-3 rounded-xl bg-green-500/15 text-green-400 border border-green-500/20 text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+            >
+              {workerBusy ? <RefreshCw size={13} className="animate-spin" /> : <Play size={13} />}
+              {workerBusy ? 'Пошук...' : 'Запустити пошук заявок'}
+            </button>
+            <button
+              onClick={() => handleToggleWorker(false)}
+              disabled={workerBusy}
+              className="py-3 px-4 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold flex items-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+            >
+              <Square size={13} />
+            </button>
+          </div>
+          {runResult && (
+            <p className="text-[11px] text-center text-muted-foreground px-2">{runResult}</p>
+          )}
         </div>
       )}
 
@@ -474,7 +489,10 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
     if (!userId) { setLoading(false); return; }
     setLoading(true);
     try {
-      const res = await fetch(`/api/applications?userId=${userId}&status=${s}&limit=50`).then((r) => r.json()).catch(() => null);
+      const url = s === 'all'
+        ? `/api/freelance/bids?userId=${userId}`
+        : `/api/freelance/bids?userId=${userId}&status=${s}`;
+      const res = await fetch(url).then((r) => r.json()).catch(() => null);
       setApps(res?.ok && Array.isArray(res.data) ? res.data : []);
     } finally { setLoading(false); }
   }, [userId]);

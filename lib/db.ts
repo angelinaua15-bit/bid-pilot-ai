@@ -479,24 +479,27 @@ export async function upsertFreelanceAccount(acc: Partial<FreelanceAccount> & { 
     const now = new Date().toISOString();
     const { data: existing } = await db.from('freelance_accounts').select('*').eq('user_id', acc.userId).maybeSingle();
     if (existing) {
-      const { data, error } = await db.from('freelance_accounts').update({
-        account_name: acc.accountName ?? existing.account_name,
-        status: acc.status ?? existing.status,
-        last_login_at: acc.lastLoginAt ?? existing.last_login_at,
-        last_check_at: acc.lastCheckAt ?? existing.last_check_at,
-        updated_at: now,
-      }).eq('user_id', acc.userId).select('*').single();
+      const updatePayload: Record<string, unknown> = {
+        account_name:  acc.accountName  ?? existing.account_name,
+        status:        acc.status       ?? existing.status,
+        last_login_at: acc.lastLoginAt  ?? existing.last_login_at,
+        last_check_at: acc.lastCheckAt  ?? existing.last_check_at,
+        updated_at:    now,
+      };
+      if (acc.apiToken) updatePayload.api_token = acc.apiToken;
+      const { data, error } = await db.from('freelance_accounts').update(updatePayload).eq('user_id', acc.userId).select('*').single();
       if (error) throw error;
       return mapFreelanceAccount(data);
     } else {
       const { data, error } = await db.from('freelance_accounts').insert({
-        user_id: acc.userId,
-        platform: acc.platform ?? 'freelancehunt',
+        user_id:      acc.userId,
+        platform:     acc.platform ?? 'freelancehunt',
         account_name: acc.accountName ?? null,
-        status: acc.status ?? 'disconnected',
+        api_token:    acc.apiToken ?? null,
+        status:       acc.status ?? 'disconnected',
         last_login_at: acc.lastLoginAt ?? null,
-        created_at: now,
-        updated_at: now,
+        created_at:   now,
+        updated_at:   now,
       }).select('*').single();
       if (error) throw error;
       return mapFreelanceAccount(data);
@@ -510,6 +513,7 @@ function mapFreelanceAccount(r: Record<string, unknown>): FreelanceAccount {
     userId:       r.user_id as string,
     platform:     r.platform as string,
     accountName:  r.account_name as string | undefined,
+    apiToken:     r.api_token as string | undefined,
     status:       (r.status as string ?? 'disconnected') as FreelanceAccount['status'],
     lastLoginAt:  r.last_login_at as string | undefined,
     lastCheckAt:  r.last_check_at as string | undefined,
@@ -573,6 +577,22 @@ function mapFreelanceFilter(r: Record<string, unknown>): FreelanceFilter {
     createdAt:         r.created_at as string,
     updatedAt:         r.updated_at as string,
   };
+}
+
+export async function incrementBidCount(userId: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.rpc('increment_bid_count', { p_user_id: userId }).throwOnError();
+  } catch {
+    // Fallback: manual increment
+    try {
+      const db2 = getDb(); if (!db2) return;
+      const { data: acc } = await db2.from('freelance_accounts').select('bid_count').eq('user_id', userId).maybeSingle();
+      const current = (acc?.bid_count as number) ?? 0;
+      await db2.from('freelance_accounts').update({ bid_count: current + 1, updated_at: new Date().toISOString() }).eq('user_id', userId);
+    } catch (err2) { console.error('[db] incrementBidCount fallback error:', err2); }
+  }
 }
 
 // ─── SaaS: Telegram Channels ──────────────────────────────────────────────────

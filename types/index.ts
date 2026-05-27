@@ -332,6 +332,7 @@ export interface FreelanceAccount {
   userId: string;
   platform: string;
   accountName?: string;
+  apiToken?: string;
   status: FreelanceAccountStatus;
   lastLoginAt?: string;
   lastCheckAt?: string;
@@ -481,7 +482,7 @@ export interface PaymentSetting {
   updatedAt: string;
 }
 
-// ─── Manual Payments ──────────────────────────────────────────────────────────
+// ─── Manual Payments ────────────────────────────────────────���─────────────────
 
 export type ManualPaymentStatus = 'pending' | 'approved' | 'rejected';
 export type ManualPaymentPlan = 'pro' | 'agency';
