@@ -5,7 +5,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount } from '@/lib/db';
+import { config } from '@/lib/config';
 
 const FH_BASE = 'https://api.freelancehunt.com/v2';
 
@@ -17,12 +17,7 @@ export async function GET(req: NextRequest) {
     const budgetMin = searchParams.get('budgetMin');
     const skills    = searchParams.get('skills');
 
-    // Get the user's stored Freelancehunt token
-    let token: string | undefined;
-    if (userId) {
-      const account = await getFreelanceAccount(userId);
-      token = account?.apiToken;
-    }
+    const token = process.env.FREELANCEHUNT_TOKEN;
 
     if (!token) {
       return NextResponse.json(
