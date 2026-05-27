@@ -597,15 +597,110 @@ export async function incrementBidCount(userId: string): Promise<void> {
 
 // ─── SaaS: Telegram Channels ──────────────────────────────────────────────────
 
+/** Fetch all channels (up to 10 000). Prefer getTelegramChannelsPaginated for UI. */
 export async function getTelegramChannels(options?: { status?: string; limit?: number }): Promise<TelegramChannel[]> {
   if (!isSupabaseConfigured) return [];
   try {
     const db = getDb(); if (!db) return [];
-    let query = db.from('telegram_channels').select('*').order('created_at', { ascending: false }).limit(options?.limit ?? 200);
+    let query = db.from('telegram_channels').select('*').order('created_at', { ascending: false }).limit(options?.limit ?? 10_000);
     if (options?.status) query = query.eq('status', options.status);
     const { data } = await query;
     return (data ?? []).map(mapChannel);
   } catch (err) { console.error('[db] getTelegramChannels error:', err); return []; }
+}
+
+/** Paginated channel query with optional full-text search and category filter. */
+export async function getTelegramChannelsPaginated(options: {
+  page?: number;
+  pageSize?: number;
+  search?: string;
+  category?: string;
+  status?: string;
+}): Promise<{ channels: TelegramChannel[]; total: number }> {
+  if (!isSupabaseConfigured) return { channels: [], total: 0 };
+  try {
+    const db = getDb(); if (!db) return { channels: [], total: 0 };
+    const page     = Math.max(1, options.page     ?? 1);
+    const pageSize = Math.min(100, options.pageSize ?? 50);
+    const from     = (page - 1) * pageSize;
+    const to       = from + pageSize - 1;
+
+    let query = db.from('telegram_channels')
+      .select('*', { count: 'exact' })
+      .order('created_at', { ascending: false })
+      .range(from, to);
+
+    if (options.status)   query = query.eq('status', options.status);
+    if (options.category) query = query.eq('category', options.category);
+    if (options.search) {
+      const q = `%${options.search}%`;
+      query = query.or(`title.ilike.${q},username_or_link.ilike.${q},notes.ilike.${q}`);
+    }
+
+    const { data, error, count } = await query;
+    if (error) throw error;
+    return { channels: (data ?? []).map(mapChannel), total: count ?? 0 };
+  } catch (err) {
+    console.error('[db] getTelegramChannelsPaginated error:', err);
+    return { channels: [], total: 0 };
+  }
+}
+
+/** Count channels, optionally filtered. */
+export async function getTelegramChannelCount(options?: { status?: string; category?: string }): Promise<number> {
+  if (!isSupabaseConfigured) return 0;
+  try {
+    const db = getDb(); if (!db) return 0;
+    let query = db.from('telegram_channels').select('id', { count: 'exact', head: true });
+    if (options?.status)   query = query.eq('status', options.status);
+    if (options?.category) query = query.eq('category', options.category);
+    const { count } = await query;
+    return count ?? 0;
+  } catch { return 0; }
+}
+
+/** Batch upsert channels by username_or_link — far faster than one-by-one for large imports. */
+export async function batchUpsertTelegramChannels(
+  channels: Array<Partial<TelegramChannel>>,
+): Promise<{ inserted: number; errors: number }> {
+  if (!isSupabaseConfigured) return { inserted: 0, errors: 0 };
+  const db = getDb(); if (!db) return { inserted: 0, errors: 0 };
+
+  const now = new Date().toISOString();
+  const CHUNK = 200; // Supabase upsert limit per request
+  let inserted = 0;
+  let errors   = 0;
+
+  for (let i = 0; i < channels.length; i += CHUNK) {
+    const chunk = channels.slice(i, i + CHUNK).map((ch) => ({
+      title:            ch.title ?? '',
+      username_or_link: ch.usernameOrLink ?? '',
+      type:             ch.type ?? 'channel',
+      category:         ch.category ?? null,
+      language:         ch.language ?? 'uk',
+      status:           ch.status ?? 'active',
+      posting_method:   ch.postingMethod ?? 'bot',
+      members_count:    ch.membersCount ?? null,
+      notes:            ch.notes ?? null,
+      created_by:       ch.createdBy ?? null,
+      updated_at:       now,
+      created_at:       now,
+    }));
+
+    try {
+      const { error, data } = await db
+        .from('telegram_channels')
+        .upsert(chunk, { onConflict: 'username_or_link', ignoreDuplicates: false })
+        .select('id');
+      if (error) { console.error('[db] batchUpsert chunk error:', error.message); errors += chunk.length; }
+      else inserted += data?.length ?? chunk.length;
+    } catch (e) {
+      console.error('[db] batchUpsert exception:', e);
+      errors += chunk.length;
+    }
+  }
+
+  return { inserted, errors };
 }
 
 export async function upsertTelegramChannel(ch: Partial<TelegramChannel>): Promise<TelegramChannel | null> {

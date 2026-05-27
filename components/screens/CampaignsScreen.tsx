@@ -1,9 +1,9 @@
 'use client';
 
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   RefreshCw, Plus, Send, CheckCircle2, XCircle, Clock,
-  ChevronRight, Trash2, Play, Pause, Radio,
+  ChevronRight, Trash2, Play, Pause, Radio, Search, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -11,14 +11,17 @@ import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
 import type { SaaSUser, Campaign, TelegramChannel, CampaignMessage } from '@/types';
 
+const PAGE_SIZE = 50;
+
 interface Props { user: SaaSUser | null; }
 type SubTab = 'channels' | 'campaigns' | 'create';
 
 export function CampaignsScreen({ user }: Props) {
-  const [subTab, setSubTab] = useState<SubTab>('campaigns');
-  const [channels, setChannels]   = useState<TelegramChannel[]>([]);
+  const [subTab, setSubTab]       = useState<SubTab>('campaigns');
   const [campaigns, setCampaigns] = useState<Campaign[]>([]);
   const [loading, setLoading]     = useState(true);
+  // Total channel count shown in tab label — fetched cheaply
+  const [channelTotal, setChannelTotal] = useState<number | null>(null);
 
   const userId = user?.id;
   const isPro  = user?.subscriptionPlan === 'pro' || user?.subscriptionPlan === 'agency' || user?.subscriptionPlan === 'unlimited' || user?.role === 'owner' || user?.role === 'admin';
@@ -27,12 +30,12 @@ export function CampaignsScreen({ user }: Props) {
     if (!userId) { setLoading(false); return; }
     setLoading(true);
     try {
-      const [chRes, cmpRes] = await Promise.all([
-        fetch('/api/channels').then((r) => r.json()).catch(() => null),
+      const [cmpRes, countRes] = await Promise.all([
         fetch(`/api/campaigns?userId=${userId}`).then((r) => r.json()).catch(() => null),
+        fetch('/api/channels?count=1').then((r) => r.json()).catch(() => null),
       ]);
-      if (chRes?.ok)  setChannels(chRes.channels ?? []);
-      if (cmpRes?.ok) setCampaigns(cmpRes.campaigns ?? []);
+      if (cmpRes?.ok)   setCampaigns(cmpRes.campaigns ?? []);
+      if (countRes?.ok) setChannelTotal(countRes.total ?? null);
     } finally { setLoading(false); }
   }, [userId]);
 
@@ -60,7 +63,7 @@ export function CampaignsScreen({ user }: Props) {
 
   const tabs: Array<{ id: SubTab; label: string }> = [
     { id: 'campaigns', label: 'Кампанії' },
-    { id: 'channels',  label: 'Канали' },
+    { id: 'channels',  label: channelTotal !== null ? `Канали (${channelTotal.toLocaleString('uk-UA')})` : 'Канали' },
     { id: 'create',    label: '+ Нова' },
   ];
 
@@ -94,9 +97,15 @@ export function CampaignsScreen({ user }: Props) {
       ) : (
         <>
           {subTab === 'campaigns' && <CampaignsList campaigns={campaigns} userId={userId} onRefresh={load} />}
-          {subTab === 'channels'  && <ChannelsList channels={channels} onRefresh={load} isAdmin={user?.role === 'admin' || user?.role === 'owner'} userId={userId} />}
+          {subTab === 'channels'  && (
+            <ChannelsList
+              isAdmin={user?.role === 'admin' || user?.role === 'owner'}
+              userId={userId}
+              onTotalChange={setChannelTotal}
+            />
+          )}
           {subTab === 'create'    && (
-            <CreateCampaignForm userId={userId} channels={channels} onCreated={() => { setSubTab('campaigns'); load(); }} />
+            <CreateCampaignForm userId={userId} onCreated={() => { setSubTab('campaigns'); load(); }} />
           )}
         </>
       )}
@@ -219,17 +228,85 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
   );
 }
 
-// ── Channels list ─────────────────────────────────────────────────────────────
-function ChannelsList({ channels, onRefresh, isAdmin, userId }: {
-  channels: TelegramChannel[]; onRefresh: () => void; isAdmin: boolean; userId?: string;
+// ── Channels list — server-side paginated with infinite scroll ─────────────────
+function ChannelsList({ isAdmin, userId, onTotalChange }: {
+  isAdmin: boolean; userId?: string; onTotalChange?: (n: number) => void;
 }) {
-  const [showForm, setShowForm]   = useState(false);
-  const [form, setForm]           = useState({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
-  const [saving, setSaving]       = useState(false);
-  const [seeding, setSeeding]     = useState(false);
-  const [seedMsg, setSeedMsg]     = useState('');
-  const [search, setSearch]       = useState('');
-  const [filterCat, setFilterCat] = useState('');
+  const [channels, setChannels]     = useState<TelegramChannel[]>([]);
+  const [total, setTotal]           = useState(0);
+  const [page, setPage]             = useState(1);
+  const [loading, setLoading]       = useState(false);
+  const [hasMore, setHasMore]       = useState(true);
+  const [search, setSearch]         = useState('');
+  const [debouncedSearch, setDebouncedSearch] = useState('');
+  const [filterCat, setFilterCat]   = useState('');
+  const [categories, setCategories] = useState<string[]>([]);
+  const [showForm, setShowForm]     = useState(false);
+  const [form, setForm]             = useState({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
+  const [saving, setSaving]         = useState(false);
+  const [seeding, setSeeding]       = useState(false);
+  const [seedMsg, setSeedMsg]       = useState<{ ok: boolean; text: string } | null>(null);
+  const sentinelRef = useRef<HTMLDivElement>(null);
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Debounce search input — 400 ms
+  useEffect(() => {
+    if (debounceRef.current) clearTimeout(debounceRef.current);
+    debounceRef.current = setTimeout(() => setDebouncedSearch(search), 400);
+    return () => { if (debounceRef.current) clearTimeout(debounceRef.current); };
+  }, [search]);
+
+  // Reset list when search or category changes
+  useEffect(() => {
+    setChannels([]);
+    setPage(1);
+    setHasMore(true);
+  }, [debouncedSearch, filterCat]);
+
+  // Load a page
+  const loadPage = useCallback(async (pageNum: number) => {
+    if (loading) return;
+    setLoading(true);
+    try {
+      const params = new URLSearchParams({
+        page:     String(pageNum),
+        pageSize: String(PAGE_SIZE),
+      });
+      if (debouncedSearch) params.set('search', debouncedSearch);
+      if (filterCat)       params.set('category', filterCat);
+
+      const res = await fetch(`/api/channels?${params}`).then((r) => r.json()).catch(() => null);
+      if (!res?.ok) return;
+
+      const incoming: TelegramChannel[] = res.channels ?? [];
+      setChannels((prev) => pageNum === 1 ? incoming : [...prev, ...incoming]);
+      setTotal(res.total ?? 0);
+      setHasMore(res.hasMore ?? false);
+      onTotalChange?.(res.total ?? 0);
+
+      // Build category list from first load
+      if (pageNum === 1 && !debouncedSearch && !filterCat) {
+        const cats = Array.from(new Set(incoming.map((c) => c.category).filter(Boolean))) as string[];
+        if (cats.length) setCategories((prev) => Array.from(new Set([...prev, ...cats])).sort());
+      }
+    } finally {
+      setLoading(false);
+    }
+  }, [loading, debouncedSearch, filterCat, onTotalChange]);
+
+  // Load whenever page changes
+  useEffect(() => { loadPage(page); /* eslint-disable-next-line react-hooks/exhaustive-deps */ }, [page, debouncedSearch, filterCat]);
+
+  // Infinite scroll via IntersectionObserver
+  useEffect(() => {
+    if (!sentinelRef.current) return;
+    const obs = new IntersectionObserver(
+      ([entry]) => { if (entry.isIntersecting && hasMore && !loading) setPage((p) => p + 1); },
+      { rootMargin: '200px' },
+    );
+    obs.observe(sentinelRef.current);
+    return () => obs.disconnect();
+  }, [hasMore, loading]);
 
   const handleAdd = async () => {
     if (!form.title.trim() || !form.usernameOrLink.trim()) return;
@@ -239,99 +316,124 @@ function ChannelsList({ channels, onRefresh, isAdmin, userId }: {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(form),
       }).then((r) => r.json());
-      if (res.ok) { haptic.success(); setShowForm(false); setForm({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' }); onRefresh(); }
+      if (res.ok) {
+        haptic.success();
+        setShowForm(false);
+        setForm({ title: '', usernameOrLink: '', type: 'channel', language: 'uk', category: '' });
+        // Refresh
+        setChannels([]); setPage(1); setHasMore(true);
+      }
     } finally { setSaving(false); }
   };
 
   const handleDelete = async (id: string) => {
     haptic.error();
     await fetch(`/api/channels/${id}`, { method: 'DELETE' });
-    onRefresh();
+    setChannels((prev) => { const next = prev.filter((c) => c.id !== id); return next; });
+    setTotal((t) => Math.max(0, t - 1));
+    onTotalChange?.(Math.max(0, total - 1));
   };
 
   const handleSeed = async () => {
-    haptic.medium();
-    setSeeding(true);
-    setSeedMsg('');
+    haptic.medium(); setSeeding(true); setSeedMsg(null);
     try {
-      const url = userId ? `/api/channels/seed?requesterId=${encodeURIComponent(userId)}` : '/api/channels/seed';
+      const url = userId
+        ? `/api/channels/seed?requesterId=${encodeURIComponent(userId)}`
+        : '/api/channels/seed';
       const res = await fetch(url, { method: 'POST' }).then((r) => r.json());
       if (res.ok) {
         haptic.success();
-        const parts: string[] = [`Завантажено ${res.inserted} каналів`];
+        const parts: string[] = [`Завантажено ${(res.inserted ?? 0).toLocaleString('uk-UA')} каналів`];
         if (res.europeGroups)      parts.push(`${res.europeGroups} груп українців в Європі`);
-        if (res.catalogueChannels) parts.push(`${res.catalogueChannels} з тематичного каталогу`);
-        setSeedMsg(parts.join(' · '));
-        onRefresh();
+        if (res.catalogueChannels) parts.push(`${res.catalogueChannels} з каталогу`);
+        if (res.totalInDb)         parts.push(`Всього в базі: ${res.totalInDb.toLocaleString('uk-UA')}`);
+        setSeedMsg({ ok: true, text: parts.join(' · ') });
+        // Refresh list
+        setChannels([]); setPage(1); setHasMore(true);
+        onTotalChange?.(res.totalInDb ?? 0);
       } else {
         haptic.error();
-        setSeedMsg(`Помилка: ${res.error ?? 'невідома'}`);
+        setSeedMsg({ ok: false, text: `Помилка: ${res.error ?? 'невідома'}` });
       }
     } finally { setSeeding(false); }
   };
 
-  // Unique categories for filter
-  const allCategories = Array.from(new Set(channels.map((c) => c.category).filter(Boolean))).sort();
-
-  const filtered = channels.filter((ch) => {
-    const q = search.toLowerCase();
-    const matchSearch = !q || ch.title.toLowerCase().includes(q) ||
-      (ch.usernameOrLink ?? '').toLowerCase().includes(q) ||
-      (ch.notes ?? '').toLowerCase().includes(q);
-    const matchCat = !filterCat || ch.category === filterCat;
-    return matchSearch && matchCat;
-  });
-
   return (
     <div className="flex flex-col gap-3">
+      {/* Admin toolbar */}
       {isAdmin && (
         <div className="flex flex-wrap gap-2">
-          <button onClick={() => setShowForm((v) => !v)}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/15 text-primary text-xs font-semibold self-start active:scale-95 transition-transform">
+          <button
+            onClick={() => setShowForm((v) => !v)}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-primary/15 text-primary text-xs font-semibold self-start active:scale-95 transition-transform"
+          >
             <Plus size={12} /> Додати канал
           </button>
-          <button onClick={handleSeed} disabled={seeding}
-            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-green-500/15 text-green-400 text-xs font-semibold self-start active:scale-95 transition-transform disabled:opacity-50">
+          <button
+            onClick={handleSeed}
+            disabled={seeding}
+            className="flex items-center gap-2 px-4 py-2.5 rounded-xl bg-green-500/15 text-green-400 text-xs font-semibold self-start active:scale-95 transition-transform disabled:opacity-50"
+          >
             <RefreshCw size={12} className={seeding ? 'animate-spin' : ''} />
-            {seeding ? 'Завантаження...' : 'Завантажити 2600+ каналів'}
+            {seeding ? 'Імпорт...' : 'Завантажити 10k+ каналів'}
           </button>
         </div>
       )}
+
       {seedMsg && (
-        <p className="text-[11px] px-3 py-2 rounded-lg bg-green-500/10 text-green-400 font-medium">{seedMsg}</p>
+        <p className={cn(
+          'text-[11px] px-3 py-2 rounded-lg font-medium',
+          seedMsg.ok ? 'bg-green-500/10 text-green-400' : 'bg-red-500/10 text-red-400',
+        )}>
+          {seedMsg.text}
+        </p>
       )}
 
-      {/* Search + filter */}
-      {channels.length > 5 && (
-        <div className="flex gap-2">
+      {/* Search + category filter */}
+      <div className="flex gap-2">
+        <div className="relative flex-1">
+          <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
           <input
             value={search}
             onChange={(e) => setSearch(e.target.value)}
-            placeholder="Пошук каналу..."
-            className="flex-1 bg-secondary rounded-lg px-3 py-2 text-xs outline-none placeholder:text-muted-foreground"
+            placeholder="Пошук серед усіх каналів..."
+            className="w-full bg-secondary rounded-lg pl-8 pr-8 py-2 text-xs outline-none placeholder:text-muted-foreground"
           />
-          {allCategories.length > 1 && (
-            <select value={filterCat} onChange={(e) => setFilterCat(e.target.value)}
-              className="bg-secondary rounded-lg px-2 py-2 text-xs outline-none max-w-[140px]">
-              <option value="">Всі категорії</option>
-              {allCategories.map((c) => <option key={c} value={c!}>{c}</option>)}
-            </select>
+          {search && (
+            <button onClick={() => setSearch('')} className="absolute right-2 top-1/2 -translate-y-1/2 text-muted-foreground">
+              <X size={12} />
+            </button>
           )}
         </div>
-      )}
+        {categories.length > 1 && (
+          <select
+            value={filterCat}
+            onChange={(e) => setFilterCat(e.target.value)}
+            className="bg-secondary rounded-lg px-2 py-2 text-xs outline-none max-w-[140px]"
+          >
+            <option value="">Всі</option>
+            {categories.map((c) => <option key={c} value={c}>{c}</option>)}
+          </select>
+        )}
+      </div>
 
+      {/* Add channel form */}
       {showForm && isAdmin && (
         <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
           <p className="text-xs font-semibold">Новий канал / група</p>
-          {[
-            { key: 'title', placeholder: 'Назва каналу', label: 'Назва' },
-            { key: 'usernameOrLink', placeholder: '@username або https://t.me/...', label: 'Username / посилання' },
-            { key: 'category', placeholder: 'Категорія (необов\'язково)', label: 'Категорія' },
-          ].map(({ key, placeholder, label }) => (
+          {([
+            { key: 'title',          placeholder: 'Назва каналу',                     label: 'Назва' },
+            { key: 'usernameOrLink', placeholder: '@username або https://t.me/...',    label: 'Username / посилання' },
+            { key: 'category',       placeholder: 'Категорія (необов\'язково)',         label: 'Категорія' },
+          ] as const).map(({ key, placeholder, label }) => (
             <div key={key} className="flex flex-col gap-1">
               <label className="text-[10px] text-muted-foreground">{label}</label>
-              <input value={form[key as keyof typeof form]} onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
-                placeholder={placeholder} className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none" />
+              <input
+                value={form[key]}
+                onChange={(e) => setForm((f) => ({ ...f, [key]: e.target.value }))}
+                placeholder={placeholder}
+                className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none"
+              />
             </div>
           ))}
           <div className="grid grid-cols-2 gap-2">
@@ -358,30 +460,43 @@ function ChannelsList({ channels, onRefresh, isAdmin, userId }: {
               className="flex-1 py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold active:scale-95 transition-all disabled:opacity-50">
               {saving ? 'Збереження...' : 'Додати'}
             </button>
-            <button onClick={() => setShowForm(false)} className="px-4 py-2.5 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold active:scale-95 transition-all">
+            <button onClick={() => setShowForm(false)}
+              className="px-4 py-2.5 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold active:scale-95 transition-all">
               Скасувати
             </button>
           </div>
         </div>
       )}
 
-      {filtered.length === 0 ? (
+      {/* Stats row */}
+      {total > 0 && (
+        <p className="text-[10px] text-muted-foreground px-1">
+          {debouncedSearch || filterCat
+            ? `${channels.length} з ${total.toLocaleString('uk-UA')} каналів`
+            : `${total.toLocaleString('uk-UA')} каналів`
+          }
+          {loading && <span className="ml-2 text-muted-foreground/60">Завантаження...</span>}
+        </p>
+      )}
+
+      {/* Channel rows */}
+      {channels.length === 0 && !loading ? (
         <div className="glass-card p-6 rounded-2xl text-center">
           <p className="text-xs text-muted-foreground">
-            {channels.length === 0
-              ? (isAdmin ? 'Немає каналів. Натисніть «Завантажити 2600+ каналів» для імпорту.' : 'Немає доступних каналів. Зверніться до адміністратора.')
-              : 'Нічого не знайдено за вашим запитом.'}
+            {debouncedSearch || filterCat
+              ? 'Нічого не знайдено за вашим запитом.'
+              : isAdmin
+                ? 'Немає каналів. Натисніть «Завантажити 10k+ каналів» для імпорту.'
+                : 'Немає доступних каналів. Зверніться до адміністратора.'}
           </p>
         </div>
       ) : (
-        <>
-          <p className="text-[10px] text-muted-foreground px-1">{filtered.length} {filtered.length !== channels.length ? `з ${channels.length}` : ''} каналів</p>
-          <div className="flex flex-col gap-2">
-          {filtered.map((ch) => (
+        <div className="flex flex-col gap-2">
+          {channels.map((ch) => (
             <div key={ch.id} className="glass-card p-3 rounded-xl flex items-center gap-3">
               <div className={cn(
                 'w-8 h-8 rounded-lg flex items-center justify-center flex-shrink-0 text-xs font-bold',
-                ch.type === 'channel' ? 'bg-primary/15 text-primary' : 'bg-secondary text-muted-foreground'
+                ch.type === 'channel' ? 'bg-primary/15 text-primary' : 'bg-secondary text-muted-foreground',
               )}>
                 {ch.type === 'channel' ? 'C' : 'G'}
               </div>
@@ -403,18 +518,34 @@ function ChannelsList({ channels, onRefresh, isAdmin, userId }: {
               )}
             </div>
           ))}
+
+          {/* Infinite scroll sentinel */}
+          <div ref={sentinelRef} className="h-6 flex items-center justify-center">
+            {loading && hasMore && <RefreshCw size={14} className="animate-spin text-muted-foreground" />}
           </div>
-        </>
+        </div>
       )}
     </div>
   );
 }
 
 // ── Create campaign form ───────────────────────────────────────────────────────
-function CreateCampaignForm({ userId, channels, onCreated }: {
-  userId?: string; channels: TelegramChannel[]; onCreated: () => void;
+function CreateCampaignForm({ userId, onCreated }: {
+  userId?: string; onCreated: () => void;
 }) {
-  const activeChannels = channels.filter((c) => c.status === 'active');
+  const [activeChannels, setActiveChannels] = useState<TelegramChannel[]>([]);
+  const [chLoading, setChLoading]           = useState(true);
+  const [chSearch, setChSearch]             = useState('');
+
+  // Load active channels for the picker — paginated, max 200 at once for the selector
+  useEffect(() => {
+    setChLoading(true);
+    fetch('/api/channels?pageSize=200&status=active')
+      .then((r) => r.json())
+      .then((res) => { if (res?.ok) setActiveChannels(res.channels ?? []); })
+      .catch(() => {})
+      .finally(() => setChLoading(false));
+  }, []);
   const [form, setForm] = useState({
     title:           '',
     messageText:     '',
@@ -525,33 +656,68 @@ function CreateCampaignForm({ userId, channels, onCreated }: {
 
       {/* Channel selection */}
       <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
-        <p className="text-xs font-semibold">Вибрати канали ({form.selectedChannels.length} / {activeChannels.length})</p>
-        {activeChannels.length === 0 ? (
+        <div className="flex items-center justify-between">
+          <p className="text-xs font-semibold">
+            Вибрати канали ({form.selectedChannels.length}{activeChannels.length > 0 ? ` / ${activeChannels.length.toLocaleString('uk-UA')}` : ''})
+          </p>
+          {form.selectedChannels.length > 0 && (
+            <button onClick={() => setForm((f) => ({ ...f, selectedChannels: [] }))}
+              className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+              Скинути
+            </button>
+          )}
+        </div>
+        {chLoading ? (
+          <div className="flex items-center justify-center py-4">
+            <RefreshCw size={14} className="animate-spin text-muted-foreground" />
+          </div>
+        ) : activeChannels.length === 0 ? (
           <p className="text-xs text-muted-foreground">Немає активних каналів. Додайте у вкладці &ldquo;Канали&rdquo;.</p>
         ) : (
-          <div className="flex flex-col gap-2 max-h-52 overflow-y-auto">
-            {activeChannels.map((ch) => {
-              const selected = form.selectedChannels.includes(ch.id);
-              return (
-                <button key={ch.id} onClick={() => toggleChannel(ch.id)}
-                  className={cn(
-                    'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-all active:scale-95',
-                    selected ? 'border-primary/40 bg-primary/10' : 'border-border bg-secondary/30'
-                  )}>
-                  <div className={cn(
-                    'w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border',
-                    selected ? 'bg-primary border-primary' : 'border-muted-foreground'
-                  )}>
-                    {selected && <CheckCircle2 size={10} className="text-primary-foreground" />}
-                  </div>
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium truncate">{ch.title}</p>
-                    <p className="text-[10px] text-muted-foreground truncate">{ch.usernameOrLink}</p>
-                  </div>
-                </button>
-              );
-            })}
-          </div>
+          <>
+            <div className="relative">
+              <Search size={12} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted-foreground pointer-events-none" />
+              <input
+                value={chSearch}
+                onChange={(e) => setChSearch(e.target.value)}
+                placeholder="Фільтр каналів..."
+                className="w-full bg-secondary rounded-lg pl-8 py-2 text-xs outline-none placeholder:text-muted-foreground"
+              />
+            </div>
+            <div className="flex gap-2 mb-1">
+              <button
+                onClick={() => setForm((f) => ({ ...f, selectedChannels: activeChannels.map((c) => c.id) }))}
+                className="text-[10px] text-primary font-medium"
+              >
+                Вибрати всі ({activeChannels.length.toLocaleString('uk-UA')})
+              </button>
+            </div>
+            <div className="flex flex-col gap-2 max-h-52 overflow-y-auto">
+              {activeChannels
+                .filter((ch) => !chSearch || ch.title.toLowerCase().includes(chSearch.toLowerCase()) || (ch.usernameOrLink ?? '').toLowerCase().includes(chSearch.toLowerCase()))
+                .map((ch) => {
+                  const selected = form.selectedChannels.includes(ch.id);
+                  return (
+                    <button key={ch.id} onClick={() => toggleChannel(ch.id)}
+                      className={cn(
+                        'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-all active:scale-95',
+                        selected ? 'border-primary/40 bg-primary/10' : 'border-border bg-secondary/30',
+                      )}>
+                      <div className={cn(
+                        'w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border',
+                        selected ? 'bg-primary border-primary' : 'border-muted-foreground',
+                      )}>
+                        {selected && <CheckCircle2 size={10} className="text-primary-foreground" />}
+                      </div>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-xs font-medium truncate">{ch.title}</p>
+                        <p className="text-[10px] text-muted-foreground truncate">{ch.usernameOrLink}</p>
+                      </div>
+                    </button>
+                  );
+                })}
+            </div>
+          </>
         )}
       </div>
 

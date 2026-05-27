@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { upsertTelegramChannel } from '@/lib/db';
+import { batchUpsertTelegramChannels, getTelegramChannelCount } from '@/lib/db';
 import { assertAdmin } from '@/lib/auth';
 import { UA_EUROPE_CHANNELS, extractUsername, type SeedChannel } from '@/scripts/seed-channels';
 
@@ -100,30 +100,37 @@ export async function POST(req: NextRequest) {
 
     console.log(`[seed] starting — ${UA_EUROPE_CHANNELS.length} Europe groups + ${uniqueJsonChannels.length} JSON channels = ${all.length} total`);
 
-    let inserted = 0;
-    for (const ch of all) {
-      const usernameOrLink = extractUsername(ch.link);
-      if (!usernameOrLink) continue;
-      const chWithPeer = ch as SeedChannel & { _peer?: 'channel' | 'group' };
-      const result = await upsertTelegramChannel({
-        title: ch.title,
-        usernameOrLink,
-        type: chWithPeer._peer ?? 'group',
-        category: ch.category,
-        language: 'uk',
-        status: 'active',
-        postingMethod: 'bot',
-        notes: [ch.country, ch.city].filter(Boolean).join(', '),
-      });
-      if (result) inserted++;
-    }
+    // Build payload array — filter out entries with no usable link
+    const payload = all
+      .map((ch) => {
+        const usernameOrLink = extractUsername(ch.link);
+        if (!usernameOrLink) return null;
+        const chWithPeer = ch as SeedChannel & { _peer?: 'channel' | 'group' };
+        return {
+          title:         ch.title,
+          usernameOrLink,
+          type:          chWithPeer._peer ?? ('group' as const),
+          category:      ch.category,
+          language:      'uk',
+          status:        'active' as const,
+          postingMethod: 'bot' as const,
+          notes:         [ch.country, ch.city].filter(Boolean).join(', ') || undefined,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null);
 
-    console.log(`[seed] done — inserted/updated ${inserted} of ${all.length}`);
+    // Batch upsert in 200-item chunks — orders of magnitude faster than one-by-one
+    const { inserted, errors } = await batchUpsertTelegramChannels(payload);
+    const totalAfter = await getTelegramChannelCount();
+
+    console.log(`[seed] done — inserted/updated ${inserted}, errors ${errors}, total in DB: ${totalAfter}`);
     return NextResponse.json({
       ok: true,
-      total: all.length,
+      total:            payload.length,
       inserted,
-      europeGroups: UA_EUROPE_CHANNELS.length,
+      errors,
+      totalInDb:        totalAfter,
+      europeGroups:     UA_EUROPE_CHANNELS.length,
       catalogueChannels: uniqueJsonChannels.length,
     });
   } catch (err) {
