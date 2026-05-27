@@ -34,7 +34,11 @@ export async function GET() {
           ok: true,
           data: {
             connected: false,
+<<<<<<< HEAD
             workerMode: config.worker.mode,
+=======
+            workerMode: config.worker.enabled ? 'worker' : 'none',
+>>>>>>> dd99fc0 (resolve merge conflicts)
             error: data.error ?? `Worker returned ${res.status}`,
           },
         });
@@ -45,6 +49,7 @@ export async function GET() {
       return NextResponse.json({
         ok: true,
         data: {
+<<<<<<< HEAD
           connected:    Boolean(fh.connected),
           workerMode:   config.worker.mode,
           username:     fh.username,
@@ -53,6 +58,16 @@ export async function GET() {
           error:        fh.connected ? undefined : (fh.error ?? 'Not connected'),
           autoLoop:     data.autoLoop ?? null,
           counters:     data.counters ?? null,
+=======
+          connected: Boolean(fh.connected),
+          workerMode: config.worker.enabled ? 'worker' : 'none',
+          username: fh.username,
+          cookieCount: fh.cookieCount,
+          sessionPath: fh.sessionPath,
+          error: fh.connected ? undefined : (fh.error ?? 'Not connected'),
+          autoLoop: data.autoLoop ?? null,
+          counters: data.counters ?? null,
+>>>>>>> dd99fc0 (resolve merge conflicts)
         },
       });
     } catch (err) {
@@ -60,7 +75,11 @@ export async function GET() {
         ok: true,
         data: {
           connected: false,
+<<<<<<< HEAD
           workerMode: config.worker.mode,
+=======
+          workerMode: config.worker.enabled ? 'worker' : 'none',
+>>>>>>> dd99fc0 (resolve merge conflicts)
           error: `Worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
         },
       });
@@ -100,8 +119,8 @@ export async function GET() {
         data: {
           connected: result.valid,
           workerMode: 'none',
-          username:  result.username,
-          error:     result.valid ? undefined : 'Token invalid or expired',
+          username: result.username,
+          error: result.valid ? undefined : 'Token invalid or expired',
         },
       });
     } catch (err) {
@@ -155,10 +174,17 @@ export async function POST() {
     const fs = await import('fs');
     const p = resolveSessionPath();
     if (fs.existsSync(p)) fs.unlinkSync(p);
-    return NextResponse.json({ ok: true, message: 'Session cleared' });
+
+    return NextResponse.json({
+      ok: true,
+      message: 'Session cleared',
+    });
   } catch (err) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : 'Failed to clear session' },
+      {
+        ok: false,
+        error: err instanceof Error ? err.message : 'Failed to clear session',
+      },
       { status: 500 }
     );
   }

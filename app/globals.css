@@ -149,6 +149,11 @@
   .safe-top    { padding-top:    var(--tg-safe-top, 0px); }
   .safe-bottom { padding-bottom: var(--tg-safe-bottom, 0px); }
 
+<<<<<<< HEAD
+=======
+HEAD
+
+>>>>>>> dd99fc0 (resolve merge conflicts)
   /* Generic form input */
   .form-input {
     @apply w-full px-3 py-2 rounded-xl text-xs text-foreground placeholder:text-muted-foreground
@@ -156,6 +161,10 @@
            focus:border-primary focus:ring-1 focus:ring-primary/30;
   }
 
+<<<<<<< HEAD
+=======
+origin/v0/anhelinaivanivpp2025-3698-7a681a9a
+>>>>>>> dd99fc0 (resolve merge conflicts)
   /* Brand glass card */
   .glass-card {
     background: var(--card);

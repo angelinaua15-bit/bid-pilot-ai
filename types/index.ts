@@ -504,4 +504,8 @@ export interface ManualPayment {
   reviewedAt?: string;
   createdAt: string;
   updatedAt: string;
+<<<<<<< HEAD
 }
+=======
+}
+>>>>>>> dd99fc0 (resolve merge conflicts)
