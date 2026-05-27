@@ -269,6 +269,10 @@ export type ApplicationStatus = 'sent' | 'sent_unconfirmed' | 'skipped' | 'faile
  */
 export interface Application {
   id: string;
+  /** SaaS user who owns this application record */
+  userId?: string;
+  /** Freelance account ID (freelance_accounts.id) used to submit */
+  freelanceAccountId?: string;
   projectId: string;
   freelancehuntId?: string;
   title: string;

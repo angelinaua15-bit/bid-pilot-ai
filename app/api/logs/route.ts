@@ -14,8 +14,9 @@ export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
     const limit     = Math.min(Number(searchParams.get('limit') ?? '100'), 500);
-    const level     = searchParams.get('level') ?? undefined;
+    const level     = searchParams.get('level')     ?? undefined;
     const projectId = searchParams.get('projectId') ?? undefined;
+    const userId    = searchParams.get('userId')    ?? undefined;
 
     // ── Worker mode: fetch logs from worker ───────────────────────────────────
     if (config.worker.enabled) {
@@ -59,7 +60,7 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Local / fallback: read from Supabase DB ───────────────────────────────
-    const { logs, total } = await getLogs({ limit, level, projectId });
+    const { logs, total } = await getLogs({ limit, level, projectId, userId });
     return NextResponse.json({
       ok: true,
       data: Array.isArray(logs) ? logs : [],
