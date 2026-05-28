@@ -126,7 +126,7 @@ export async function patchSettings(patch: Partial<AutoBidSettings>): Promise<Au
 
 // ─── Logs ─────────────────────────────────────────────────────────────────────
 
-export async function appendLog(entry: AutoBidLog): Promise<void> {
+export async function appendLog(entry: AutoBidLog & { userId?: string }): Promise<void> {
   if (!isSupabaseConfigured) {
     _memLogs.unshift(entry);
     if (_memLogs.length > 500) _memLogs.splice(500);
@@ -140,9 +140,10 @@ export async function appendLog(entry: AutoBidLog): Promise<void> {
     const { error } = await db.from('auto_bid_logs').upsert(
       {
         id:            entry.id,
+        user_id:       entry.userId       ?? null,
         level:         entry.level,
         message:       entry.message,
-        project_id:    entry.projectId   ?? null,
+        project_id:    entry.projectId    ?? null,
         project_title: entry.projectTitle ?? null,
         bid_id:        entry.bidId        ?? null,
         meta:          entry.meta         ?? null,
@@ -161,6 +162,7 @@ export async function getLogs(options?: {
   limit?: number;
   level?: string;
   projectId?: string;
+  userId?: string;
 }): Promise<{ logs: AutoBidLog[]; total: number }> {
   const limit = Math.min(options?.limit ?? 100, 500);
 
@@ -183,6 +185,7 @@ export async function getLogs(options?: {
 
     if (options?.level)     query = query.eq('level', options.level);
     if (options?.projectId) query = query.eq('project_id', options.projectId);
+    if (options?.userId)    query = query.eq('user_id', options.userId);
 
     const { data, error, count } = await query;
     if (error) throw error;
@@ -275,25 +278,27 @@ export async function saveApplication(app: Application): Promise<void> {
 
     const { error } = await db.from('applications').upsert(
       {
-        id:                   app.id,
-        project_id:           app.projectId,
-        freelancehunt_id:     app.freelancehuntId ?? null,
-        title:                app.title,
-        url:                  app.url,
-        budget:               app.budget,
-        currency:             app.currency,
-        deadline:             app.deadline ?? null,
-        status:               app.status,
-        created_at:           app.createdAt,
-        sent_at:              app.sentAt ?? null,
-        proposal_text:        app.proposalText ?? null,
-        proposal_price:       app.proposalPrice ?? null,
-        freelancehunt_bid_id: app.freelancehuntBidId ?? null,
-        ai_score:             app.aiScore ?? null,
-        matched_keywords:     app.matchedKeywords ?? null,
-        blocked_keywords:     app.blockedKeywords ?? null,
-        skipped_reason:       app.skippedReason ?? null,
-        filter_stage:         app.filterStage ?? null,
+        id:                     app.id,
+        user_id:                app.userId             ?? null,
+        freelance_account_id:   app.freelanceAccountId ?? null,
+        project_id:             app.projectId,
+        freelancehunt_id:       app.freelancehuntId    ?? null,
+        title:                  app.title,
+        url:                    app.url,
+        budget:                 app.budget,
+        currency:               app.currency,
+        deadline:               app.deadline           ?? null,
+        status:                 app.status,
+        created_at:             app.createdAt,
+        sent_at:                app.sentAt             ?? null,
+        proposal_text:          app.proposalText       ?? null,
+        proposal_price:         app.proposalPrice      ?? null,
+        freelancehunt_bid_id:   app.freelancehuntBidId ?? null,
+        ai_score:               app.aiScore            ?? null,
+        matched_keywords:       app.matchedKeywords    ?? null,
+        blocked_keywords:       app.blockedKeywords    ?? null,
+        skipped_reason:         app.skippedReason      ?? null,
+        filter_stage:           app.filterStage        ?? null,
       },
       { onConflict: 'id' }
     );
@@ -309,13 +314,15 @@ export async function saveApplication(app: Application): Promise<void> {
 export async function getApplications(options?: {
   limit?: number;
   status?: 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed' | 'all';
+  userId?: string;
 }): Promise<{ applications: Application[]; total: number }> {
-  const limit = Math.min(options?.limit ?? 50, 500);
+  const limit        = Math.min(options?.limit ?? 50, 500);
   const statusFilter = options?.status === 'all' ? undefined : options?.status;
 
   if (!isSupabaseConfigured) {
     let apps = [..._memApplications];
-    if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+    if (statusFilter)      apps = apps.filter((a) => a.status === statusFilter);
+    if (options?.userId)   apps = apps.filter((a) => a.userId === options.userId);
     return { applications: apps.slice(0, limit), total: apps.length };
   }
 
@@ -323,7 +330,8 @@ export async function getApplications(options?: {
     const db = getDb();
     if (!db) {
       let apps = [..._memApplications];
-      if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+      if (statusFilter)    apps = apps.filter((a) => a.status === statusFilter);
+      if (options?.userId) apps = apps.filter((a) => a.userId === options.userId);
       return { applications: apps.slice(0, limit), total: apps.length };
     }
 
@@ -333,38 +341,42 @@ export async function getApplications(options?: {
       .order('created_at', { ascending: false })
       .limit(limit);
 
-    if (statusFilter) query = query.eq('status', statusFilter);
+    if (statusFilter)    query = query.eq('status', statusFilter);
+    if (options?.userId) query = query.eq('user_id', options.userId);
 
     const { data, error, count } = await query;
     if (error) throw error;
 
     const applications: Application[] = (data ?? []).map((r) => ({
-      id:                  r.id,
-      projectId:           r.project_id,
-      freelancehuntId:     r.freelancehunt_id     ?? undefined,
-      title:               r.title,
-      url:                 r.url,
-      budget:              r.budget,
-      currency:            r.currency,
-      deadline:            r.deadline             ?? undefined,
-      status:              r.status as Application['status'],
-      createdAt:           r.created_at,
-      sentAt:              r.sent_at              ?? undefined,
-      proposalText:        r.proposal_text        ?? undefined,
-      proposalPrice:       r.proposal_price       ?? undefined,
-      freelancehuntBidId:  r.freelancehunt_bid_id ?? undefined,
-      aiScore:             r.ai_score             ?? undefined,
-      matchedKeywords:     r.matched_keywords     ?? undefined,
-      blockedKeywords:     r.blocked_keywords     ?? undefined,
-      skippedReason:       r.skipped_reason       ?? undefined,
-      filterStage:         r.filter_stage         ?? undefined,
+      id:                    r.id,
+      userId:                r.user_id              ?? undefined,
+      freelanceAccountId:    r.freelance_account_id ?? undefined,
+      projectId:             r.project_id,
+      freelancehuntId:       r.freelancehunt_id     ?? undefined,
+      title:                 r.title,
+      url:                   r.url,
+      budget:                r.budget,
+      currency:              r.currency,
+      deadline:              r.deadline             ?? undefined,
+      status:                r.status as Application['status'],
+      createdAt:             r.created_at,
+      sentAt:                r.sent_at              ?? undefined,
+      proposalText:          r.proposal_text        ?? undefined,
+      proposalPrice:         r.proposal_price       ?? undefined,
+      freelancehuntBidId:    r.freelancehunt_bid_id ?? undefined,
+      aiScore:               r.ai_score             ?? undefined,
+      matchedKeywords:       r.matched_keywords     ?? undefined,
+      blockedKeywords:       r.blocked_keywords     ?? undefined,
+      skippedReason:         r.skipped_reason       ?? undefined,
+      filterStage:           r.filter_stage         ?? undefined,
     }));
 
     return { applications, total: count ?? applications.length };
   } catch (err) {
     console.error('[db] getApplications error:', err);
     let apps = [..._memApplications];
-    if (statusFilter) apps = apps.filter((a) => a.status === statusFilter);
+    if (statusFilter)    apps = apps.filter((a) => a.status === statusFilter);
+    if (options?.userId) apps = apps.filter((a) => a.userId === options.userId);
     return { applications: apps.slice(0, limit), total: apps.length };
   }
 }

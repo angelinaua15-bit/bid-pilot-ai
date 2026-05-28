@@ -6,7 +6,9 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount } from '@/lib/db';
+import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog } from '@/lib/db';
+import { randomUUID } from 'crypto';
+import type { AutoBidLog } from '@/types';
 
 const FH_BASE = 'https://api.freelancehunt.com/v2';
 
@@ -63,10 +65,45 @@ export async function POST(req: NextRequest) {
     const toProcess  = matching.slice(0, dailyLimit);
     let submitted    = 0;
     const errors: string[] = [];
+    const now = new Date().toISOString();
+
+    // Log scan start
+    await appendLog({
+      id:        randomUUID(),
+      userId,
+      level:     'info',
+      message:   `Скан запущено — знайдено ${projects.length} проектів, ${matching.length} відповідають фільтрам, ліміт: ${dailyLimit}`,
+      timestamp: now,
+    }).catch(() => {});
+
+    // Record skipped projects (filtered out)
+    for (const project of projects) {
+      if (matching.includes(project)) continue; // will be processed below
+      const attr = (project.attributes as Record<string, unknown>) ?? {};
+      const appId = randomUUID();
+      await saveApplication({
+        id:           appId,
+        userId,
+        projectId:    String(project.id),
+        title:        String(attr.name ?? `Project ${project.id}`),
+        url:          String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`),
+        budget:       Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0),
+        currency:     String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH'),
+        status:       'skipped',
+        createdAt:    now,
+        skippedReason: 'Не відповідає фільтру ключових слів',
+        filterStage:  'keyword_filter',
+      }).catch(() => {});
+    }
 
     for (const project of toProcess) {
       const attr     = (project.attributes as Record<string, unknown>) ?? {};
       const proposal = `Доброго дня! Зацікавив ваш проект "${attr.name}". Маю досвід у подібних задачах, готовий виконати якісно та в строк. Напишіть — обговоримо деталі!`;
+      const appId    = randomUUID();
+      const projectTitle = String(attr.name ?? `Project ${project.id}`);
+      const projectUrl   = String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`);
+      const budget       = Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0);
+      const currency     = String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH');
 
       try {
         const bidRes = await fetch(`${FH_BASE}/projects/${project.id}/bids`, {
@@ -75,17 +112,104 @@ export async function POST(req: NextRequest) {
           body:    JSON.stringify({ data: { type: 'bid', attributes: { comment: proposal } } }),
           signal:  AbortSignal.timeout(15_000),
         });
+
         if (bidRes.ok) {
+          const bidJson = await bidRes.json().catch(() => ({}));
+          const bidId   = String(bidJson?.data?.id ?? '');
           submitted++;
           await incrementBidCount(userId).catch(() => {});
+
+          // Save application record
+          await saveApplication({
+            id:                 appId,
+            userId,
+            projectId:          String(project.id),
+            title:              projectTitle,
+            url:                projectUrl,
+            budget,
+            currency,
+            status:             'sent',
+            createdAt:          now,
+            sentAt:             new Date().toISOString(),
+            proposalText:       proposal,
+            freelancehuntBidId: bidId || undefined,
+          }).catch(() => {});
+
+          await appendLog({
+            id:           randomUUID(),
+            userId,
+            level:        'success' as AutoBidLog['level'],
+            message:      `Заявку надіслано: "${projectTitle}"`,
+            projectId:    String(project.id),
+            projectTitle,
+            bidId:        bidId || undefined,
+            timestamp:    new Date().toISOString(),
+          }).catch(() => {});
         } else {
-          const e = await bidRes.json().catch(() => ({}));
-          errors.push(e?.errors?.[0]?.detail ?? `bid failed for project ${project.id}`);
+          const e       = await bidRes.json().catch(() => ({}));
+          const errMsg  = e?.errors?.[0]?.detail ?? `bid failed for project ${project.id}`;
+          errors.push(errMsg);
+
+          await saveApplication({
+            id:           appId,
+            userId,
+            projectId:    String(project.id),
+            title:        projectTitle,
+            url:          projectUrl,
+            budget,
+            currency,
+            status:       'failed',
+            createdAt:    now,
+            skippedReason: errMsg,
+          }).catch(() => {});
+
+          await appendLog({
+            id:           randomUUID(),
+            userId,
+            level:        'error',
+            message:      `Помилка подачі заявки на "${projectTitle}": ${errMsg}`,
+            projectId:    String(project.id),
+            projectTitle,
+            timestamp:    new Date().toISOString(),
+          }).catch(() => {});
         }
       } catch (e) {
-        errors.push(e instanceof Error ? e.message : `Error on project ${project.id}`);
+        const errMsg = e instanceof Error ? e.message : `Error on project ${project.id}`;
+        errors.push(errMsg);
+
+        await saveApplication({
+          id:           appId,
+          userId,
+          projectId:    String(project.id),
+          title:        projectTitle,
+          url:          projectUrl,
+          budget,
+          currency,
+          status:       'failed',
+          createdAt:    now,
+          skippedReason: errMsg,
+        }).catch(() => {});
+
+        await appendLog({
+          id:           randomUUID(),
+          userId,
+          level:        'error',
+          message:      `Виняток при заявці на "${projectTitle}": ${errMsg}`,
+          projectId:    String(project.id),
+          projectTitle,
+          timestamp:    new Date().toISOString(),
+        }).catch(() => {});
       }
     }
+
+    // Log scan complete
+    await appendLog({
+      id:        randomUUID(),
+      userId,
+      level:     'info',
+      message:   `Скан завершено — надіслано ${submitted} заявок${errors.length ? `, помилок: ${errors.length}` : ''}`,
+      timestamp: new Date().toISOString(),
+    }).catch(() => {});
 
     return NextResponse.json({
       ok: true,

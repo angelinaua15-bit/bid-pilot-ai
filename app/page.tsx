@@ -60,11 +60,7 @@ function AppShell() {
       <main className="flex-1 overflow-hidden" style={{ paddingTop: 'var(--tg-safe-top, 0px)' }}>
         {activeTab === 'home' && (
           <div className="h-full overflow-y-auto fade-in">
-<<<<<<< HEAD
             <DashboardScreen user={saasUser} onNavigate={setActiveTab} />
-=======
-            <DashboardScreen onNavigate={setActiveTab} />
->>>>>>> dd99fc0 (resolve merge conflicts)
           </div>
         )}
         {activeTab === 'freelance' && (
@@ -79,11 +75,7 @@ function AppShell() {
         )}
         {activeTab === 'logs' && (
           <div className="h-full fade-in">
-<<<<<<< HEAD
             <LogsScreen userId={saasUser?.id} />
-=======
-            <LogsScreen />
->>>>>>> dd99fc0 (resolve merge conflicts)
           </div>
         )}
         {activeTab === 'account' && (
@@ -103,16 +95,10 @@ function AppShell() {
       </main>
 
       <BottomNavigation
-<<<<<<< HEAD
         active={activeTab}
         onChange={setActiveTab}
         isAdmin={saasUser?.role === 'owner' || saasUser?.role === 'admin'}
       />
-=======
-  active={activeTab}
-  onChange={setActiveTab}
-/>
->>>>>>> dd99fc0 (resolve merge conflicts)
     </div>
   );
 }

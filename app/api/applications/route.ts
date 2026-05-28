@@ -11,17 +11,18 @@ import { getApplications } from '@/lib/db';
 export async function GET(req: NextRequest) {
   try {
     const { searchParams } = new URL(req.url);
-    const limit = Math.min(Number(searchParams.get('limit') ?? '50'), 500);
-    const rawStatus = searchParams.get('status') ?? 'sent';
+    const limit     = Math.min(Number(searchParams.get('limit')  ?? '50'), 500);
+    const rawStatus = searchParams.get('status') ?? 'all';
+    const userId    = searchParams.get('userId') ?? undefined;
 
-    // Validate status param — includes sent_unconfirmed
+    // Validate status param
     const validStatuses = ['sent', 'sent_unconfirmed', 'skipped', 'failed', 'all'] as const;
     type StatusParam = typeof validStatuses[number];
     const status: StatusParam = (validStatuses as readonly string[]).includes(rawStatus)
       ? (rawStatus as StatusParam)
-      : 'sent';
+      : 'all';
 
-    const { applications, total } = await getApplications({ limit, status });
+    const { applications, total } = await getApplications({ limit, status, userId });
 
     return NextResponse.json({ ok: true, data: applications, total, status });
   } catch (err) {
