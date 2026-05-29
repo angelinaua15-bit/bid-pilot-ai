@@ -34,11 +34,7 @@ export async function GET() {
           ok: true,
           data: {
             connected: false,
-<<<<<<< HEAD
             workerMode: config.worker.mode,
-=======
-            workerMode: config.worker.enabled ? 'worker' : 'none',
->>>>>>> dd99fc0 (resolve merge conflicts)
             error: data.error ?? `Worker returned ${res.status}`,
           },
         });
@@ -49,7 +45,6 @@ export async function GET() {
       return NextResponse.json({
         ok: true,
         data: {
-<<<<<<< HEAD
           connected:    Boolean(fh.connected),
           workerMode:   config.worker.mode,
           username:     fh.username,
@@ -58,16 +53,6 @@ export async function GET() {
           error:        fh.connected ? undefined : (fh.error ?? 'Not connected'),
           autoLoop:     data.autoLoop ?? null,
           counters:     data.counters ?? null,
-=======
-          connected: Boolean(fh.connected),
-          workerMode: config.worker.enabled ? 'worker' : 'none',
-          username: fh.username,
-          cookieCount: fh.cookieCount,
-          sessionPath: fh.sessionPath,
-          error: fh.connected ? undefined : (fh.error ?? 'Not connected'),
-          autoLoop: data.autoLoop ?? null,
-          counters: data.counters ?? null,
->>>>>>> dd99fc0 (resolve merge conflicts)
         },
       });
     } catch (err) {
@@ -75,11 +60,7 @@ export async function GET() {
         ok: true,
         data: {
           connected: false,
-<<<<<<< HEAD
           workerMode: config.worker.mode,
-=======
-          workerMode: config.worker.enabled ? 'worker' : 'none',
->>>>>>> dd99fc0 (resolve merge conflicts)
           error: `Worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
         },
       });

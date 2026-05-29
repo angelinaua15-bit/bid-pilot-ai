@@ -475,6 +475,33 @@ function mapUser(r: Record<string, unknown>): SaaSUser {
 
 // ─── SaaS: Freelance Accounts ─────────────────────────────────────────────────
 
+/**
+ * Returns all users who have a connected Freelancehunt account (status='connected')
+ * AND have auto-bid enabled (freelance_filters.is_enabled = true).
+ * Used by the worker to iterate over all active users in multi-user mode.
+ */
+export async function getConnectedUsers(): Promise<Array<{ userId: string; apiToken?: string; accountName?: string }>> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    // Join freelance_accounts (connected) with freelance_filters (enabled)
+    const { data, error } = await db
+      .from('freelance_accounts')
+      .select('user_id, api_token, account_name, freelance_filters!inner(is_enabled)')
+      .eq('status', 'connected')
+      .eq('freelance_filters.is_enabled', true);
+    if (error) throw error;
+    return (data ?? []).map((r: Record<string, unknown>) => ({
+      userId:      r.user_id as string,
+      apiToken:    r.api_token as string | undefined,
+      accountName: r.account_name as string | undefined,
+    }));
+  } catch (err) {
+    console.error('[db] getConnectedUsers error:', err);
+    return [];
+  }
+}
+
 export async function getFreelanceAccount(userId: string): Promise<FreelanceAccount | null> {
   if (!isSupabaseConfigured) return null;
   try {

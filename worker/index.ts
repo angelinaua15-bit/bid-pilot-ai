@@ -1,98 +1,75 @@
 import 'dotenv/config'
 
-// порт
+// Set port before importing server so it binds to the right port
 process.env.WORKER_PORT = process.env.WORKER_PORT ?? '4000'
 
-// запускаємо сервер
+// Start the HTTP server
 import './server'
 
-// ---- АВТО ЦИКЛ ----
+// ── Multi-user auto loop ───────────────────────────────────────────────────────
+// Every INTERVAL ms:
+//  1. Call GET /users/connected to get all users with a connected account + enabled filter
+//  2. For each user, POST /auto-bid/start with { userId }
+//  3. If no connected users found, fall back to legacy global mode (no userId)
 
-const INTERVAL = 10 * 60 * 1000 // 10 хв
+const INTERVAL   = Number(process.env.AUTO_LOOP_INTERVAL_MS ?? 10 * 60 * 1000) // default 10 min
+const BASE_URL   = `http://localhost:${process.env.WORKER_PORT}`
+const AUTH_HEADER = `Bearer ${process.env.AUTOMATION_SECRET ?? ''}`
 
-let isRunning = false
+let loopRunning = false
 
-async function runUserAutoBid(userId: string) {
+async function runMultiUserLoop() {
+  if (loopRunning) return
+  loopRunning = true
+
   try {
-    console.log(`[worker] Running auto-bid for user ${userId}`)
+    // 1. Fetch connected users
+    const usersRes = await fetch(`${BASE_URL}/users/connected`, {
+      headers: { Authorization: AUTH_HEADER },
+    }).then((r) => r.json()).catch(() => ({ ok: false, users: [] }))
 
-    const res = await fetch(
-      `http://localhost:${process.env.WORKER_PORT}/auto-bid/start`,
-      {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Authorization: `Bearer ${process.env.AUTOMATION_SECRET}`,
-        },
-        body: JSON.stringify({
-          userId,
-        }),
-      }
-    )
+    const users: Array<{ userId: string }> = usersRes?.users ?? []
 
-    const json = await res.json().catch(() => ({}))
-
-    if (!res.ok) {
-      console.error(
-        `[worker] User ${userId} failed:`,
-        json?.error ?? res.status
-      )
+    if (users.length === 0) {
+      // Legacy fallback — single global mode
+      console.log('[worker:loop] No connected users found — running global cycle')
+      await fetch(`${BASE_URL}/auto-bid/start`, {
+        method:  'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: AUTH_HEADER },
+        body:    JSON.stringify({}),
+      }).catch((err) => console.error('[worker:loop] Global cycle error:', err))
       return
     }
 
-    console.log(`[worker] User ${userId} done`)
-  } catch (err) {
-    console.error(`[worker] User ${userId} error:`, err)
-  }
-}
+    console.log(`[worker:loop] Found ${users.length} connected user(s) — running per-user cycles`)
 
-async function runAutoLoop() {
-  if (isRunning) return
-  isRunning = true
-
-  console.log('[worker] Multi-user auto loop started')
-
-  while (true) {
-    try {
-      console.log('[worker] Loading connected users...')
-
-      // беремо всіх users з API
-      const usersRes = await fetch(
-        `http://localhost:${process.env.WORKER_PORT}/users/connected`,
-        {
-          headers: {
-            Authorization: `Bearer ${process.env.AUTOMATION_SECRET}`,
-          },
-        }
+    // 2. Run cycles for all users in parallel
+    await Promise.allSettled(
+      users.map(({ userId }) =>
+        fetch(`${BASE_URL}/auto-bid/start`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: AUTH_HEADER },
+          body:    JSON.stringify({ userId }),
+        })
+          .then((r) => r.json())
+          .then((result) => {
+            console.log(`[worker:loop] User ${userId} — submitted: ${result.bidsSubmitted ?? 0} | skipped: ${result.bidsSkipped ?? 0} | errors: ${result.errors ?? 0}`)
+          })
+          .catch((err) => {
+            console.error(`[worker:loop] User ${userId} cycle error:`, err)
+          })
       )
-
-      const usersJson = await usersRes.json().catch(() => ({}))
-
-      const users = Array.isArray(usersJson?.data)
-        ? usersJson.data
-        : []
-
-      console.log(`[worker] Connected users: ${users.length}`)
-
-      for (const user of users) {
-        if (!user?.id) continue
-
-        await runUserAutoBid(user.id)
-
-        // невелика затримка між юзерами
-        await new Promise((res) => setTimeout(res, 5000))
-      }
-
-      console.log('[worker] Cycle done, waiting...')
-    } catch (err) {
-      console.error('[worker] Error in loop:', err)
-    }
-
-    await new Promise((res) => setTimeout(res, INTERVAL))
+    )
+  } catch (err) {
+    console.error('[worker:loop] Loop error:', err)
+  } finally {
+    loopRunning = false
   }
 }
 
-// невелика затримка щоб сервер точно піднявся
+// Wait for server to start before first loop run
 setTimeout(() => {
-  runAutoLoop()
-}, 3000)
+  console.log('[worker:loop] Starting multi-user auto loop')
+  runMultiUserLoop()
+  setInterval(runMultiUserLoop, INTERVAL)
+}, 3_000)
