@@ -578,7 +578,8 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
     }
 
     try {
-      const { runAutoBidCycle, getFreelanceFilter, getFreelanceAccount, getSettings, saveApplication, appendLog: dbAppendLog, incrementBidCount } = await import('../lib/db')
+      const { getFreelanceFilter, getFreelanceAccount, getSettings } = await import('../lib/db')
+      const { runAutoBidCycle } = await import('../services/freelancehunt-auto-bid.service')
 
       // Resolve per-user session path and inject it for this cycle
       const sessionPath = resolveUserSessionPath(userId)
