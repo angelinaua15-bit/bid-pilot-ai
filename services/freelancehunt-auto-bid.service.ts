@@ -33,10 +33,11 @@ export interface AutoBidRunResult {
   errors: number;
 }
 
-// ─── Daily counters (reset on new day / process restart) ─────────────────────
+// ─── Daily counters (per-user, reset on new day / process restart) ───────────
 
 const dailyCounters: Map<string, { date: string; count: number }> = new Map();
 
+/** key = `${userId}:bids` or `global:bids` */
 function getDailyCount(key: string): number {
   const today = new Date().toISOString().slice(0, 10);
   const entry = dailyCounters.get(key);
@@ -54,6 +55,17 @@ function incrementDailyCount(key: string): void {
   }
 }
 
+// ─── Per-user in-cycle dedup sets ─────────────────────────────────────────────
+
+/** userId → Set of project IDs already bid in the current cycle */
+const alreadyBidByUser: Map<string, Set<string>> = new Map();
+
+function getAlreadyBidSet(userId: string): Set<string> {
+  if (!alreadyBidByUser.has(userId)) alreadyBidByUser.set(userId, new Set());
+  return alreadyBidByUser.get(userId)!;
+}
+
+/** @deprecated use getAlreadyBidSet(userId) — kept for legacy global mode */
 const alreadyBidIds = new Set<string>();
 
 // ─── Log helper ───────────────────────────────────────────────────────────────
@@ -137,9 +149,11 @@ export async function runAutoBidCycle(
     log(logs, 'warning', '[Settings] settings.enabled=false but forceRun=true — running anyway');
   }
 
-  const dailyUsed = getDailyCount('bids');
-  log(logs, 'info', `Cycle started. Daily limit: ${settings.dailyLimit} (used today: ${dailyUsed})`, {
-    meta: { dailyUsed, dailyLimit: settings.dailyLimit },
+  const dailyKey  = settings.userId ? `${settings.userId}:bids` : 'global:bids';
+  const bidSet    = settings.userId ? getAlreadyBidSet(settings.userId) : alreadyBidIds;
+  const dailyUsed = getDailyCount(dailyKey);
+  log(logs, 'info', `Cycle started. Daily limit: ${settings.dailyLimit} (used today: ${dailyUsed})${settings.userId ? ` [user: ${settings.userId}]` : ''}`, {
+    meta: { dailyUsed, dailyLimit: settings.dailyLimit, userId: settings.userId },
   });
 
   // ── Pre-flight ──────────────────────────────────────────────────────────────
@@ -246,7 +260,7 @@ export async function runAutoBidCycle(
     const project = filtered[i];
 
     const dailyLimit = settings.dailyLimit > 0 ? settings.dailyLimit : Infinity;
-    if (getDailyCount('bids') >= dailyLimit) {
+    if (getDailyCount(dailyKey) >= dailyLimit) {
       log(logs, 'warning', `Daily bid limit reached (${settings.dailyLimit}). Stopping.`);
       break;
     }
@@ -256,7 +270,7 @@ export async function runAutoBidCycle(
     const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
     // ── In-cycle dedup ────────────────────────────────────────────────────────
-    if (alreadyBidIds.has(project.id) || (project.freelancehuntId && alreadyBidIds.has(project.freelancehuntId))) {
+    if (bidSet.has(project.id) || (project.freelancehuntId && bidSet.has(project.freelancehuntId))) {
       log(logs, 'info',
         `[SKIP] Already bid in this cycle — "${projectTitle}"`,
         { projectId: project.id, projectTitle }
@@ -294,6 +308,7 @@ export async function runAutoBidCycle(
       // Persist so Dashboard "Skipped" tab shows real data
       await saveApplication({
         id:              `app_skip_${project.id}_${Date.now()}`,
+        userId:          settings.userId,
         projectId:       project.id,
         freelancehuntId: project.freelancehuntId ?? undefined,
         title:           projectTitle,
@@ -413,13 +428,13 @@ export async function runAutoBidCycle(
       if (!result) throw new Error('submitBidViaPlaywright returned no result after retries');
 
       if (result.success) {
-        alreadyBidIds.add(project.id);
-        if (project.freelancehuntId) alreadyBidIds.add(project.freelancehuntId);
+        bidSet.add(project.id);
+        if (project.freelancehuntId) bidSet.add(project.freelancehuntId);
         // Also record in cross-cycle global set
         globalProcessedIds?.add(project.id);
         if (project.freelancehuntId) globalProcessedIds?.add(project.freelancehuntId);
         if (numericId) globalProcessedIds?.add(numericId);
-        incrementDailyCount('bids');
+        incrementDailyCount(dailyKey);
         bidsSubmitted++;
 
         const sentAt = new Date().toISOString();
@@ -436,6 +451,7 @@ export async function runAutoBidCycle(
         // Also persist to applications table for Dashboard display
         await saveApplication({
           id:                 `app_sent_${project.id}_${Date.now()}`,
+          userId:             settings.userId,
           projectId:          project.id,
           freelancehuntId:    project.freelancehuntId ?? undefined,
           title:              projectTitle,
@@ -503,8 +519,8 @@ export async function runAutoBidCycle(
         );
         bidsSkipped++;
         // Mark as seen so we don't retry this project
-        alreadyBidIds.add(project.id);
-        if (project.freelancehuntId) alreadyBidIds.add(project.freelancehuntId);
+        bidSet.add(project.id);
+        if (project.freelancehuntId) bidSet.add(project.freelancehuntId);
         continue;
       }
 

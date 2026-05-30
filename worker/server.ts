@@ -608,11 +608,8 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
           minBudget:         userFilter.minBudgetUah,
         } : {}),
         ...bodySettings,
+        userId,   // pass through for per-user daily counter, dedup and DB records
         enabled: true,
-      }
-
-      if (account?.apiToken) {
-        process.env.FREELANCEHUNT_TOKEN = account.apiToken
       }
 
       addLog({
