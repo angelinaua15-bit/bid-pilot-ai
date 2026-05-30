@@ -71,6 +71,50 @@ interface LogEntry {
   meta?: Record<string, unknown>
 }
 
+// ─── Per-user state (multi-user mode) ────────────────────────────────────────
+interface UserCycleState {
+  cycleRunning: boolean
+  stopRequested: boolean
+  processedProjectIds: Set<string>
+  counters: typeof cycleCounters
+  logs: LogEntry[]
+  lastCheckedAt: string | null
+  lastError: string | null
+}
+
+const userStates = new Map<string, UserCycleState>()
+
+function getUserState(userId: string): UserCycleState {
+  if (!userStates.has(userId)) {
+    userStates.set(userId, {
+      cycleRunning:       false,
+      stopRequested:      false,
+      processedProjectIds: new Set(),
+      counters:           { parsed: 0, submitted: 0, skipped: 0, failed: 0, lastReset: new Date().toISOString() },
+      logs:               [],
+      lastCheckedAt:      null,
+      lastError:          null,
+    })
+  }
+  return userStates.get(userId)!
+}
+
+/**
+ * Resolve the Playwright session file path for a given user.
+ * With userId → sessions/freelancehunt_${userId}.json
+ * Without userId → legacy global path (FREELANCEHUNT_SESSION_PATH or storageState.json)
+ */
+function resolveUserSessionPath(userId?: string): string {
+  if (!userId) {
+    return process.env.FREELANCEHUNT_SESSION_PATH
+      ?? path.resolve(process.cwd(), 'storageState.json')
+  }
+  const sessionsDir = path.resolve(process.cwd(), 'sessions')
+  if (!fs.existsSync(sessionsDir)) fs.mkdirSync(sessionsDir, { recursive: true })
+  return path.join(sessionsDir, `freelancehunt_${userId}.json`)
+}
+
+// ─── Global (legacy) state ─────────────────────────────────────────────────────
 const logStore: LogEntry[] = []
 const MAX_LOGS = 500
 
@@ -365,7 +409,7 @@ function handleConnectStatus(sessionId: string, res: http.ServerResponse) {
   })
 }
 
-async function handleConnectSave(sessionId: string, res: http.ServerResponse) {
+async function handleConnectSave(sessionId: string, res: http.ServerResponse, userId?: string) {
   const session = connectSessions.get(sessionId)
   if (!session) {
     return json(res, 404, { ok: false, error: 'Session not found' })
@@ -377,10 +421,8 @@ async function handleConnectSave(sessionId: string, res: http.ServerResponse) {
   try {
     const { context, browser } = session
 
-    // Determine save path
-    const savePath = process.env.FREELANCEHUNT_SESSION_PATH
-      ? process.env.FREELANCEHUNT_SESSION_PATH
-      : path.resolve(process.cwd(), 'storageState.json')
+    // Use per-user session path when userId provided, otherwise legacy global path
+    const savePath = resolveUserSessionPath(userId)
 
     await context.storageState({ path: savePath })
     addLog({ level: 'success', message: `[Connect] Session saved to ${savePath}` })
@@ -489,15 +531,137 @@ async function handleSettingsDebug(res: http.ServerResponse) {
   }
 }
 
+// ─── GET /users/connected ─────────────────────────────────────────────────────
+async function handleGetConnectedUsers(res: http.ServerResponse) {
+  try {
+    const { getConnectedUsers } = await import('../lib/db')
+    const users = await getConnectedUsers()
+    return json(res, 200, { ok: true, users, total: users.length })
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    return json(res, 500, { ok: false, error: message })
+  }
+}
+
+// ─── POST /auto-bid/start — per-user when userId provided ────────────────────
 async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerResponse) {
-  if (cycleRunning) {
-    return json(res, 409, {
-      ok: false,
-      error: 'A cycle is already running',
-    })
+  const body    = await readBody(req)
+  const userId  = typeof body.userId === 'string' && body.userId.trim() ? body.userId.trim() : undefined
+
+  // ── Per-user mode ────────────────────────────────────────────────────────────
+  if (userId) {
+    const state = getUserState(userId)
+
+    if (state.cycleRunning) {
+      return json(res, 409, { ok: false, error: `Cycle already running for user ${userId}` })
+    }
+
+    state.cycleRunning  = true
+    state.stopRequested = false
+    state.counters = { parsed: 0, submitted: 0, skipped: 0, failed: 0, lastReset: new Date().toISOString() }
+    state.lastCheckedAt = new Date().toISOString()
+    state.lastError     = null
+
+    const cycleLogs: LogEntry[] = []
+
+    const stepLog = (level: LogEntry['level'], message: string, meta?: Record<string, unknown>) => {
+      const log = addLog({ level, message: message || '(no message)', meta })
+      cycleLogs.push(log)
+      state.logs.unshift(log)
+      if (state.logs.length > MAX_LOGS) state.logs.splice(MAX_LOGS)
+      const msg = log.message
+      if (/BID SENT|SUBMITTED/i.test(msg))              state.counters.submitted++
+      if (/SKIP|SKIPPED|ALREADY|CLOSED|VALIDATION/i.test(msg)) state.counters.skipped++
+      if (/FAILED|ERROR/i.test(msg))                    state.counters.failed++
+      const m = msg.match(/(\d+)\s+project/i)
+      if (m) state.counters.parsed = Number(m[1])
+    }
+
+    try {
+      const { getFreelanceFilter, getFreelanceAccount, getSettings } = await import('../lib/db')
+      const { runAutoBidCycle } = await import('../services/freelancehunt-auto-bid.service')
+
+      // Resolve per-user session path and inject it for this cycle
+      const sessionPath = resolveUserSessionPath(userId)
+      const prevSessionEnv = process.env.FREELANCEHUNT_SESSION_PATH
+      process.env.FREELANCEHUNT_SESSION_PATH = sessionPath
+
+      // Fetch user-specific settings
+      const [dbSettings, userFilter, account] = await Promise.all([
+        getSettings(),
+        getFreelanceFilter(userId).catch(() => null),
+        getFreelanceAccount(userId).catch(() => null),
+      ])
+
+      const bodySettings = body.settings && typeof body.settings === 'object'
+        ? (body.settings as Record<string, unknown>)
+        : {}
+
+      const settings = {
+        ...dbSettings,
+        ...(userFilter ? {
+          dailyLimit:        userFilter.dailyLimit,
+          allowedKeywords:   userFilter.allowedKeywords,
+          blockedKeywords:   userFilter.blockedKeywords,
+          allowedCategories: userFilter.allowedCategories,
+          blockedCategories: userFilter.blockedCategories,
+          minBudget:         userFilter.minBudgetUah,
+        } : {}),
+        ...bodySettings,
+        userId,   // pass through for per-user daily counter, dedup and DB records
+        enabled: true,
+      }
+
+      addLog({
+        level:   'info',
+        message: `[Worker:${userId}] Cycle start — session: ${sessionPath} | dailyLimit: ${(settings as Record<string, unknown>).dailyLimit ?? 20}`,
+      })
+
+      const chatId = process.env.TELEGRAM_CHAT_ID ? Number(process.env.TELEGRAM_CHAT_ID) : undefined
+
+      const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true, state.processedProjectIds)
+
+      // Track processed IDs for dedup
+      const resultAny = result as unknown as Record<string, unknown>
+      if (Array.isArray(resultAny.processedIds)) {
+        for (const id of resultAny.processedIds) state.processedProjectIds.add(String(id))
+      }
+
+      state.counters.submitted = Number(result.bidsSubmitted ?? state.counters.submitted)
+      state.counters.skipped   = Number(result.bidsSkipped   ?? state.counters.skipped)
+      state.counters.failed    = Number(result.errors        ?? state.counters.failed)
+
+      const summary = `[Worker:${userId}] Cycle done — submitted: ${state.counters.submitted} | skipped: ${state.counters.skipped} | failed: ${state.counters.failed}`
+      addLog({ level: state.counters.submitted > 0 ? 'success' : 'info', message: summary })
+
+      // Restore session env
+      if (prevSessionEnv !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSessionEnv
+      else delete process.env.FREELANCEHUNT_SESSION_PATH
+
+      return json(res, 200, {
+        ok:           true,
+        userId,
+        bidsSubmitted: state.counters.submitted,
+        bidsSkipped:   state.counters.skipped,
+        errors:        state.counters.failed,
+        counters:      { ...state.counters },
+        logs:          result.logs ?? cycleLogs,
+      })
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      state.lastError = message
+      stepLog('error', `[Worker:${userId}] Cycle failed: ${message}`)
+      return json(res, 500, { ok: false, userId, error: message, logs: cycleLogs })
+    } finally {
+      state.cycleRunning  = false
+      state.stopRequested = false
+    }
   }
 
-  const body = await readBody(req)
+  // ── Legacy global mode (no userId) ───────────────────────────────────────────
+  if (cycleRunning) {
+    return json(res, 409, { ok: false, error: 'A cycle is already running' })
+  }
 
   cycleRunning = true
   stopRequested = false
@@ -505,37 +669,15 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
 
   const cycleLogs: LogEntry[] = []
 
-  const stepLog = (
-    level: LogEntry['level'],
-    message: string,
-    meta?: Record<string, unknown>
-  ) => {
-    const log = addLog({
-      level,
-      message: message || '(no message)',
-      meta,
-    })
-
+  const stepLog = (level: LogEntry['level'], message: string, meta?: Record<string, unknown>) => {
+    const log = addLog({ level, message: message || '(no message)', meta })
     cycleLogs.push(log)
-
     const msg = log.message
-
-    if (/BID SENT|SUBMITTED|BID SUBMITTED/i.test(msg)) {
-      cycleCounters.submitted++
-    }
-
-    if (/SKIP|SKIPPED|ALREADY|CLOSED|VALIDATION/i.test(msg)) {
-      cycleCounters.skipped++
-    }
-
-    if (/FAILED|ERROR/i.test(msg)) {
-      cycleCounters.failed++
-    }
-
+    if (/BID SENT|SUBMITTED|BID SUBMITTED/i.test(msg)) cycleCounters.submitted++
+    if (/SKIP|SKIPPED|ALREADY|CLOSED|VALIDATION/i.test(msg)) cycleCounters.skipped++
+    if (/FAILED|ERROR/i.test(msg)) cycleCounters.failed++
     const match = msg.match(/(\d+)\s+project/i)
-    if (match) {
-      cycleCounters.parsed = Number(match[1])
-    }
+    if (match) cycleCounters.parsed = Number(match[1])
   }
 
   try {
@@ -543,62 +685,41 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
     const { getSettings } = await import('../lib/db')
 
     const dbSettings = await getSettings()
+    const bodySettings = body.settings && typeof body.settings === 'object'
+      ? (body.settings as Record<string, unknown>)
+      : {}
 
-    const bodySettings =
-      body.settings && typeof body.settings === 'object'
-        ? (body.settings as Record<string, unknown>)
-        : {}
-
-    const settings = {
-      ...dbSettings,
-      ...bodySettings,
-      enabled: true,
-    }
+    const settings = { ...dbSettings, ...bodySettings, enabled: true }
 
     addLog({
-      level: 'info',
-      message: `[Worker] Starting cycle — enabled=true | forceRun=true | dailyLimit=${
-        (settings as Record<string, unknown>).dailyLimit ?? 20
-      }`,
+      level:   'info',
+      message: `[Worker] Starting cycle — enabled=true | forceRun=true | dailyLimit=${(settings as Record<string, unknown>).dailyLimit ?? 20}`,
     })
 
-    const chatId = process.env.TELEGRAM_CHAT_ID
-      ? Number(process.env.TELEGRAM_CHAT_ID)
-      : undefined
-
+    const chatId = process.env.TELEGRAM_CHAT_ID ? Number(process.env.TELEGRAM_CHAT_ID) : undefined
     const result = await runAutoBidCycle('', settings as never, chatId, stepLog, true)
 
     cycleCounters.submitted = Number(result.bidsSubmitted ?? cycleCounters.submitted)
-    cycleCounters.skipped = Number(result.bidsSkipped ?? cycleCounters.skipped)
-    cycleCounters.failed = Number(result.errors ?? cycleCounters.failed)
+    cycleCounters.skipped   = Number(result.bidsSkipped   ?? cycleCounters.skipped)
+    cycleCounters.failed    = Number(result.errors        ?? cycleCounters.failed)
 
     const summary = `Cycle complete — parsed: ${cycleCounters.parsed} | submitted: ${cycleCounters.submitted} | skipped: ${cycleCounters.skipped} | failed: ${cycleCounters.failed}`
-
-    addLog({
-      level: cycleCounters.submitted > 0 ? 'success' : 'info',
-      message: summary,
-    })
+    addLog({ level: cycleCounters.submitted > 0 ? 'success' : 'info', message: summary })
 
     return json(res, 200, {
-      ok: true,
+      ok:           true,
       bidsSubmitted: cycleCounters.submitted,
-      bidsSkipped: cycleCounters.skipped,
-      errors: cycleCounters.failed,
-      counters: { ...cycleCounters },
-      logs: result.logs ?? cycleLogs,
+      bidsSkipped:   cycleCounters.skipped,
+      errors:        cycleCounters.failed,
+      counters:      { ...cycleCounters },
+      logs:          result.logs ?? cycleLogs,
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
-
     stepLog('error', `Cycle failed: ${message}`)
-
-    return json(res, 500, {
-      ok: false,
-      error: message,
-      logs: cycleLogs,
-    })
+    return json(res, 500, { ok: false, error: message, logs: cycleLogs })
   } finally {
-    cycleRunning = false
+    cycleRunning  = false
     stopRequested = false
   }
 }
@@ -703,6 +824,10 @@ const server = http.createServer(async (req, res) => {
       return await handleSettingsDebug(res)
     }
 
+    if (method === 'GET' && pathname === '/users/connected') {
+      return await handleGetConnectedUsers(res)
+    }
+
     if (method === 'POST' && pathname === '/auto-bid/start') {
       return await handleAutoBidStart(req, res)
     }
@@ -742,7 +867,8 @@ const server = http.createServer(async (req, res) => {
 
     if (method === 'POST' && /^\/connect\/freelancehunt\/save\//.test(pathname)) {
       const sessionId = decodeURIComponent(pathname.replace('/connect/freelancehunt/save/', ''))
-      return await handleConnectSave(sessionId, res)
+      const saveUserId = url.searchParams.get('userId') ?? undefined
+      return await handleConnectSave(sessionId, res, saveUserId)
     }
 
     if (method === 'POST' && pathname === '/connect/freelancehunt/logout') {

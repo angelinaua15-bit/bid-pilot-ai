@@ -65,12 +65,7 @@ export async function GET(req: NextRequest) {
     }
 
     // ── Local / fallback: read from Supabase DB ───────────────────────────────
-<<<<<<< HEAD
     const { logs, total } = await getLogs({ limit, level, projectId, userId });
-=======
-    const { logs, total } = await getLogs({ limit, level, projectId });
-
->>>>>>> main
     return NextResponse.json({
       ok: true,
       data: Array.isArray(logs) ? logs : [],

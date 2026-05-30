@@ -204,6 +204,8 @@ export interface FreelancehuntTokenRecord {
 // ─── Auto-Bid Settings ────────────────────────────────────────────────────────
 
 export interface AutoBidSettings {
+  /** SaaS user ID — used for per-user daily counters, dedup and DB records */
+  userId?: string;
   enabled: boolean;
   dailyLimit: number;
   minBudget: number;
