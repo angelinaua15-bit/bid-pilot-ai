@@ -973,6 +973,59 @@ export async function updateCampaignStatus(id: string, status: string): Promise<
   } catch (err) { console.error('[db] updateCampaignStatus error:', err); }
 }
 
+/** Fetch campaigns that are ready to dispatch (draft/scheduled and due). */
+export async function getCampaignsDue(): Promise<Campaign[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const now = new Date().toISOString();
+    const { data } = await db
+      .from('campaigns')
+      .select('*')
+      .or(`status.eq.draft,and(status.eq.scheduled,scheduled_at.lte.${now})`)
+      .order('created_at', { ascending: true });
+    return (data ?? []).map(mapCampaign);
+  } catch (err) { console.error('[db] getCampaignsDue error:', err); return []; }
+}
+
+/** Save a per-channel result row for a campaign. */
+export async function saveCampaignMessage(
+  msg: Omit<CampaignMessage, 'id' | 'createdAt'>
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('campaign_messages').insert({
+      campaign_id:  msg.campaignId,
+      channel_id:   msg.channelId,
+      status:       msg.status,
+      error_reason: msg.errorReason ?? null,
+      sent_at:      msg.sentAt ?? null,
+      created_at:   new Date().toISOString(),
+    });
+  } catch (err) { console.error('[db] saveCampaignMessage error:', err); }
+}
+
+/** Increment sent_count or failed_count + update updated_at. */
+export async function incrementCampaignCounters(
+  id: string,
+  field: 'sent_count' | 'failed_count'
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.rpc('increment_campaign_counter', { campaign_id: id, col: field });
+  } catch {
+    // fallback: read-modify-write
+    try {
+      const db2 = getDb()!;
+      const { data } = await db2.from('campaigns').select(field).eq('id', id).single();
+      const current = ((data as Record<string, unknown>)?.[field] as number) ?? 0;
+      await db2.from('campaigns').update({ [field]: current + 1, updated_at: new Date().toISOString() }).eq('id', id);
+    } catch (err2) { console.error('[db] incrementCampaignCounters fallback error:', err2); }
+  }
+}
+
 export async function getCampaignMessages(campaignId: string): Promise<CampaignMessage[]> {
   if (!isSupabaseConfigured) return [];
   try {
@@ -1118,7 +1171,7 @@ export async function deletePaymentSetting(id: string): Promise<void> {
   } catch (err) { console.error('[db] deletePaymentSetting error:', err); }
 }
 
-// ─── Manual Payments ──────────────────────────────────────────────────────────
+// ─── Manual Payments ──────────���───────────────────────────────────────────────
 
 function mapManualPayment(r: Record<string, unknown>): ManualPayment {
   return {

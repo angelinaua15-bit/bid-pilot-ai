@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCampaigns, createCampaign, getTelegramChannels } from '@/lib/db';
+import { getCampaigns, createCampaign } from '@/lib/db';
+import { config } from '@/lib/config';
 import type { ScheduleType } from '@/types';
 
 export async function GET(req: NextRequest) {
@@ -49,6 +50,19 @@ export async function POST(req: NextRequest) {
       delayMinSeconds: delayMinSeconds ?? 3,
       delayMaxSeconds: delayMaxSeconds ?? 10,
     });
+
+    // If scheduleType is 'now', immediately trigger dispatch via worker
+    if (campaign && (scheduleType === 'now' || !scheduleType)) {
+      const workerUrl = config.worker.url;
+      const secret    = process.env.AUTOMATION_SECRET ?? '';
+      if (workerUrl && secret) {
+        fetch(`${workerUrl}/campaigns/dispatch`, {
+          method:  'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${secret}` },
+          body:    JSON.stringify({ campaignId: campaign.id }),
+        }).catch(() => { /* fire and forget */ });
+      }
+    }
 
     return NextResponse.json({ ok: true, campaign });
   } catch (err) {

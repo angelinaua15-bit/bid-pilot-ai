@@ -855,6 +855,27 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, message: 'Auto-loop stopped' })
     }
 
+    // ── Campaign dispatch ─────────────────────────────────────────────────────
+    if (method === 'POST' && pathname === '/campaigns/dispatch') {
+      try {
+        const body = await readBody(req)
+        const { campaignId } = body as { campaignId?: string }
+        if (!campaignId) return json(res, 400, { ok: false, error: 'campaignId is required' })
+        const { dispatchCampaign } = await import('../services/campaign-dispatch.service')
+        // Fire-and-forget — return 202 immediately; dispatch runs async
+        dispatchCampaign(campaignId)
+          .then(({ sent, failed, skipped }) => {
+            addLog({ level: 'success', message: `[Campaign] ${campaignId}: sent=${sent} failed=${failed} skipped=${skipped}` })
+          })
+          .catch((err: unknown) => {
+            addLog({ level: 'error', message: `[Campaign] ${campaignId} error: ${(err as Error)?.message ?? err}` })
+          })
+        return json(res, 202, { ok: true, message: 'Dispatch started' })
+      } catch (err) {
+        return json(res, 500, { ok: false, error: (err as Error)?.message ?? String(err) })
+      }
+    }
+
     // ── Telegram MTProto: send OTP ────────────────────────────────────────────
     if (method === 'POST' && pathname === '/telegram/send-code') {
       try {

@@ -65,6 +65,35 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 }
 
 /**
+ * Send a text message to a channel/group using an existing StringSession.
+ * @param sessionString - saved StringSession from signInWithCode
+ * @param peer          - channel username (@mychannel) or numeric peer id
+ * @param text          - message text (HTML supported via parseMode)
+ */
+export async function sendMessageMTProto(
+  sessionString: string,
+  peer:          string,
+  text:          string,
+): Promise<void> {
+  if (!API_ID || !API_HASH) {
+    throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set')
+  }
+
+  const session = new StringSession(sessionString)
+  const client  = new TelegramClient(session, API_ID, API_HASH, {
+    connectionRetries: 3,
+    useWSS: false,
+  })
+
+  await client.connect()
+  try {
+    await client.sendMessage(peer, { message: text, parseMode: 'html' })
+  } finally {
+    await client.disconnect()
+  }
+}
+
+/**
  * Confirm the OTP (and optional 2FA cloud password), returns the StringSession.
  */
 export async function signInWithCode(
