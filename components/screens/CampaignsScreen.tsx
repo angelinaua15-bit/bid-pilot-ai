@@ -3,13 +3,13 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   RefreshCw, Plus, Send, CheckCircle2, XCircle, Clock,
-  ChevronRight, Trash2, Play, Pause, Radio, Search, X,
+  ChevronRight, Trash2, Play, Pause, Radio, Search, X, Smartphone,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
-import type { SaaSUser, Campaign, TelegramChannel, CampaignMessage } from '@/types';
+import type { SaaSUser, Campaign, TelegramChannel, CampaignMessage, TelegramAccount } from '@/types';
 
 const PAGE_SIZE = 50;
 
@@ -536,6 +536,7 @@ function CreateCampaignForm({ userId, onCreated }: {
   const [activeChannels, setActiveChannels] = useState<TelegramChannel[]>([]);
   const [chLoading, setChLoading]           = useState(true);
   const [chSearch, setChSearch]             = useState('');
+  const [accounts, setAccounts]             = useState<TelegramAccount[]>([]);
 
   // Load active channels for the picker — paginated, max 200 at once for the selector
   useEffect(() => {
@@ -546,13 +547,25 @@ function CreateCampaignForm({ userId, onCreated }: {
       .catch(() => {})
       .finally(() => setChLoading(false));
   }, []);
+
+  // Load active Telegram accounts for sender picker
+  useEffect(() => {
+    fetch('/api/telegram/accounts')
+      .then((r) => r.json())
+      .then((res) => {
+        if (res?.ok) setAccounts((res.accounts as TelegramAccount[]).filter((a) => a.status === 'active'));
+      })
+      .catch(() => {});
+  }, []);
+
   const [form, setForm] = useState({
-    title:           '',
-    messageText:     '',
-    scheduleType:    'now' as 'now' | 'scheduled' | 'interval',
-    scheduledAt:     '',
-    delayMinSeconds: 3,
-    delayMaxSeconds: 10,
+    title:            '',
+    messageText:      '',
+    accountId:        '',
+    scheduleType:     'now' as 'now' | 'scheduled' | 'interval',
+    scheduledAt:      '',
+    delayMinSeconds:  3,
+    delayMaxSeconds:  10,
     selectedChannels: [] as string[],
   });
   const [saving, setSaving] = useState(false);
@@ -579,6 +592,7 @@ function CreateCampaignForm({ userId, onCreated }: {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId,
+          accountId:        form.accountId || undefined,
           title:            form.title,
           messageText:      form.messageText,
           targetChannelIds: form.selectedChannels,
@@ -614,6 +628,33 @@ function CreateCampaignForm({ userId, onCreated }: {
             maxLength={4096}
             className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none resize-none"
           />
+        </div>
+
+        {/* Telegram account selector */}
+        <div className="flex flex-col gap-1">
+          <label className="text-[10px] text-muted-foreground">
+            Аккаунт-відправник
+            {accounts.length === 0 && <span className="text-[10px] text-yellow-500 ml-1">(немає активних)</span>}
+          </label>
+          {accounts.length > 0 ? (
+            <select
+              value={form.accountId}
+              onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))}
+              className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none"
+            >
+              <option value="">— Без акаунту (через бот) —</option>
+              {accounts.map((a) => (
+                <option key={a.id} value={a.id}>{a.phoneNumber}</option>
+              ))}
+            </select>
+          ) : (
+            <div className="flex items-center gap-2 bg-secondary rounded-lg px-3 py-2">
+              <Smartphone size={12} className="text-muted-foreground flex-shrink-0" />
+              <p className="text-[11px] text-muted-foreground">
+                Підключіть MTProto-аккаунт у панелі адміна для прямої розсилки.
+              </p>
+            </div>
+          )}
         </div>
 
         {/* Schedule */}

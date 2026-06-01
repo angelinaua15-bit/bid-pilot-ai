@@ -19,10 +19,11 @@ export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
     const {
-      userId, title, messageText, targetChannelIds,
+      userId, accountId, title, messageText, targetChannelIds,
       scheduleType, scheduledAt, delayMinSeconds, delayMaxSeconds,
     } = body as {
       userId: string;
+      accountId?: string;
       title: string;
       messageText: string;
       targetChannelIds: string[];
@@ -38,6 +39,7 @@ export async function POST(req: NextRequest) {
 
     const campaign = await createCampaign({
       userId,
+      accountId,
       title,
       messageText,
       targetChannelIds,

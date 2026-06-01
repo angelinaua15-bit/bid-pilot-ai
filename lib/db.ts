@@ -753,7 +753,7 @@ export async function getTelegramOtpSession(accountId: string): Promise<{ phoneH
   } catch (err) { console.error('[db] getTelegramOtpSession error:', err); return null; }
 }
 
-// ─── SaaS: Telegram Channels ──────────────────────────────────────────────────
+// ─── SaaS: Telegram Channels ──────────────────────────────────────���───────────
 
 /** Fetch all channels (up to 10 000). Prefer getTelegramChannelsPaginated for UI. */
 export async function getTelegramChannels(options?: { status?: string; limit?: number }): Promise<TelegramChannel[]> {
@@ -944,6 +944,7 @@ export async function createCampaign(c: Omit<Campaign, 'id' | 'createdAt' | 'upd
     const now = new Date().toISOString();
     const { data, error } = await db.from('campaigns').insert({
       user_id:            c.userId,
+      account_id:         c.accountId ?? null,
       title:              c.title,
       message_text:       c.messageText,
       media_url:          c.mediaUrl ?? null,
@@ -985,6 +986,7 @@ function mapCampaign(r: Record<string, unknown>): Campaign {
   return {
     id:               r.id as string,
     userId:           r.user_id as string,
+    accountId:        r.account_id as string | undefined,
     title:            r.title as string,
     messageText:      r.message_text as string,
     mediaUrl:         r.media_url as string | undefined,
