@@ -1,37 +1,46 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { subscriptionPlans } from '@/lib/mock-data';
+import { getUserById, getPaymentSettings, updateUserPlan } from '@/lib/db';
+import type { SubscriptionPlanSaaS } from '@/types';
 
 export async function POST(req: NextRequest) {
   try {
-    const { planId } = await req.json();
+    const { userId, planId } = await req.json() as {
+      userId?: string;
+      planId?: SubscriptionPlanSaaS;
+    };
 
-    const plan = subscriptionPlans.find((p) => p.id === planId);
-    if (!plan) {
-      return NextResponse.json({ ok: false, error: 'Plan not found' }, { status: 404 });
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: 'userId required' }, { status: 400 });
+    }
+    if (!planId) {
+      return NextResponse.json({ ok: false, error: 'planId required' }, { status: 400 });
     }
 
-    if (plan.price === 0) {
-      // TODO: activate free plan in DB
-      // await prisma.subscription.upsert({ where: { userId }, update: { plan: 'free', ... }, create: { ... } });
+    // Free plan — activate immediately
+    if (planId === 'free') {
+      await updateUserPlan(userId, 'free');
       return NextResponse.json({ ok: true, data: { activated: true } });
     }
 
-    // TODO: Create WayForPay / LiqPay invoice and return checkout URL:
-    // const invoice = await wayforpay.createInvoice({
-    //   orderReference: `sub_${Date.now()}`,
-    //   orderDate: Math.floor(Date.now() / 1000),
-    //   amount: plan.price,
-    //   currency: 'UAH',
-    //   productName: [`BidPilot AI ${plan.name}`],
-    //   productPrice: [plan.price],
-    //   productCount: [1],
-    // });
-    // return NextResponse.json({ ok: true, data: { checkoutUrl: invoice.invoiceUrl } });
+    // Paid plans — return active payment methods for manual payment
+    const user = await getUserById(userId);
+    if (!user) {
+      return NextResponse.json({ ok: false, error: 'User not found' }, { status: 404 });
+    }
 
-    // MOCK:
-    const mockCheckoutUrl = `https://secure.wayforpay.com/pay?order=mock_${Date.now()}`;
-    console.log('[POST /api/subscription/checkout]', { planId, mockCheckoutUrl });
-    return NextResponse.json({ ok: true, data: { checkoutUrl: mockCheckoutUrl } });
+    const paymentMethods = await getPaymentSettings(true /* onlyActive */);
+    if (paymentMethods.length === 0) {
+      return NextResponse.json({ ok: false, error: 'No active payment methods configured' }, { status: 503 });
+    }
+
+    return NextResponse.json({
+      ok: true,
+      data: {
+        manual: true,
+        paymentMethods,
+        instructions: 'Оплатіть за одним з реквізитів та надішліть скрін адміну для підтвердження.',
+      },
+    });
   } catch (err) {
     console.error('[POST /api/subscription/checkout]', err);
     return NextResponse.json({ ok: false, error: 'Server error' }, { status: 500 });

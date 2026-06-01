@@ -8,6 +8,8 @@
 
 import { NextRequest, NextResponse } from 'next/server';
 import { sendTelegramMessage } from '@/services/telegram.service';
+import { getOrCreateUser } from '@/lib/db';
+import { PLAN_LIMITS } from '@/types';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,16 +106,25 @@ async function handleApp(chatId: number): Promise<void> {
 }
 
 async function handleStatus(chatId: number): Promise<void> {
-  // TODO: fetch real subscription from DB:
-  // const user = await prisma.user.findUnique({ where: { telegramId: chatId } });
-  const text = [
-    '<b>Ваш статус:</b>',
-    '',
-    'Тарифний план: <b>Старт (безкоштовний)</b>',
-    'Залишок генерацій: <b>3 / 5</b>',
-    '',
-    'Оновіть план для необмежених заявок.',
-  ].join('\n');
+  const user = await getOrCreateUser(chatId, `user_${chatId}`);
+
+  let text: string;
+  if (user) {
+    const limits = PLAN_LIMITS[user.subscriptionPlan];
+    const remaining = Math.max(0, limits.applicationsPerMonth - user.applicationsThisMonth);
+    const planLabel = { free: 'Безкоштовний', pro: 'Pro', agency: 'Agency', unlimited: 'Unlimited' }[user.subscriptionPlan];
+    text = [
+      '<b>Ваш статус:</b>',
+      '',
+      `Тарифний план: <b>${planLabel}</b>`,
+      `Заявок цього місяця: <b>${user.applicationsThisMonth} / ${limits.applicationsPerMonth === 999999 ? '∞' : limits.applicationsPerMonth}</b>`,
+      `Залишок: <b>${remaining === Infinity ? '∞' : remaining}</b>`,
+      '',
+      user.subscriptionPlan === 'free' ? 'Оновіть план для більших лімітів.' : 'Дякуємо за підписку!',
+    ].join('\n');
+  } else {
+    text = 'Не вдалося знайти ваш акаунт. Натисніть /start щоб зареєструватись.';
+  }
 
   await sendTelegramMessage(chatId, text, { parseMode: 'HTML' });
 }
@@ -164,10 +175,21 @@ async function processUpdate(update: TelegramUpdate): Promise<void> {
   if (update.callback_query) {
     const { from, data, message } = update.callback_query;
     const chatId = message?.chat.id ?? from.id;
-    console.log('[webhook] callback_query:', { from: from.id, data });
 
-    // TODO: handle callback_query data (e.g. plan selection, bid actions)
-    await sendTelegramMessage(chatId, `Дія: ${data ?? 'unknown'}`);
+    if (data === 'open_app') {
+      await handleApp(chatId);
+    } else if (data === 'status') {
+      await handleStatus(chatId);
+    } else if (data?.startsWith('plan:')) {
+      const plan = data.split(':')[1];
+      await sendTelegramMessage(
+        chatId,
+        `Для активації плану <b>${plan}</b> відкрийте додаток та оберіть потрібний тариф.`,
+        { parseMode: 'HTML' }
+      );
+    } else {
+      // Unknown callback — silently ignore (Telegram requires we handle all updates)
+    }
   }
 }
 
