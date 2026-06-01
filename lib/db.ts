@@ -15,7 +15,7 @@ import { defaultAutoBidSettings, mockLogs, mockBids } from '@/lib/mock-data';
 import type {
   AutoBidSettings, AutoBidLog, GeneratedBid, Application,
   SaaSUser, FreelanceAccount, FreelanceFilter,
-  TelegramChannel, TelegramBot, Campaign, CampaignMessage,
+  TelegramChannel, TelegramBot, TelegramAccount, Campaign, CampaignMessage,
   SaaSDashboardStats, PaymentSetting, ManualPayment, ManualPaymentPlan,
 } from '@/types';
 import { OWNER_TELEGRAM_ID } from '@/types';
@@ -632,6 +632,125 @@ export async function incrementBidCount(userId: string): Promise<void> {
       await db2.from('freelance_accounts').update({ bid_count: current + 1, updated_at: new Date().toISOString() }).eq('user_id', userId);
     } catch (err2) { console.error('[db] incrementBidCount fallback error:', err2); }
   }
+}
+
+// ─── SaaS: Telegram Accounts (MTProto) ────────────────────────────────────────
+
+function mapTelegramAccount(r: Record<string, unknown>): TelegramAccount {
+  return {
+    id:              r.id as string,
+    userId:          r.user_id as string,
+    phoneNumber:     r.phone_number as string,
+    sessionString:   r.session_string as string | undefined,
+    status:          (r.status as TelegramAccount['status']) ?? 'pending',
+    floodWaitUntil:  r.flood_wait_until as string | undefined,
+    lastActiveAt:    r.last_active_at as string | undefined,
+    errorMessage:    r.error_message as string | undefined,
+    createdAt:       r.created_at as string,
+    updatedAt:       r.updated_at as string,
+  };
+}
+
+export async function getTelegramAccounts(userId: string): Promise<TelegramAccount[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db
+      .from('telegram_accounts')
+      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    return (data ?? []).map(mapTelegramAccount);
+  } catch (err) { console.error('[db] getTelegramAccounts error:', err); return []; }
+}
+
+export async function getAllTelegramAccounts(): Promise<TelegramAccount[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db
+      .from('telegram_accounts')
+      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      .order('created_at', { ascending: false });
+    return (data ?? []).map(mapTelegramAccount);
+  } catch (err) { console.error('[db] getAllTelegramAccounts error:', err); return []; }
+}
+
+export async function getTelegramAccountById(id: string): Promise<TelegramAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('telegram_accounts').select('*').eq('id', id).maybeSingle();
+    return data ? mapTelegramAccount(data as Record<string, unknown>) : null;
+  } catch (err) { console.error('[db] getTelegramAccountById error:', err); return null; }
+}
+
+export async function upsertTelegramAccount(
+  account: Pick<TelegramAccount, 'userId' | 'phoneNumber'> & Partial<TelegramAccount>
+): Promise<TelegramAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const payload: Record<string, unknown> = {
+      user_id:          account.userId,
+      phone_number:     account.phoneNumber,
+      status:           account.status ?? 'pending',
+      session_string:   account.sessionString ?? null,
+      flood_wait_until: account.floodWaitUntil ?? null,
+      last_active_at:   account.lastActiveAt ?? null,
+      error_message:    account.errorMessage ?? null,
+      updated_at:       now,
+    };
+    if (account.id) {
+      const { data, error } = await db.from('telegram_accounts').update(payload).eq('id', account.id).select('*').single();
+      if (error) throw error;
+      return mapTelegramAccount(data as Record<string, unknown>);
+    } else {
+      const { data, error } = await db.from('telegram_accounts')
+        .upsert({ ...payload, created_at: now }, { onConflict: 'user_id,phone_number' })
+        .select('*').single();
+      if (error) throw error;
+      return mapTelegramAccount(data as Record<string, unknown>);
+    }
+  } catch (err) { console.error('[db] upsertTelegramAccount error:', err); return null; }
+}
+
+export async function deleteTelegramAccount(id: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('telegram_accounts').delete().eq('id', id);
+  } catch (err) { console.error('[db] deleteTelegramAccount error:', err); }
+}
+
+export async function saveTelegramOtpSession(accountId: string, phoneHash: string): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    // Delete any existing OTP session for this account first
+    await db.from('telegram_otp_sessions').delete().eq('account_id', accountId);
+    const { data, error } = await db.from('telegram_otp_sessions')
+      .insert({ account_id: accountId, phone_hash: phoneHash })
+      .select('id').single();
+    if (error) throw error;
+    return data?.id ?? null;
+  } catch (err) { console.error('[db] saveTelegramOtpSession error:', err); return null; }
+}
+
+export async function getTelegramOtpSession(accountId: string): Promise<{ phoneHash: string } | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('telegram_otp_sessions')
+      .select('phone_hash, expires_at')
+      .eq('account_id', accountId)
+      .maybeSingle();
+    if (!data) return null;
+    // Check expiry
+    if (new Date(data.expires_at as string) < new Date()) return null;
+    return { phoneHash: data.phone_hash as string };
+  } catch (err) { console.error('[db] getTelegramOtpSession error:', err); return null; }
 }
 
 // ─── SaaS: Telegram Channels ──────────────────────────────────────────────────

@@ -5,14 +5,15 @@ import {
   Users, CreditCard, Settings2, ScrollText, ChevronRight,
   Crown, CheckCircle2, XCircle, Clock, Trash2, Plus,
   RefreshCw, Shield, ToggleLeft, ToggleRight, Wallet,
+  Smartphone, PhoneCall, KeyRound, AlertTriangle, WifiOff,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
-import type { SaaSUser, PaymentSetting, ManualPayment, ManualPaymentPlan, PaymentCurrency } from '@/types';
+import type { SaaSUser, PaymentSetting, ManualPayment, ManualPaymentPlan, PaymentCurrency, TelegramAccount } from '@/types';
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type AdminTab = 'users' | 'payments' | 'payment-settings' | 'logs';
+type AdminTab = 'users' | 'payments' | 'payment-settings' | 'tg-accounts' | 'logs';
 
 interface AdminScreenProps {
   user: SaaSUser | null;
@@ -37,7 +38,8 @@ export function AdminScreen({ user }: AdminScreenProps) {
     { id: 'users',            label: 'Користувачі', icon: Users },
     { id: 'payments',         label: 'Платежі',     icon: CreditCard },
     { id: 'payment-settings', label: 'Гаманці',     icon: Wallet },
-    { id: 'logs',             label: 'Логи',         icon: ScrollText },
+    { id: 'tg-accounts',      label: 'TG Аккаунти', icon: Smartphone },
+    { id: 'logs',             label: 'Логи',        icon: ScrollText },
   ];
 
   return (
@@ -79,6 +81,7 @@ export function AdminScreen({ user }: AdminScreenProps) {
         {tab === 'users'            && <UsersTab user={user} />}
         {tab === 'payments'         && <PaymentsTab user={user} />}
         {tab === 'payment-settings' && <PaymentSettingsTab user={user} />}
+        {tab === 'tg-accounts'      && <TelegramAccountsTab user={user} />}
         {tab === 'logs'             && <AdminLogsTab user={user} />}
       </div>
     </div>
@@ -490,6 +493,309 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
             </div>
           </div>
         ))
+      )}
+    </div>
+  );
+}
+
+// ── Telegram Accounts Tab ─────────────────────────────────────────────────────
+
+type WizardStep = 'idle' | 'phone' | 'code' | 'password' | 'done';
+
+const STATUS_LABEL: Record<TelegramAccount['status'], string> = {
+  pending:    'Очікує',
+  code_sent:  'Код відправлено',
+  active:     'Активний',
+  flood_wait: 'FloodWait',
+  banned:     'Заблоковано',
+  invalid:    'Помилка',
+};
+
+const STATUS_COLOR: Record<TelegramAccount['status'], string> = {
+  pending:    'text-muted-foreground bg-secondary',
+  code_sent:  'text-yellow-400 bg-yellow-500/15',
+  active:     'text-green-400 bg-green-500/15',
+  flood_wait: 'text-orange-400 bg-orange-500/15',
+  banned:     'text-red-400 bg-red-500/15',
+  invalid:    'text-red-400 bg-red-500/15',
+};
+
+function TelegramAccountsTab({ user }: { user: SaaSUser }) {
+  const [accounts, setAccounts]     = useState<TelegramAccount[]>([]);
+  const [loading, setLoading]       = useState(true);
+  const [step, setStep]             = useState<WizardStep>('idle');
+  const [phone, setPhone]           = useState('');
+  const [code, setCode]             = useState('');
+  const [password, setPassword]     = useState('');
+  const [working, setWorking]       = useState(false);
+  const [error, setError]           = useState('');
+  const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    try {
+      const res = await fetch('/api/telegram/accounts');
+      const data = await res.json() as { ok: boolean; accounts?: TelegramAccount[] };
+      if (data.ok) setAccounts(data.accounts ?? []);
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => { load(); }, [load]);
+
+  // ── Step 1: register phone → create account row ───────────────────────────
+  async function handleAddPhone() {
+    if (!phone.trim()) return;
+    setError('');
+    setWorking(true);
+    try {
+      const res = await fetch('/api/telegram/accounts', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ userId: user.id, phoneNumber: phone.trim() }),
+      });
+      const data = await res.json() as { ok: boolean; account?: TelegramAccount; error?: string };
+      if (!data.ok) { setError(data.error ?? 'Помилка'); return; }
+      const accountId = data.account!.id;
+      setCurrentAccountId(accountId);
+      // Send OTP
+      const codeRes = await fetch('/api/telegram/accounts/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId }),
+      });
+      const codeData = await codeRes.json() as { ok: boolean; error?: string };
+      if (!codeData.ok) { setError(codeData.error ?? 'Не вдалося відправити код'); return; }
+      setStep('code');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  // ── Step 2: verify OTP ─────────────────────────────────────────────────────
+  async function handleVerifyCode() {
+    if (!code.trim() || !currentAccountId) return;
+    setError('');
+    setWorking(true);
+    try {
+      const res = await fetch('/api/telegram/accounts/verify-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: currentAccountId, code: code.trim() }),
+      });
+      const data = await res.json() as { ok: boolean; requires2fa?: boolean; error?: string };
+      if (!data.ok) {
+        if (data.requires2fa) { setStep('password'); return; }
+        setError(data.error ?? 'Невірний код');
+        return;
+      }
+      setStep('done');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  // ── Step 3 (optional): 2FA password ───────────────────────────────────────
+  async function handleVerifyPassword() {
+    if (!password.trim() || !currentAccountId) return;
+    setError('');
+    setWorking(true);
+    try {
+      const res = await fetch('/api/telegram/accounts/verify-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: currentAccountId, code: code.trim(), password: password.trim() }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      if (!data.ok) { setError(data.error ?? 'Невірний пароль 2FA'); return; }
+      setStep('done');
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  function resetWizard() {
+    setStep('idle');
+    setPhone('');
+    setCode('');
+    setPassword('');
+    setError('');
+    setCurrentAccountId(null);
+  }
+
+  async function handleDelete(id: string) {
+    haptic.heavy();
+    await fetch(`/api/telegram/accounts?id=${id}`, { method: 'DELETE' });
+    await load();
+  }
+
+  return (
+    <div className="space-y-4 pt-2">
+      {/* Header row */}
+      <div className="flex items-center justify-between">
+        <div>
+          <p className="text-sm font-semibold">Telegram аккаунти</p>
+          <p className="text-[11px] text-muted-foreground">MTProto-сесії для розсилки</p>
+        </div>
+        <div className="flex gap-2">
+          <button onClick={load} className="p-2 rounded-xl bg-secondary hover:bg-secondary/70 transition-colors">
+            <RefreshCw size={14} className={cn(loading && 'animate-spin')} />
+          </button>
+          {step === 'idle' && (
+            <button
+              onClick={() => { haptic.select(); setStep('phone'); }}
+              className="flex items-center gap-1.5 px-3 py-2 rounded-xl bg-primary text-primary-foreground text-[12px] font-medium"
+            >
+              <Plus size={13} /> Додати
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Wizard */}
+      {step !== 'idle' && step !== 'done' && (
+        <div className="rounded-2xl border border-border bg-card p-4 space-y-3">
+          {step === 'phone' && (
+            <>
+              <div className="flex items-center gap-2">
+                <PhoneCall size={15} className="text-primary" />
+                <p className="text-[13px] font-medium">Введіть номер телефону</p>
+              </div>
+              <input
+                type="tel"
+                value={phone}
+                onChange={e => setPhone(e.target.value)}
+                placeholder="+380501234567"
+                className="w-full bg-secondary rounded-xl px-3 py-2.5 text-sm outline-none border border-border focus:border-primary transition-colors"
+                autoFocus
+              />
+            </>
+          )}
+          {step === 'code' && (
+            <>
+              <div className="flex items-center gap-2">
+                <KeyRound size={15} className="text-primary" />
+                <p className="text-[13px] font-medium">Введіть код з Telegram</p>
+              </div>
+              <input
+                type="text"
+                inputMode="numeric"
+                value={code}
+                onChange={e => setCode(e.target.value)}
+                placeholder="12345"
+                maxLength={6}
+                className="w-full bg-secondary rounded-xl px-3 py-2.5 text-sm outline-none border border-border focus:border-primary transition-colors tracking-widest"
+                autoFocus
+              />
+            </>
+          )}
+          {step === 'password' && (
+            <>
+              <div className="flex items-center gap-2">
+                <Shield size={15} className="text-primary" />
+                <p className="text-[13px] font-medium">2FA пароль</p>
+              </div>
+              <input
+                type="password"
+                value={password}
+                onChange={e => setPassword(e.target.value)}
+                placeholder="Ваш пароль двофакторної аутентифікації"
+                className="w-full bg-secondary rounded-xl px-3 py-2.5 text-sm outline-none border border-border focus:border-primary transition-colors"
+                autoFocus
+              />
+            </>
+          )}
+
+          {error && (
+            <div className="flex items-start gap-2 rounded-xl bg-red-500/10 px-3 py-2">
+              <AlertTriangle size={13} className="text-red-400 mt-0.5 flex-shrink-0" />
+              <p className="text-[11px] text-red-400">{error}</p>
+            </div>
+          )}
+
+          <div className="flex gap-2">
+            <button
+              onClick={resetWizard}
+              className="flex-1 py-2 rounded-xl bg-secondary text-sm text-muted-foreground"
+            >
+              Скасувати
+            </button>
+            <button
+              disabled={working}
+              onClick={step === 'phone' ? handleAddPhone : step === 'code' ? handleVerifyCode : handleVerifyPassword}
+              className="flex-1 py-2 rounded-xl bg-primary text-primary-foreground text-sm font-medium disabled:opacity-50"
+            >
+              {working ? 'Завантаження…' : step === 'phone' ? 'Надіслати код' : step === 'code' ? 'Підтвердити' : 'Увійти'}
+            </button>
+          </div>
+        </div>
+      )}
+
+      {step === 'done' && (
+        <div className="rounded-2xl bg-green-500/10 border border-green-500/20 px-4 py-3 flex items-center gap-3">
+          <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
+          <div>
+            <p className="text-[13px] font-medium text-green-400">Аккаунт підключено</p>
+            <button onClick={resetWizard} className="text-[11px] text-muted-foreground underline">Додати ще</button>
+          </div>
+        </div>
+      )}
+
+      {/* Accounts list */}
+      {loading ? (
+        <Spinner />
+      ) : accounts.length === 0 ? (
+        <div className="flex flex-col items-center gap-3 py-10 text-center">
+          <div className="w-12 h-12 rounded-2xl bg-secondary flex items-center justify-center">
+            <WifiOff size={22} className="text-muted-foreground" />
+          </div>
+          <p className="text-sm font-medium">Немає підключених аккаунтів</p>
+          <p className="text-[11px] text-muted-foreground max-w-[240px]">
+            Додайте Telegram-аккаунт щоб використовувати його для розсилок у каналах.
+          </p>
+        </div>
+      ) : (
+        <div className="space-y-2">
+          {accounts.map(acc => (
+            <div key={acc.id} className="rounded-2xl border border-border bg-card p-3 flex items-center gap-3">
+              <div className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0">
+                <Smartphone size={16} className="text-muted-foreground" />
+              </div>
+              <div className="flex-1 min-w-0">
+                <p className="text-[13px] font-medium truncate">{acc.phoneNumber}</p>
+                <div className="flex items-center gap-2 mt-0.5">
+                  <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded-md', STATUS_COLOR[acc.status])}>
+                    {STATUS_LABEL[acc.status]}
+                  </span>
+                  {acc.lastActiveAt && (
+                    <span className="text-[10px] text-muted-foreground">
+                      {new Date(acc.lastActiveAt).toLocaleDateString('uk-UA')}
+                    </span>
+                  )}
+                </div>
+                {acc.errorMessage && (
+                  <p className="text-[10px] text-red-400 mt-0.5 truncate">{acc.errorMessage}</p>
+                )}
+              </div>
+              <button
+                onClick={() => handleDelete(acc.id)}
+                className="p-2 rounded-xl hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
+              >
+                <Trash2 size={14} />
+              </button>
+            </div>
+          ))}
+        </div>
       )}
     </div>
   );

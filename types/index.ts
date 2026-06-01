@@ -387,6 +387,29 @@ export interface TelegramChannel {
   updatedAt: string;
 }
 
+// ─── Telegram Account (MTProto user account) ─────────────────────────────────
+
+export type TelegramAccountStatus =
+  | 'pending'
+  | 'code_sent'
+  | 'active'
+  | 'flood_wait'
+  | 'banned'
+  | 'invalid';
+
+export interface TelegramAccount {
+  id: string;
+  userId: string;
+  phoneNumber: string;
+  sessionString?: string;
+  status: TelegramAccountStatus;
+  floodWaitUntil?: string;
+  lastActiveAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Telegram Bot ─────────────────────────────────────────────────────────────
 
 export type BotStatus = 'connected' | 'expired' | 'error';
