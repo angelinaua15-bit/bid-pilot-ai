@@ -1,6 +1,8 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getManualPayments, reviewManualPayment } from '@/lib/db';
+import { getManualPayments, reviewManualPayment, getUserById } from '@/lib/db';
 import { assertAdmin } from '@/lib/auth';
+import { notifyPaymentApproved, notifyPaymentRejected } from '@/services/payment.service';
+import type { SubscriptionPlanSaaS } from '@/types';
 
 export async function GET(req: NextRequest) {
   try {
@@ -25,6 +27,19 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Invalid action' }, { status: 400 });
     }
     const payment = await reviewManualPayment(paymentId, action === 'approve' ? 'approved' : 'rejected', requesterId);
+
+    // Notify user via Telegram bot (fire-and-forget)
+    if (payment) {
+      const user = await getUserById(payment.userId);
+      if (user?.telegramId) {
+        if (action === 'approve') {
+          notifyPaymentApproved(user.telegramId, payment.plan as SubscriptionPlanSaaS).catch(() => {});
+        } else {
+          notifyPaymentRejected(user.telegramId).catch(() => {});
+        }
+      }
+    }
+
     return NextResponse.json({ ok: true, payment });
   } catch (err) {
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });

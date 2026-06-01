@@ -15,7 +15,7 @@ import { defaultAutoBidSettings, mockLogs, mockBids } from '@/lib/mock-data';
 import type {
   AutoBidSettings, AutoBidLog, GeneratedBid, Application,
   SaaSUser, FreelanceAccount, FreelanceFilter,
-  TelegramChannel, TelegramBot, Campaign, CampaignMessage,
+  TelegramChannel, TelegramBot, TelegramAccount, Campaign, CampaignMessage,
   SaaSDashboardStats, PaymentSetting, ManualPayment, ManualPaymentPlan,
 } from '@/types';
 import { OWNER_TELEGRAM_ID } from '@/types';
@@ -634,7 +634,126 @@ export async function incrementBidCount(userId: string): Promise<void> {
   }
 }
 
-// ─── SaaS: Telegram Channels ──────────────────────────────────────────────────
+// ─── SaaS: Telegram Accounts (MTProto) ────────────────────────────────────────
+
+function mapTelegramAccount(r: Record<string, unknown>): TelegramAccount {
+  return {
+    id:              r.id as string,
+    userId:          r.user_id as string,
+    phoneNumber:     r.phone_number as string,
+    sessionString:   r.session_string as string | undefined,
+    status:          (r.status as TelegramAccount['status']) ?? 'pending',
+    floodWaitUntil:  r.flood_wait_until as string | undefined,
+    lastActiveAt:    r.last_active_at as string | undefined,
+    errorMessage:    r.error_message as string | undefined,
+    createdAt:       r.created_at as string,
+    updatedAt:       r.updated_at as string,
+  };
+}
+
+export async function getTelegramAccounts(userId: string): Promise<TelegramAccount[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db
+      .from('telegram_accounts')
+      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      .eq('user_id', userId)
+      .order('created_at', { ascending: false });
+    return (data ?? []).map(mapTelegramAccount);
+  } catch (err) { console.error('[db] getTelegramAccounts error:', err); return []; }
+}
+
+export async function getAllTelegramAccounts(): Promise<TelegramAccount[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db
+      .from('telegram_accounts')
+      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      .order('created_at', { ascending: false });
+    return (data ?? []).map(mapTelegramAccount);
+  } catch (err) { console.error('[db] getAllTelegramAccounts error:', err); return []; }
+}
+
+export async function getTelegramAccountById(id: string): Promise<TelegramAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('telegram_accounts').select('*').eq('id', id).maybeSingle();
+    return data ? mapTelegramAccount(data as Record<string, unknown>) : null;
+  } catch (err) { console.error('[db] getTelegramAccountById error:', err); return null; }
+}
+
+export async function upsertTelegramAccount(
+  account: Pick<TelegramAccount, 'userId' | 'phoneNumber'> & Partial<TelegramAccount>
+): Promise<TelegramAccount | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const payload: Record<string, unknown> = {
+      user_id:          account.userId,
+      phone_number:     account.phoneNumber,
+      status:           account.status ?? 'pending',
+      session_string:   account.sessionString ?? null,
+      flood_wait_until: account.floodWaitUntil ?? null,
+      last_active_at:   account.lastActiveAt ?? null,
+      error_message:    account.errorMessage ?? null,
+      updated_at:       now,
+    };
+    if (account.id) {
+      const { data, error } = await db.from('telegram_accounts').update(payload).eq('id', account.id).select('*').single();
+      if (error) throw error;
+      return mapTelegramAccount(data as Record<string, unknown>);
+    } else {
+      const { data, error } = await db.from('telegram_accounts')
+        .upsert({ ...payload, created_at: now }, { onConflict: 'user_id,phone_number' })
+        .select('*').single();
+      if (error) throw error;
+      return mapTelegramAccount(data as Record<string, unknown>);
+    }
+  } catch (err) { console.error('[db] upsertTelegramAccount error:', err); return null; }
+}
+
+export async function deleteTelegramAccount(id: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('telegram_accounts').delete().eq('id', id);
+  } catch (err) { console.error('[db] deleteTelegramAccount error:', err); }
+}
+
+export async function saveTelegramOtpSession(accountId: string, phoneHash: string): Promise<string | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    // Delete any existing OTP session for this account first
+    await db.from('telegram_otp_sessions').delete().eq('account_id', accountId);
+    const { data, error } = await db.from('telegram_otp_sessions')
+      .insert({ account_id: accountId, phone_hash: phoneHash })
+      .select('id').single();
+    if (error) throw error;
+    return data?.id ?? null;
+  } catch (err) { console.error('[db] saveTelegramOtpSession error:', err); return null; }
+}
+
+export async function getTelegramOtpSession(accountId: string): Promise<{ phoneHash: string } | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db.from('telegram_otp_sessions')
+      .select('phone_hash, expires_at')
+      .eq('account_id', accountId)
+      .maybeSingle();
+    if (!data) return null;
+    // Check expiry
+    if (new Date(data.expires_at as string) < new Date()) return null;
+    return { phoneHash: data.phone_hash as string };
+  } catch (err) { console.error('[db] getTelegramOtpSession error:', err); return null; }
+}
+
+// ─── SaaS: Telegram Channels ──────────────────────────────────────���───────────
 
 /** Fetch all channels (up to 10 000). Prefer getTelegramChannelsPaginated for UI. */
 export async function getTelegramChannels(options?: { status?: string; limit?: number }): Promise<TelegramChannel[]> {
@@ -825,6 +944,7 @@ export async function createCampaign(c: Omit<Campaign, 'id' | 'createdAt' | 'upd
     const now = new Date().toISOString();
     const { data, error } = await db.from('campaigns').insert({
       user_id:            c.userId,
+      account_id:         c.accountId ?? null,
       title:              c.title,
       message_text:       c.messageText,
       media_url:          c.mediaUrl ?? null,
@@ -853,6 +973,59 @@ export async function updateCampaignStatus(id: string, status: string): Promise<
   } catch (err) { console.error('[db] updateCampaignStatus error:', err); }
 }
 
+/** Fetch campaigns that are ready to dispatch (draft/scheduled and due). */
+export async function getCampaignsDue(): Promise<Campaign[]> {
+  if (!isSupabaseConfigured) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const now = new Date().toISOString();
+    const { data } = await db
+      .from('campaigns')
+      .select('*')
+      .or(`status.eq.draft,and(status.eq.scheduled,scheduled_at.lte.${now})`)
+      .order('created_at', { ascending: true });
+    return (data ?? []).map(mapCampaign);
+  } catch (err) { console.error('[db] getCampaignsDue error:', err); return []; }
+}
+
+/** Save a per-channel result row for a campaign. */
+export async function saveCampaignMessage(
+  msg: Omit<CampaignMessage, 'id' | 'createdAt'>
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('campaign_messages').insert({
+      campaign_id:  msg.campaignId,
+      channel_id:   msg.channelId,
+      status:       msg.status,
+      error_reason: msg.errorReason ?? null,
+      sent_at:      msg.sentAt ?? null,
+      created_at:   new Date().toISOString(),
+    });
+  } catch (err) { console.error('[db] saveCampaignMessage error:', err); }
+}
+
+/** Increment sent_count or failed_count + update updated_at. */
+export async function incrementCampaignCounters(
+  id: string,
+  field: 'sent_count' | 'failed_count'
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.rpc('increment_campaign_counter', { campaign_id: id, col: field });
+  } catch {
+    // fallback: read-modify-write
+    try {
+      const db2 = getDb()!;
+      const { data } = await db2.from('campaigns').select(field).eq('id', id).single();
+      const current = ((data as Record<string, unknown>)?.[field] as number) ?? 0;
+      await db2.from('campaigns').update({ [field]: current + 1, updated_at: new Date().toISOString() }).eq('id', id);
+    } catch (err2) { console.error('[db] incrementCampaignCounters fallback error:', err2); }
+  }
+}
+
 export async function getCampaignMessages(campaignId: string): Promise<CampaignMessage[]> {
   if (!isSupabaseConfigured) return [];
   try {
@@ -866,6 +1039,7 @@ function mapCampaign(r: Record<string, unknown>): Campaign {
   return {
     id:               r.id as string,
     userId:           r.user_id as string,
+    accountId:        r.account_id as string | undefined,
     title:            r.title as string,
     messageText:      r.message_text as string,
     mediaUrl:         r.media_url as string | undefined,
@@ -997,7 +1171,7 @@ export async function deletePaymentSetting(id: string): Promise<void> {
   } catch (err) { console.error('[db] deletePaymentSetting error:', err); }
 }
 
-// ─── Manual Payments ──────────────────────────────────────────────────────────
+// ─── Manual Payments ──────────���───────────────────────────────────────────────
 
 function mapManualPayment(r: Record<string, unknown>): ManualPayment {
   return {

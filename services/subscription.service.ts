@@ -1,73 +1,50 @@
 /**
  * services/subscription.service.ts
  * Subscription logic and generation limit enforcement.
- *
- * TODO: Connect to DB (Prisma) for real usage tracking.
+ * Uses SaaSUser.subscriptionPlan + applicationsThisMonth from the DB.
  */
 
-import type { Subscription, PlanId } from '@/types';
-import { mockUser } from '@/lib/mock-data';
+import type { SubscriptionPlanSaaS } from '@/types';
+import { getUserById, updateUserPlan } from '@/lib/db';
+
+/** Monthly bid-generation limits per plan */
+export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, number> = {
+  free:      10,
+  pro:       200,
+  agency:    1000,
+  unlimited: Infinity,
+};
 
 /**
- * Get current subscription for a user.
- */
-export async function getUserSubscription(userId: string): Promise<Subscription | null> {
-  // TODO: Replace with Prisma query:
-  // return prisma.subscription.findUnique({ where: { userId } });
-
-  // MOCK:
-  await new Promise((r) => setTimeout(r, 200));
-  console.log('[SubscriptionService] getSubscription', { userId });
-  return mockUser.subscription ?? null;
-}
-
-/**
- * Check if user has generations remaining. Returns true if allowed.
+ * Check if user has bid generations remaining this month. Returns true if allowed.
  */
 export async function checkGenerationLimit(userId: string): Promise<boolean> {
-  const sub = await getUserSubscription(userId);
-  if (!sub) return false;
-  return sub.generationsUsed < sub.generationsLimit;
+  const user = await getUserById(userId);
+  if (!user) return false;
+  if (user.subscriptionStatus !== 'active') return false;
+  const limit = PLAN_LIMITS[user.subscriptionPlan] ?? 0;
+  return user.applicationsThisMonth < limit;
 }
 
 /**
- * Increment the used generation count.
+ * Activate a subscription plan for a user (updates users table).
  */
-export async function incrementGenerationUsage(userId: string): Promise<void> {
-  // TODO: Replace with Prisma update:
-  // await prisma.subscription.update({
-  //   where: { userId },
-  //   data: { generationsUsed: { increment: 1 } }
-  // });
-
-  console.log('[SubscriptionService] incrementUsage', { userId });
+export async function activateSubscription(
+  userId: string,
+  plan: SubscriptionPlanSaaS,
+  expiresAt?: string,
+): Promise<void> {
+  const expires = expiresAt ?? (() => {
+    const d = new Date();
+    d.setMonth(d.getMonth() + 1);
+    return d.toISOString();
+  })();
+  await updateUserPlan(userId, plan, expires);
 }
 
 /**
- * Activate a subscription plan for a user.
+ * Returns the generation limit for a given plan.
  */
-export async function activateSubscription(userId: string, planId: PlanId): Promise<Subscription> {
-  // TODO: Replace with Prisma create/update
-  const now = new Date();
-  const expires = new Date(now.getFullYear(), now.getMonth() + 1, now.getDate());
-
-  console.log('[SubscriptionService] activateSubscription', { userId, planId });
-
-  const limits: Record<PlanId, number> = {
-    free: 10,
-    basic: 100,
-    pro: 500,
-    agency: 2000,
-  };
-
-  return {
-    id: `sub_${Date.now()}`,
-    userId,
-    plan: planId,
-    status: 'active',
-    generationsLimit: limits[planId],
-    generationsUsed: 0,
-    startedAt: now.toISOString(),
-    expiresAt: expires.toISOString(),
-  };
+export function getPlanLimit(plan: SubscriptionPlanSaaS): number {
+  return PLAN_LIMITS[plan] ?? 0;
 }

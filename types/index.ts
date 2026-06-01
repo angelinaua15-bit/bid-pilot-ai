@@ -387,6 +387,29 @@ export interface TelegramChannel {
   updatedAt: string;
 }
 
+// ─── Telegram Account (MTProto user account) ─────────────────────────────────
+
+export type TelegramAccountStatus =
+  | 'pending'
+  | 'code_sent'
+  | 'active'
+  | 'flood_wait'
+  | 'banned'
+  | 'invalid';
+
+export interface TelegramAccount {
+  id: string;
+  userId: string;
+  phoneNumber: string;
+  sessionString?: string;
+  status: TelegramAccountStatus;
+  floodWaitUntil?: string;
+  lastActiveAt?: string;
+  errorMessage?: string;
+  createdAt: string;
+  updatedAt: string;
+}
+
 // ─── Telegram Bot ─────────────────────────────────────────────────────────────
 
 export type BotStatus = 'connected' | 'expired' | 'error';
@@ -408,6 +431,8 @@ export type ScheduleType = 'now' | 'scheduled' | 'interval';
 export interface Campaign {
   id: string;
   userId: string;
+  /** Telegram MTProto account used to send messages */
+  accountId?: string;
   title: string;
   messageText: string;
   mediaUrl?: string;
@@ -467,7 +492,7 @@ export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   unlimited: { applicationsPerMonth: 999999,   accounts: 999,  campaigns: true,  adminAccess: true  },
 };
 
-// ─── Owner ────────────────────────────────────────────────────────────────────
+// ─── Owner ────────────────────────────────────────────────────────────────���───
 
 /** Telegram user ID of the platform owner — has unlimited access + full admin panel. */
 export const OWNER_TELEGRAM_ID = 6237272293;
