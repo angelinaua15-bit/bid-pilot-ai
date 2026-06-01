@@ -855,6 +855,50 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, message: 'Auto-loop stopped' })
     }
 
+    // ── Telegram MTProto: send OTP ────────────────────────────────────────────
+    if (method === 'POST' && pathname === '/telegram/send-code') {
+      try {
+        const body = await readBody(req)
+        const { phoneNumber } = body as { phoneNumber?: string }
+        if (!phoneNumber) return json(res, 400, { ok: false, error: 'phoneNumber is required' })
+        const { sendTelegramCode } = await import('../services/telegram-mtproto.service')
+        const result = await sendTelegramCode(phoneNumber)
+        return json(res, 200, { ok: true, phoneHash: result.phoneHash, isCodeViaApp: result.isCodeViaApp })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        addLog({ level: 'error', message: `[MTProto] sendCode error: ${message}` })
+        return json(res, 500, { ok: false, error: message })
+      }
+    }
+
+    // ── Telegram MTProto: verify OTP (+ optional 2FA) ─────────────────────────
+    if (method === 'POST' && pathname === '/telegram/verify-code') {
+      try {
+        const body = await readBody(req)
+        const { phoneNumber, phoneHash, code, password } = body as {
+          phoneNumber?: string
+          phoneHash?:   string
+          code?:        string
+          password?:    string
+        }
+        if (!phoneNumber || !phoneHash || !code) {
+          return json(res, 400, { ok: false, error: 'phoneNumber, phoneHash and code are required' })
+        }
+        const { signInWithCode } = await import('../services/telegram-mtproto.service')
+        const result = await signInWithCode(phoneNumber, phoneHash, code, password)
+        addLog({ level: 'success', message: `[MTProto] Account signed in: ${phoneNumber}` })
+        return json(res, 200, { ok: true, sessionString: result.sessionString })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        addLog({ level: 'error', message: `[MTProto] verifyCode error: ${message}` })
+        // Signal 2FA requirement so the caller can prompt for the password
+        if (message.includes('SESSION_PASSWORD_NEEDED')) {
+          return json(res, 422, { ok: false, error: message, requires2fa: true })
+        }
+        return json(res, 500, { ok: false, error: message })
+      }
+    }
+
     // ── Freelancehunt connect (browser login) ─────────────────────────────────
     if (method === 'POST' && pathname === '/connect/freelancehunt/start') {
       return await handleConnectStart(res)
