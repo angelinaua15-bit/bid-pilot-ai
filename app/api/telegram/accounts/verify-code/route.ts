@@ -1,26 +1,47 @@
 /**
  * POST /api/telegram/accounts/verify-code
  *
- * Delegates the Telegram MTProto signIn call to the worker,
- * receives the session string back, and persists it.
+ * Calls GramJS MTProto directly (no worker proxy) to verify the OTP.
+ * Persists the StringSession in telegram_accounts and marks it active.
  *
  * Body: { accountId, code, password? }
  */
 import { NextRequest, NextResponse } from 'next/server';
-import { getTelegramAccountById, getTelegramOtpSession, upsertTelegramAccount } from '@/lib/db';
-import { config } from '@/lib/config';
+import {
+  getTelegramAccountById,
+  getTelegramOtpSession,
+  upsertTelegramAccount,
+} from '@/lib/db';
+import { signInWithCode } from '@/services/telegram-mtproto.service';
 
 export async function POST(req: NextRequest) {
+  let accountId: string | undefined;
+
   try {
     const body = await req.json();
-    const { accountId, code, password } = body as {
+    const { accountId: aid, code, password } = body as {
       accountId?: string;
-      code?: string;
-      password?: string;
+      code?:      string;
+      password?:  string;
     };
+    accountId = aid;
 
     if (!accountId || !code) {
-      return NextResponse.json({ ok: false, error: 'accountId and code are required' }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: 'accountId and code are required' },
+        { status: 400 }
+      );
+    }
+
+    // Validate env vars up front
+    const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0);
+    const apiHash = process.env.TELEGRAM_API_HASH ?? '';
+    if (!apiId || !apiHash) {
+      console.error('[verify-code] TELEGRAM_API_ID or TELEGRAM_API_HASH not set');
+      return NextResponse.json(
+        { ok: false, error: 'Telegram API credentials not configured on server' },
+        { status: 503 }
+      );
     }
 
     const [account, otpSession] = await Promise.all([
@@ -32,42 +53,24 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
     if (!otpSession) {
-      return NextResponse.json({ ok: false, error: 'OTP session expired — please request a new code' }, { status: 400 });
+      return NextResponse.json(
+        { ok: false, error: 'OTP session expired — please request a new code' },
+        { status: 400 }
+      );
     }
 
-    // Forward to worker
-    const workerUrl = config.worker.url;
-    const workerRes = await fetch(`${workerUrl}/telegram/verify-code`, {
-      method:  'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization:  `Bearer ${process.env.AUTOMATION_SECRET ?? ''}`,
-      },
-      body: JSON.stringify({
-        accountId,
-        phoneNumber: account.phoneNumber,
-        phoneHash:   otpSession.phoneHash,
-        code,
-        password,
-      }),
-    });
+    console.log('[verify-code] verifying code for', account.phoneNumber);
 
-    if (!workerRes.ok) {
-      const err = await workerRes.json().catch(() => ({ error: 'Worker error' }));
-      const errMsg = (err as { error?: string }).error ?? 'Verification failed';
-      // Mark as invalid if auth fails permanently
-      if (/password|2fa|SESSION_PASSWORD_NEEDED/i.test(errMsg)) {
-        await upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: '2FA required — provide password' });
-        return NextResponse.json({ ok: false, error: errMsg, requires2fa: true }, { status: 422 });
-      }
-      await upsertTelegramAccount({ ...account, status: 'invalid', errorMessage: errMsg });
-      return NextResponse.json({ ok: false, error: errMsg }, { status: 400 });
-    }
+    const { sessionString } = await signInWithCode(
+      account.phoneNumber,
+      otpSession.phoneHash,
+      code,
+      password,
+    );
 
-    const data = await workerRes.json() as { sessionString?: string };
-    const sessionString = data.sessionString ?? '';
+    console.log('[verify-code] sign-in successful for', account.phoneNumber);
 
-    // Persist session + mark active
+    // Persist session and mark account active
     await upsertTelegramAccount({
       ...account,
       status:        'active',
@@ -78,24 +81,60 @@ export async function POST(req: NextRequest) {
 
     return NextResponse.json({ ok: true, message: 'Account connected' });
   } catch (err) {
-    // Dev mock: accept any code for non-production
-    if (process.env.NODE_ENV !== 'production') {
-      const body = await req.json().catch(() => ({})) as { accountId?: string };
-      if (body.accountId) {
-        const account = await getTelegramAccountById(body.accountId);
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[verify-code] error:', message);
+
+    // 2FA required — tell the frontend to show the password field
+    if (message.includes('SESSION_PASSWORD_NEEDED')) {
+      if (accountId) {
+        const account = await getTelegramAccountById(accountId).catch(() => null);
         if (account) {
           await upsertTelegramAccount({
             ...account,
-            status:       'active',
-            sessionString: 'mock_session_string_dev',
-            lastActiveAt:  new Date().toISOString(),
-            errorMessage:  undefined,
-          });
-          return NextResponse.json({ ok: true, message: 'Account connected (dev mock)' });
+            status:       'code_sent',
+            errorMessage: '2FA password required',
+          }).catch(() => {});
         }
       }
+      return NextResponse.json(
+        { ok: false, error: '2FA password required', requires2fa: true },
+        { status: 422 }
+      );
     }
-    const message = err instanceof Error ? err.message : String(err);
-    return NextResponse.json({ ok: false, error: message }, { status: 500 });
+
+    // Map other well-known errors
+    let friendlyError = message;
+    let status = 500;
+
+    if (/PHONE_CODE_INVALID|CODE_INVALID/i.test(message)) {
+      friendlyError = 'Invalid verification code';
+      status = 400;
+    } else if (/PHONE_CODE_EXPIRED|CODE_EXPIRED/i.test(message)) {
+      friendlyError = 'Verification code expired — please request a new one';
+      status = 400;
+    } else if (/FLOOD_WAIT/i.test(message)) {
+      const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
+      friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
+      status = 429;
+    } else if (/PASSWORD_HASH_INVALID/i.test(message)) {
+      friendlyError = 'Incorrect 2FA password';
+      status = 400;
+    } else if (/API_ID_INVALID|api_id/i.test(message)) {
+      friendlyError = 'Invalid Telegram API credentials';
+      status = 503;
+    }
+
+    if (accountId) {
+      const account = await getTelegramAccountById(accountId).catch(() => null);
+      if (account) {
+        await upsertTelegramAccount({
+          ...account,
+          status:       'invalid',
+          errorMessage: friendlyError,
+        }).catch(() => {});
+      }
+    }
+
+    return NextResponse.json({ ok: false, error: friendlyError }, { status });
   }
 }
