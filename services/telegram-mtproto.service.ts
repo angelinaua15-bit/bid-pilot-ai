@@ -2,24 +2,35 @@
  * telegram-mtproto.service.ts
  *
  * Wraps GramJS (TelegramClient) to:
- *  1. sendCode   — send OTP to a phone number, returns phoneHash
- *  2. signIn     — confirm OTP (+ optional 2FA password), returns StringSession
- *  3. disconnect — gracefully close the client
+ *  1. sendTelegramCode — send OTP to a phone number, returns phoneHash + sessionString
+ *  2. signInWithCode   — confirm OTP (+ optional 2FA password), returns StringSession
+ *  3. sendMessageMTProto — send a message using an existing session
  *
- * Each operation creates a fresh short-lived TelegramClient using a StringSession.
- * Persistent session strings are stored in the DB by the caller (worker/server.ts).
+ * Each operation creates a fresh short-lived TelegramClient.
+ * The session string after sendCode is stored in the DB so that signIn
+ * can reuse the same DC connection data.
  */
 
 import { TelegramClient } from 'telegram'
 import { StringSession } from 'telegram/sessions/index.js'
 import { Api } from 'telegram/tl/index.js'
 
-const API_ID   = Number(process.env.TELEGRAM_API_ID   ?? 0)
-const API_HASH =        process.env.TELEGRAM_API_HASH  ?? ''
+function getCredentials() {
+  const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0)
+  const apiHash = process.env.TELEGRAM_API_HASH ?? ''
+  console.log('[telegram-mtproto] TELEGRAM_API_ID present:', apiId > 0)
+  console.log('[telegram-mtproto] TELEGRAM_API_HASH present:', apiHash.length > 0)
+  if (!apiId || !apiHash) {
+    throw new Error('TELEGRAM_API_ID or TELEGRAM_API_HASH missing')
+  }
+  return { apiId, apiHash }
+}
 
 export interface SendCodeResult {
-  phoneHash:  string
-  isCodeViaApp: boolean
+  phoneHash:     string
+  isCodeViaApp:  boolean
+  /** Serialised session after DC resolution — pass back to signInWithCode */
+  sessionString: string
 }
 
 export interface SignInResult {
@@ -27,37 +38,43 @@ export interface SignInResult {
 }
 
 /**
- * Send a login code to the phone number via Telegram's MTProto API.
- * Returns the phoneHash needed for signIn.
+ * Send a login code to the phone number via Telegram MTProto.
+ * Uses the high-level client.sendCode() which handles DC migration automatically.
+ * Returns the phoneHash AND the session string (DC info) needed for signIn.
  */
 export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeResult> {
-  if (!API_ID || !API_HASH) {
-    throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set')
-  }
+  const { apiId, apiHash } = getCredentials()
 
   const session = new StringSession('')
-  const client  = new TelegramClient(session, API_ID, API_HASH, {
-    connectionRetries: 3,
+  const client  = new TelegramClient(session, apiId, apiHash, {
+    connectionRetries: 5,
     useWSS: false,
+    baseLogger: { // suppress verbose GramJS logs
+      levels: ['error'],
+      trace: () => {}, debug: () => {}, info: () => {},
+      warn:  () => {}, error: (msg: string) => console.error('[gramjs]', msg),
+    } as never,
   })
 
+  console.log('[telegram/send-code] connecting...')
   await client.connect()
+  console.log('[telegram/send-code] connected, sending code to', phoneNumber)
+
   try {
-    const result = await client.invoke(
-      new Api.auth.SendCode({
-        phoneNumber,
-        apiId:   API_ID,
-        apiHash: API_HASH,
-        settings: new Api.CodeSettings({
-          allowFlashcall: false,
-          currentNumber:  true,
-          allowAppHash:   true,
-        }),
-      })
+    const result = await client.sendCode(
+      { apiId, apiHash },
+      phoneNumber,
     )
+
+    // Serialise the session AFTER sendCode so DC routing data is preserved
+    const sessionString = session.save() as unknown as string
+
+    console.log('[telegram/send-code] code sent successfully, codeType:', result.type)
+
     return {
-      phoneHash:    (result as Api.auth.SentCode).phoneCodeHash,
-      isCodeViaApp: (result as Api.auth.SentCode).type?.className === 'auth.SentCodeTypeApp',
+      phoneHash:    result.phoneCodeHash,
+      isCodeViaApp: result.type === 'app',
+      sessionString,
     }
   } finally {
     await client.disconnect()
@@ -94,25 +111,34 @@ export async function sendMessageMTProto(
 }
 
 /**
- * Confirm the OTP (and optional 2FA cloud password), returns the StringSession.
+ * Confirm the OTP (and optional 2FA cloud password), returns the final StringSession.
+ * Pass the sessionString from sendTelegramCode so the client reconnects to the same DC.
  */
 export async function signInWithCode(
-  phoneNumber: string,
-  phoneHash:   string,
-  code:        string,
-  password?:   string
+  phoneNumber:        string,
+  phoneHash:          string,
+  code:               string,
+  password?:          string,
+  existingSession?:   string,
 ): Promise<SignInResult> {
-  if (!API_ID || !API_HASH) {
-    throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set')
-  }
+  const { apiId, apiHash } = getCredentials()
 
-  const session = new StringSession('')
-  const client  = new TelegramClient(session, API_ID, API_HASH, {
-    connectionRetries: 3,
+  // Restore the session from sendCode if available — preserves DC routing
+  const session = new StringSession(existingSession ?? '')
+  const client  = new TelegramClient(session, apiId, apiHash, {
+    connectionRetries: 5,
     useWSS: false,
+    baseLogger: {
+      levels: ['error'],
+      trace: () => {}, debug: () => {}, info: () => {},
+      warn:  () => {}, error: (msg: string) => console.error('[gramjs]', msg),
+    } as never,
   })
 
+  console.log('[telegram/verify-code] connecting...')
   await client.connect()
+  console.log('[telegram/verify-code] connected, signing in', phoneNumber)
+
   try {
     try {
       await client.invoke(
@@ -124,21 +150,23 @@ export async function signInWithCode(
       )
     } catch (signInErr: unknown) {
       const msg = (signInErr as Error)?.message ?? ''
-      // 2FA required
       if (msg.includes('SESSION_PASSWORD_NEEDED')) {
         if (!password) {
           throw new Error('SESSION_PASSWORD_NEEDED')
         }
-        // Fetch the SRP parameters and check password
+        console.log('[telegram/verify-code] 2FA required, checking password...')
         const srpResult = await client.invoke(new Api.account.GetPassword())
-        const srpCheck  = await (await import('telegram/Password.js')).computeCheck(srpResult, password)
+        const { computeCheck } = await import('telegram/Password.js')
+        const srpCheck = await computeCheck(srpResult, password)
         await client.invoke(new Api.auth.CheckPassword({ password: srpCheck }))
       } else {
         throw signInErr
       }
     }
 
-    return { sessionString: session.save() as unknown as string }
+    const finalSession = session.save() as unknown as string
+    console.log('[telegram/verify-code] sign-in successful')
+    return { sessionString: finalSession }
   } finally {
     await client.disconnect()
   }
