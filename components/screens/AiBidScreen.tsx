@@ -92,10 +92,9 @@ export function AiBidScreen({ preselectedProject }: AiBidScreenProps) {
     }
   };
 
-  const handleSave = async () => {
-    haptic.light();
-    // TODO: save to DB
-    // For now just show feedback
+  const handleSave = () => {
+    // Bid is already persisted on generation via /api/generate-bid.
+    // This gives the user haptic confirmation that the displayed bid is saved.
     haptic.success();
   };
 

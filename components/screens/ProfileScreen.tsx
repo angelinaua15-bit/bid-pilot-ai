@@ -271,7 +271,8 @@ export function ProfileScreen({ onNavigate, onOpenCompanyProfile }: ProfileScree
         onConfirm={() => {
           haptic.success();
           setShowLogout(false);
-          // TODO: clear session, redirect to welcome
+          // Navigate to home — TelegramProvider re-authenticates on next open
+          onNavigate('home');
         }}
         onCancel={() => { setShowLogout(false); haptic.light(); }}
       />

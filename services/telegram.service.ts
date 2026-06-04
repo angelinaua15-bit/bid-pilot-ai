@@ -1,8 +1,7 @@
 /**
  * services/telegram.service.ts
  * Server-side Telegram Bot API integration.
- *
- * TODO: Use real TELEGRAM_BOT_TOKEN.
+ * Uses TELEGRAM_BOT_TOKEN from environment variables.
  */
 
 import type { TelegramUser } from '@/types';
