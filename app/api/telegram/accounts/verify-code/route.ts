@@ -66,6 +66,7 @@ export async function POST(req: NextRequest) {
       otpSession.phoneHash,
       code,
       password,
+      otpSession.sessionString ?? undefined,
     );
 
     console.log('[verify-code] sign-in successful for', account.phoneNumber);

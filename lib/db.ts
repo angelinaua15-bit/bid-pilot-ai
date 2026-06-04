@@ -724,32 +724,41 @@ export async function deleteTelegramAccount(id: string): Promise<void> {
   } catch (err) { console.error('[db] deleteTelegramAccount error:', err); }
 }
 
-export async function saveTelegramOtpSession(accountId: string, phoneHash: string): Promise<string | null> {
+export async function saveTelegramOtpSession(
+  accountId:     string,
+  phoneHash:     string,
+  sessionString: string,
+): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
   try {
     const db = getDb(); if (!db) return null;
     // Delete any existing OTP session for this account first
     await db.from('telegram_otp_sessions').delete().eq('account_id', accountId);
     const { data, error } = await db.from('telegram_otp_sessions')
-      .insert({ account_id: accountId, phone_hash: phoneHash })
+      .insert({ account_id: accountId, phone_hash: phoneHash, session_string: sessionString })
       .select('id').single();
     if (error) throw error;
     return data?.id ?? null;
   } catch (err) { console.error('[db] saveTelegramOtpSession error:', err); return null; }
 }
 
-export async function getTelegramOtpSession(accountId: string): Promise<{ phoneHash: string } | null> {
+export async function getTelegramOtpSession(
+  accountId: string,
+): Promise<{ phoneHash: string; sessionString: string | null } | null> {
   if (!isSupabaseConfigured) return null;
   try {
     const db = getDb(); if (!db) return null;
     const { data } = await db.from('telegram_otp_sessions')
-      .select('phone_hash, expires_at')
+      .select('phone_hash, session_string, expires_at')
       .eq('account_id', accountId)
       .maybeSingle();
     if (!data) return null;
     // Check expiry
     if (new Date(data.expires_at as string) < new Date()) return null;
-    return { phoneHash: data.phone_hash as string };
+    return {
+      phoneHash:     data.phone_hash     as string,
+      sessionString: data.session_string as string | null,
+    };
   } catch (err) { console.error('[db] getTelegramOtpSession error:', err); return null; }
 }
 

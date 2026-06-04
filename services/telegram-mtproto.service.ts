@@ -69,11 +69,11 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     // Serialise the session AFTER sendCode so DC routing data is preserved
     const sessionString = session.save() as unknown as string
 
-    console.log('[telegram/send-code] code sent successfully, codeType:', result.type)
+    console.log('[telegram/send-code] code sent successfully')
 
     return {
       phoneHash:    result.phoneCodeHash,
-      isCodeViaApp: result.type === 'app',
+      isCodeViaApp: result.isCodeViaApp ?? false,
       sessionString,
     }
   } finally {
@@ -92,12 +92,10 @@ export async function sendMessageMTProto(
   peer:          string,
   text:          string,
 ): Promise<void> {
-  if (!API_ID || !API_HASH) {
-    throw new Error('TELEGRAM_API_ID and TELEGRAM_API_HASH must be set')
-  }
+  const { apiId, apiHash } = getCredentials()
 
   const session = new StringSession(sessionString)
-  const client  = new TelegramClient(session, API_ID, API_HASH, {
+  const client  = new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 3,
     useWSS: false,
   })
