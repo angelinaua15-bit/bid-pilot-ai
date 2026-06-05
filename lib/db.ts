@@ -19,6 +19,7 @@ import type {
   SaaSDashboardStats, PaymentSetting, ManualPayment, ManualPaymentPlan,
 } from '@/types';
 import { OWNER_TELEGRAM_ID } from '@/types';
+import type { CompanyProfile } from '@/types';
 
 // ─── In-memory fallback store ─────────────────────────────────────────────────
 
@@ -1290,4 +1291,70 @@ export async function getBids(options?: {
     console.error('[db] getBids error:', err);
     return { bids: _memBids.slice(0, limit), total: _memBids.length };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Company profiles
+// ---------------------------------------------------------------------------
+
+export async function getCompanyProfile(userId: string): Promise<CompanyProfile | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db
+      .from('company_profiles')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (!data) return null;
+    return {
+      name:        data.name        as string,
+      tagline:     data.tagline     as string,
+      description: data.description as string,
+      services:   (data.services    as string[]) ?? [],
+      portfolio:  (data.portfolio   as CompanyProfile['portfolio']) ?? [],
+      bidStyle:    data.bid_style   as CompanyProfile['bidStyle'],
+      language:    data.language    as CompanyProfile['language'],
+      contacts:   (data.contacts    as CompanyProfile['contacts']) ?? {},
+    };
+  } catch (err) { console.error('[db] getCompanyProfile error:', err); return null; }
+}
+
+export async function upsertCompanyProfile(
+  userId:  string,
+  profile: Partial<CompanyProfile>,
+): Promise<CompanyProfile | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const row = {
+      user_id:     userId,
+      name:        profile.name        ?? '',
+      tagline:     profile.tagline     ?? '',
+      description: profile.description ?? '',
+      services:    profile.services    ?? [],
+      portfolio:   profile.portfolio   ?? [],
+      bid_style:   profile.bidStyle    ?? 'expert',
+      language:    profile.language    ?? 'uk',
+      contacts:    profile.contacts    ?? {},
+      updated_at:  now,
+    };
+    const { data, error } = await db
+      .from('company_profiles')
+      .upsert(row, { onConflict: 'user_id' })
+      .select('*')
+      .single();
+    if (error) throw error;
+    return {
+      name:        data.name        as string,
+      tagline:     data.tagline     as string,
+      description: data.description as string,
+      services:   (data.services    as string[]) ?? [],
+      portfolio:  (data.portfolio   as CompanyProfile['portfolio']) ?? [],
+      bidStyle:    data.bid_style   as CompanyProfile['bidStyle'],
+      language:    data.language    as CompanyProfile['language'],
+      contacts:   (data.contacts    as CompanyProfile['contacts']) ?? {},
+    };
+  } catch (err) { console.error('[db] upsertCompanyProfile error:', err); return null; }
 }
