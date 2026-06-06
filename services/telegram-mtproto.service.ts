@@ -17,7 +17,7 @@
 import { TelegramClient } from 'telegram'
 import { StringSession } from 'telegram/sessions/index.js'
 import { Api } from 'telegram/tl/index.js'
-import { Logger } from 'telegram/extensions/Logger.js'
+import { Logger, LogLevel } from 'telegram/extensions/Logger.js'
 
 // ---------------------------------------------------------------------------
 // Credentials
@@ -39,9 +39,7 @@ function getCredentials(): { apiId: number; apiHash: string } {
 function makeClient(apiId: number, apiHash: string, sessionStr = ''): TelegramClient {
   const session = new StringSession(sessionStr)
 
-  // Silence GramJS verbose output but keep errors
-  const logger = new Logger()
-  logger.setLevel('error')
+  const logger = new Logger(LogLevel.ERROR)
 
   return new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 3,
