@@ -1358,3 +1358,136 @@ export async function upsertCompanyProfile(
     };
   } catch (err) { console.error('[db] upsertCompanyProfile error:', err); return null; }
 }
+
+// ---------------------------------------------------------------------------
+// Automation jobs
+// ---------------------------------------------------------------------------
+
+export interface AutomationJob {
+  id:                string;
+  userId:            string;
+  freelanceAccountId: string | null;
+  status:            'active' | 'stopped' | 'paused' | 'error';
+  startedAt:         string;
+  stoppedAt:         string | null;
+  lastCycleAt:       string | null;
+  lastCycleError:    string | null;
+  cyclesCompleted:   number;
+  bidsSubmitted:     number;
+  bidsSkipped:       number;
+  bidsFailed:        number;
+  createdAt:         string;
+  updatedAt:         string;
+}
+
+function mapJob(r: Record<string, unknown>): AutomationJob {
+  return {
+    id:                r.id                   as string,
+    userId:            r.user_id              as string,
+    freelanceAccountId: r.freelance_account_id as string | null,
+    status:            r.status               as AutomationJob['status'],
+    startedAt:         r.started_at           as string,
+    stoppedAt:         r.stopped_at           as string | null,
+    lastCycleAt:       r.last_cycle_at        as string | null,
+    lastCycleError:    r.last_cycle_error     as string | null,
+    cyclesCompleted:   Number(r.cycles_completed ?? 0),
+    bidsSubmitted:     Number(r.bids_submitted  ?? 0),
+    bidsSkipped:       Number(r.bids_skipped    ?? 0),
+    bidsFailed:        Number(r.bids_failed     ?? 0),
+    createdAt:         r.created_at            as string,
+    updatedAt:         r.updated_at            as string,
+  };
+}
+
+/** Get the currently active automation job for a user (null if stopped). */
+export async function getActiveAutomationJob(userId: string): Promise<AutomationJob | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db
+      .from('automation_jobs')
+      .select('*')
+      .eq('user_id', userId)
+      .eq('status', 'active')
+      .maybeSingle();
+    return data ? mapJob(data as Record<string, unknown>) : null;
+  } catch (err) { console.error('[db] getActiveAutomationJob error:', err); return null; }
+}
+
+/** Create a new active automation job (stops any existing active job first). */
+export async function createAutomationJob(
+  userId: string,
+  freelanceAccountId?: string,
+): Promise<AutomationJob | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    // Stop any existing active job for this user first
+    await db
+      .from('automation_jobs')
+      .update({ status: 'stopped', stopped_at: now, updated_at: now })
+      .eq('user_id', userId)
+      .eq('status', 'active');
+    // Create a new active job
+    const { data, error } = await db
+      .from('automation_jobs')
+      .insert({
+        user_id:              userId,
+        freelance_account_id: freelanceAccountId ?? null,
+        status:               'active',
+        started_at:           now,
+        created_at:           now,
+        updated_at:           now,
+      })
+      .select('*')
+      .single();
+    if (error) throw error;
+    return mapJob(data as Record<string, unknown>);
+  } catch (err) { console.error('[db] createAutomationJob error:', err); return null; }
+}
+
+/** Update an automation job after each cycle. */
+export async function updateAutomationJob(
+  jobId: string,
+  patch: {
+    status?:          AutomationJob['status'];
+    stoppedAt?:       string;
+    lastCycleAt?:     string;
+    lastCycleError?:  string | null;
+    cyclesCompleted?: number;
+    bidsSubmitted?:   number;
+    bidsSkipped?:     number;
+    bidsFailed?:      number;
+  },
+): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    const now = new Date().toISOString();
+    const row: Record<string, unknown> = { updated_at: now };
+    if (patch.status          !== undefined) row.status            = patch.status;
+    if (patch.stoppedAt       !== undefined) row.stopped_at        = patch.stoppedAt;
+    if (patch.lastCycleAt     !== undefined) row.last_cycle_at     = patch.lastCycleAt;
+    if (patch.lastCycleError  !== undefined) row.last_cycle_error  = patch.lastCycleError;
+    if (patch.cyclesCompleted !== undefined) row.cycles_completed  = patch.cyclesCompleted;
+    if (patch.bidsSubmitted   !== undefined) row.bids_submitted    = patch.bidsSubmitted;
+    if (patch.bidsSkipped     !== undefined) row.bids_skipped      = patch.bidsSkipped;
+    if (patch.bidsFailed      !== undefined) row.bids_failed       = patch.bidsFailed;
+    await db.from('automation_jobs').update(row).eq('id', jobId);
+  } catch (err) { console.error('[db] updateAutomationJob error:', err); }
+}
+
+/** Stop the active automation job for a user. */
+export async function stopAutomationJob(userId: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    const now = new Date().toISOString();
+    await db
+      .from('automation_jobs')
+      .update({ status: 'stopped', stopped_at: now, updated_at: now })
+      .eq('user_id', userId)
+      .eq('status', 'active');
+  } catch (err) { console.error('[db] stopAutomationJob error:', err); }
+}
