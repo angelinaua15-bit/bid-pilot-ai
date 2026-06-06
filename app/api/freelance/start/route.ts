@@ -53,16 +53,30 @@ export async function POST(req: NextRequest) {
     const projJson   = await projRes.json();
     const projects: Record<string, unknown>[] = projJson?.data ?? [];
 
-    // Keyword filtering
+    // Keyword filtering with match tracking
     const allowed  = filter?.allowedKeywords ?? [];
     const blocked  = filter?.blockedKeywords ?? [];
-    const matching = projects.filter((p) => {
+    type FilteredProject = {
+      raw: Record<string, unknown>;
+      matchedKeywords: string[];
+      blockedKeywords: string[];
+      skipReason?: string;
+      filterStage?: string;
+    };
+    const allFiltered: FilteredProject[] = projects.map((p) => {
       const attr = (p.attributes as Record<string, unknown>) ?? {};
       const text = `${attr.name ?? ''} ${attr.description ?? ''}`.toLowerCase();
-      if (blocked.length > 0 && blocked.some((kw) => text.includes(kw.toLowerCase()))) return false;
-      if (allowed.length > 0 && !allowed.some((kw) => text.includes(kw.toLowerCase()))) return false;
-      return true;
+      const hitBlocked = blocked.filter((kw) => text.includes(kw.toLowerCase()));
+      const hitAllowed = allowed.filter((kw) => text.includes(kw.toLowerCase()));
+      if (hitBlocked.length > 0) {
+        return { raw: p, matchedKeywords: [], blockedKeywords: hitBlocked, skipReason: `Заблоковане слово: ${hitBlocked.join(', ')}`, filterStage: 'keyword_block' };
+      }
+      if (allowed.length > 0 && hitAllowed.length === 0) {
+        return { raw: p, matchedKeywords: [], blockedKeywords: [], skipReason: 'Не відповідає ключовим словам', filterStage: 'keyword_allow' };
+      }
+      return { raw: p, matchedKeywords: hitAllowed, blockedKeywords: [] };
     });
+    const matching = allFiltered.filter((f) => !f.skipReason);
 
     const dailyLimit = filter?.dailyLimit ?? 5;
     const toProcess  = matching.slice(0, dailyLimit);
@@ -80,26 +94,28 @@ export async function POST(req: NextRequest) {
     }).catch(() => {});
 
     // Record skipped projects (filtered out)
-    for (const project of projects) {
-      if (matching.includes(project)) continue; // will be processed below
-      const attr = (project.attributes as Record<string, unknown>) ?? {};
-      const appId = randomUUID();
+    for (const fp of allFiltered) {
+      if (!fp.skipReason) continue; // will be processed below
+      const project = fp.raw;
+      const attr    = (project.attributes as Record<string, unknown>) ?? {};
       await saveApplication({
-        id:           appId,
+        id:              randomUUID(),
         userId,
-        projectId:    String(project.id),
-        title:        String(attr.name ?? `Project ${project.id}`),
-        url:          String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`),
-        budget:       Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0),
-        currency:     String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH'),
-        status:       'skipped',
-        createdAt:    now,
-        skippedReason: 'Не відповідає фільтру ключових слів',
-        filterStage:  'keyword_filter',
+        projectId:       String(project.id),
+        title:           String(attr.name ?? `Project ${project.id}`),
+        url:             String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`),
+        budget:          Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0),
+        currency:        String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH'),
+        status:          'skipped',
+        createdAt:       now,
+        skippedReason:   fp.skipReason,
+        filterStage:     fp.filterStage,
+        blockedKeywords: fp.blockedKeywords.length > 0 ? fp.blockedKeywords : undefined,
       }).catch(() => {});
     }
 
-    for (const project of toProcess) {
+    for (const fp of toProcess) {
+      const project  = fp.raw;
       const attr     = (project.attributes as Record<string, unknown>) ?? {};
       const proposal = `Доброго дня! Зацікавив ваш проект "${attr.name}". Маю досвід у подібних задачах, готовий виконати якісно та в строк. Напишіть — обговоримо деталі!`;
       const appId    = randomUUID();
@@ -136,6 +152,7 @@ export async function POST(req: NextRequest) {
             sentAt:             new Date().toISOString(),
             proposalText:       proposal,
             freelancehuntBidId: bidId || undefined,
+            matchedKeywords:    fp.matchedKeywords.length > 0 ? fp.matchedKeywords : undefined,
           }).catch(() => {});
 
           await appendLog({
@@ -163,7 +180,8 @@ export async function POST(req: NextRequest) {
             currency,
             status:       'failed',
             createdAt:    now,
-            skippedReason: errMsg,
+            errorReason:  errMsg,
+            filterStage:  'bid_submit',
           }).catch(() => {});
 
           await appendLog({
@@ -190,7 +208,8 @@ export async function POST(req: NextRequest) {
           currency,
           status:       'failed',
           createdAt:    now,
-          skippedReason: errMsg,
+          errorReason:  errMsg,
+          filterStage:  'bid_submit',
         }).catch(() => {});
 
         await appendLog({
@@ -225,7 +244,7 @@ export async function POST(req: NextRequest) {
         lastCycleError:  errors.length > 0 ? errors[0] : null,
         cyclesCompleted: 1,
         bidsSubmitted:   submitted,
-        bidsSkipped:     projects.length - matching.length,
+        bidsSkipped:     allFiltered.filter((f) => f.skipReason).length,
         bidsFailed:      errors.length,
       }).catch(() => {});
     }
@@ -238,6 +257,7 @@ export async function POST(req: NextRequest) {
       isWorkerRunning: false,
       jobId: job?.id,
       found: matching.length,
+      skipped: allFiltered.filter((f) => f.skipReason).length,
       submitted,
       errors: errors.length > 0 ? errors : undefined,
       filter,

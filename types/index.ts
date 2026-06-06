@@ -299,6 +299,8 @@ export interface Application {
   blockedKeywords?: string[];
   /** Human-readable reason for skipping */
   skippedReason?: string;
+  /** Error reason for failed submissions */
+  errorReason?: string;
   /** Filter stage that caused the skip */
   filterStage?: string;
 }
@@ -492,7 +494,7 @@ export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   unlimited: { applicationsPerMonth: 999999,   accounts: 999,  campaigns: true,  adminAccess: true  },
 };
 
-// ─── Owner ────────────────────────────────────────────────────────────────���───
+// ─── Owner ─────────────────────────────────────��──────────────────────────���───
 
 /** Telegram user ID of the platform owner — has unlimited access + full admin panel. */
 export const OWNER_TELEGRAM_ID = 6237272293;

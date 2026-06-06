@@ -299,6 +299,7 @@ export async function saveApplication(app: Application): Promise<void> {
         matched_keywords:       app.matchedKeywords    ?? null,
         blocked_keywords:       app.blockedKeywords    ?? null,
         skipped_reason:         app.skippedReason      ?? null,
+        error_reason:           app.errorReason        ?? null,
         filter_stage:           app.filterStage        ?? null,
       },
       { onConflict: 'id' }
@@ -369,6 +370,7 @@ export async function getApplications(options?: {
       matchedKeywords:       r.matched_keywords     ?? undefined,
       blockedKeywords:       r.blocked_keywords     ?? undefined,
       skippedReason:         r.skipped_reason       ?? undefined,
+      errorReason:           r.error_reason         ?? undefined,
       filterStage:           r.filter_stage         ?? undefined,
     }));
 
