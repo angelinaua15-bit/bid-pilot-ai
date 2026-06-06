@@ -19,6 +19,7 @@ import type {
   SaaSDashboardStats, PaymentSetting, ManualPayment, ManualPaymentPlan,
 } from '@/types';
 import { OWNER_TELEGRAM_ID } from '@/types';
+import type { CompanyProfile } from '@/types';
 
 // ─── In-memory fallback store ─────────────────────────────────────────────────
 
@@ -724,32 +725,41 @@ export async function deleteTelegramAccount(id: string): Promise<void> {
   } catch (err) { console.error('[db] deleteTelegramAccount error:', err); }
 }
 
-export async function saveTelegramOtpSession(accountId: string, phoneHash: string): Promise<string | null> {
+export async function saveTelegramOtpSession(
+  accountId:     string,
+  phoneHash:     string,
+  sessionString: string,
+): Promise<string | null> {
   if (!isSupabaseConfigured) return null;
   try {
     const db = getDb(); if (!db) return null;
     // Delete any existing OTP session for this account first
     await db.from('telegram_otp_sessions').delete().eq('account_id', accountId);
     const { data, error } = await db.from('telegram_otp_sessions')
-      .insert({ account_id: accountId, phone_hash: phoneHash })
+      .insert({ account_id: accountId, phone_hash: phoneHash, session_string: sessionString })
       .select('id').single();
     if (error) throw error;
     return data?.id ?? null;
   } catch (err) { console.error('[db] saveTelegramOtpSession error:', err); return null; }
 }
 
-export async function getTelegramOtpSession(accountId: string): Promise<{ phoneHash: string } | null> {
+export async function getTelegramOtpSession(
+  accountId: string,
+): Promise<{ phoneHash: string; sessionString: string | null } | null> {
   if (!isSupabaseConfigured) return null;
   try {
     const db = getDb(); if (!db) return null;
     const { data } = await db.from('telegram_otp_sessions')
-      .select('phone_hash, expires_at')
+      .select('phone_hash, session_string, expires_at')
       .eq('account_id', accountId)
       .maybeSingle();
     if (!data) return null;
     // Check expiry
     if (new Date(data.expires_at as string) < new Date()) return null;
-    return { phoneHash: data.phone_hash as string };
+    return {
+      phoneHash:     data.phone_hash     as string,
+      sessionString: data.session_string as string | null,
+    };
   } catch (err) { console.error('[db] getTelegramOtpSession error:', err); return null; }
 }
 
@@ -1281,4 +1291,70 @@ export async function getBids(options?: {
     console.error('[db] getBids error:', err);
     return { bids: _memBids.slice(0, limit), total: _memBids.length };
   }
+}
+
+// ---------------------------------------------------------------------------
+// Company profiles
+// ---------------------------------------------------------------------------
+
+export async function getCompanyProfile(userId: string): Promise<CompanyProfile | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const { data } = await db
+      .from('company_profiles')
+      .select('*')
+      .eq('user_id', userId)
+      .maybeSingle();
+    if (!data) return null;
+    return {
+      name:        data.name        as string,
+      tagline:     data.tagline     as string,
+      description: data.description as string,
+      services:   (data.services    as string[]) ?? [],
+      portfolio:  (data.portfolio   as CompanyProfile['portfolio']) ?? [],
+      bidStyle:    data.bid_style   as CompanyProfile['bidStyle'],
+      language:    data.language    as CompanyProfile['language'],
+      contacts:   (data.contacts    as CompanyProfile['contacts']) ?? {},
+    };
+  } catch (err) { console.error('[db] getCompanyProfile error:', err); return null; }
+}
+
+export async function upsertCompanyProfile(
+  userId:  string,
+  profile: Partial<CompanyProfile>,
+): Promise<CompanyProfile | null> {
+  if (!isSupabaseConfigured) return null;
+  try {
+    const db = getDb(); if (!db) return null;
+    const now = new Date().toISOString();
+    const row = {
+      user_id:     userId,
+      name:        profile.name        ?? '',
+      tagline:     profile.tagline     ?? '',
+      description: profile.description ?? '',
+      services:    profile.services    ?? [],
+      portfolio:   profile.portfolio   ?? [],
+      bid_style:   profile.bidStyle    ?? 'expert',
+      language:    profile.language    ?? 'uk',
+      contacts:    profile.contacts    ?? {},
+      updated_at:  now,
+    };
+    const { data, error } = await db
+      .from('company_profiles')
+      .upsert(row, { onConflict: 'user_id' })
+      .select('*')
+      .single();
+    if (error) throw error;
+    return {
+      name:        data.name        as string,
+      tagline:     data.tagline     as string,
+      description: data.description as string,
+      services:   (data.services    as string[]) ?? [],
+      portfolio:  (data.portfolio   as CompanyProfile['portfolio']) ?? [],
+      bidStyle:    data.bid_style   as CompanyProfile['bidStyle'],
+      language:    data.language    as CompanyProfile['language'],
+      contacts:   (data.contacts    as CompanyProfile['contacts']) ?? {},
+    };
+  } catch (err) { console.error('[db] upsertCompanyProfile error:', err); return null; }
 }

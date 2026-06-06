@@ -43,13 +43,13 @@ export async function POST(req: NextRequest) {
 
     console.log('[send-code] sending code to', account.phoneNumber);
 
-    const { phoneHash, isCodeViaApp } = await sendTelegramCode(account.phoneNumber);
+    const { phoneHash, isCodeViaApp, sessionString } = await sendTelegramCode(account.phoneNumber);
 
     console.log('[send-code] code sent, isCodeViaApp=', isCodeViaApp);
 
-    // Persist OTP session and update status
+    // Persist OTP session (including DC session string) and update account status
     await Promise.all([
-      saveTelegramOtpSession(accountId, phoneHash),
+      saveTelegramOtpSession(accountId, phoneHash, sessionString),
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
 

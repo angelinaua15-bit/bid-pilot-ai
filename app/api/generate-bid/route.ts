@@ -1,45 +1,64 @@
 import { NextRequest, NextResponse } from 'next/server';
 import { generateBid } from '@/services/openai.service';
 import { checkGenerationLimit } from '@/services/subscription.service';
-import { incrementBidCount, saveBid } from '@/lib/db';
-import { mockProjects } from '@/lib/mock-data';
+import { incrementBidCount, saveBid, getCompanyProfile } from '@/lib/db';
+import type { Project, GeneratedBid } from '@/types';
 
 export async function POST(req: NextRequest) {
   try {
-    const { userId, projectId, additionalNotes, customPrice, customDeadline } =
-      await req.json() as {
-        userId?: string;
-        projectId?: string;
-        additionalNotes?: string;
-        customPrice?: number;
-        customDeadline?: number;
-      };
+    const body = await req.json() as {
+      userId?: string;
+      projectId?: string;
+      /** Full project object passed from the frontend (avoids DB lookup) */
+      project?: Project;
+      additionalNotes?: string;
+      customPrice?: number;
+      customDeadline?: number;
+    };
 
-    if (!userId || !projectId) {
-      return NextResponse.json({ ok: false, error: 'userId and projectId are required' }, { status: 400 });
+    const { userId, projectId, project, additionalNotes, customPrice, customDeadline } = body;
+
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: 'userId is required' }, { status: 400 });
+    }
+    if (!project && !projectId) {
+      return NextResponse.json({ ok: false, error: 'project or projectId is required' }, { status: 400 });
     }
 
     // Check subscription generation limit
     const allowed = await checkGenerationLimit(userId);
     if (!allowed) {
-      return NextResponse.json({ ok: false, error: 'Generation limit reached for your current plan' }, { status: 403 });
+      return NextResponse.json(
+        { ok: false, error: 'Generation limit reached for your current plan' },
+        { status: 403 },
+      );
     }
 
-    const project = mockProjects.find((p) => p.id === projectId);
-    if (!project) {
-      return NextResponse.json({ ok: false, error: 'Project not found' }, { status: 404 });
-    }
+    // Use the inline project object when available; fall back to a minimal stub
+    const projectData: Project = project ?? ({
+      id: projectId ?? '',
+      title: '',
+      description: '',
+      budget: { amount: 0, currency: 'UAH' },
+      skills: [],
+    } as unknown as Project);
 
-    // Use a minimal profile shape — real profile comes from the DB via /api/profile
-    const profilePlaceholder = { name: '', title: '', bio: '', skills: [], experience: '', portfolio: [] };
-    const bid = await generateBid(project, profilePlaceholder as never, {
+    // Load the user's company profile (used to personalise the bid)
+    const companyProfile = await getCompanyProfile(userId);
+    const profileForBid = companyProfile ?? {
+      name: '', tagline: '', description: '', services: [], portfolio: [], bidStyle: 'expert' as const,
+      language: 'uk' as const, contacts: {},
+    };
+
+    const bid = await generateBid(projectData, profileForBid as never, {
       additionalNotes,
       customPrice,
       customDeadline: customDeadline !== undefined ? String(customDeadline) : undefined,
     });
 
     // Persist generated bid and increment monthly usage counter
-    const generatedBid = { ...bid, userId, projectId } satisfies import('@/types').GeneratedBid;
+    const effectiveProjectId = project?.id ?? projectId ?? '';
+    const generatedBid: GeneratedBid = { ...bid, userId, projectId: effectiveProjectId };
     await Promise.allSettled([
       saveBid(generatedBid),
       incrementBidCount(userId),
