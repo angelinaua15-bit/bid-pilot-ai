@@ -6,6 +6,7 @@ import {
   Crown, CheckCircle2, XCircle, Clock, Trash2, Plus,
   RefreshCw, Shield, ToggleLeft, ToggleRight, Wallet,
   Smartphone, PhoneCall, KeyRound, AlertTriangle, WifiOff,
+  Send, Wifi,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -530,6 +531,9 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
   const [working, setWorking]       = useState(false);
   const [error, setError]           = useState('');
   const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
+  const [isCodeViaApp, setIsCodeViaApp]         = useState(false);
+  const [testingId, setTestingId]               = useState<string | null>(null);
+  const [testResult, setTestResult]             = useState<Record<string, boolean>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -565,8 +569,9 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId }),
       });
-      const codeData = await codeRes.json() as { ok: boolean; error?: string };
+      const codeData = await codeRes.json() as { ok: boolean; error?: string; isCodeViaApp?: boolean };
       if (!codeData.ok) { setError(codeData.error ?? 'Не вдалося відправити код'); return; }
+      setIsCodeViaApp(codeData.isCodeViaApp ?? false);
       setStep('code');
       await load();
     } catch (e) {
@@ -624,6 +629,49 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     }
   }
 
+  async function handleResendCode(accountId: string) {
+    setError('');
+    setWorking(true);
+    setCurrentAccountId(accountId);
+    try {
+      const res = await fetch('/api/telegram/accounts/send-code', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string; isCodeViaApp?: boolean };
+      if (!data.ok) { setError(data.error ?? 'Не вдалося відправити код'); return; }
+      setIsCodeViaApp(data.isCodeViaApp ?? false);
+      setCode('');
+      setStep('code');
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка мережі');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  async function handleTestConnection(accountId: string) {
+    setTestingId(accountId);
+    try {
+      const res = await fetch('/api/telegram/accounts/test', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId }),
+      });
+      const data = await res.json() as { ok: boolean; error?: string };
+      setTestResult(prev => ({ ...prev, [accountId]: data.ok }));
+      if (!data.ok) {
+        setTestResult(prev => ({ ...prev, [accountId]: false }));
+      }
+      await load();
+    } catch {
+      setTestResult(prev => ({ ...prev, [accountId]: false }));
+    } finally {
+      setTestingId(null);
+    }
+  }
+
   function resetWizard() {
     setStep('idle');
     setPhone('');
@@ -631,6 +679,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setPassword('');
     setError('');
     setCurrentAccountId(null);
+    setIsCodeViaApp(false);
   }
 
   async function handleDelete(id: string) {
@@ -687,6 +736,11 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                 <KeyRound size={15} className="text-primary" />
                 <p className="text-[13px] font-medium">Введіть код з Telegram</p>
               </div>
+              <p className="text-[11px] text-muted-foreground -mt-1">
+                {isCodeViaApp
+                  ? 'Код надіслано у Telegram-додаток (перевірте повідомлення від Telegram)'
+                  : 'Код надіслано SMS-повідомленням на вказаний номер'}
+              </p>
               <input
                 type="text"
                 inputMode="numeric"
@@ -767,32 +821,63 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       ) : (
         <div className="space-y-2">
           {accounts.map(acc => (
-            <div key={acc.id} className="rounded-2xl border border-border bg-card p-3 flex items-center gap-3">
-              <div className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0">
-                <Smartphone size={16} className="text-muted-foreground" />
-              </div>
-              <div className="flex-1 min-w-0">
-                <p className="text-[13px] font-medium truncate">{acc.phoneNumber}</p>
-                <div className="flex items-center gap-2 mt-0.5">
-                  <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded-md', STATUS_COLOR[acc.status])}>
-                    {STATUS_LABEL[acc.status]}
-                  </span>
-                  {acc.lastActiveAt && (
-                    <span className="text-[10px] text-muted-foreground">
-                      {new Date(acc.lastActiveAt).toLocaleDateString('uk-UA')}
+            <div key={acc.id} className="rounded-2xl border border-border bg-card p-3 space-y-2">
+              <div className="flex items-center gap-3">
+                <div className="w-9 h-9 rounded-xl bg-secondary flex items-center justify-center flex-shrink-0">
+                  <Smartphone size={16} className="text-muted-foreground" />
+                </div>
+                <div className="flex-1 min-w-0">
+                  <p className="text-[13px] font-medium truncate">{acc.phoneNumber}</p>
+                  <div className="flex items-center gap-2 mt-0.5">
+                    <span className={cn('text-[10px] font-medium px-1.5 py-0.5 rounded-md', STATUS_COLOR[acc.status])}>
+                      {STATUS_LABEL[acc.status]}
                     </span>
+                    {acc.lastActiveAt && (
+                      <span className="text-[10px] text-muted-foreground">
+                        {new Date(acc.lastActiveAt).toLocaleDateString('uk-UA')}
+                      </span>
+                    )}
+                    {testResult[acc.id] !== undefined && (
+                      <span className={cn('text-[10px] font-medium', testResult[acc.id] ? 'text-green-400' : 'text-red-400')}>
+                        {testResult[acc.id] ? 'З\'єднання OK' : 'Недоступний'}
+                      </span>
+                    )}
+                  </div>
+                  {acc.errorMessage && (
+                    <p className="text-[10px] text-red-400 mt-0.5 truncate">{acc.errorMessage}</p>
                   )}
                 </div>
-                {acc.errorMessage && (
-                  <p className="text-[10px] text-red-400 mt-0.5 truncate">{acc.errorMessage}</p>
+                <button
+                  onClick={() => handleDelete(acc.id)}
+                  className="p-2 rounded-xl hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
+                >
+                  <Trash2 size={14} />
+                </button>
+              </div>
+
+              {/* Action buttons */}
+              <div className="flex gap-2 pl-12">
+                {(acc.status === 'code_sent' || acc.status === 'invalid' || acc.status === 'pending') && step === 'idle' && (
+                  <button
+                    disabled={working && currentAccountId === acc.id}
+                    onClick={() => handleResendCode(acc.id)}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary text-[11px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    <Send size={11} />
+                    {working && currentAccountId === acc.id ? 'Надсилаю…' : 'Надіслати код знову'}
+                  </button>
+                )}
+                {acc.status === 'active' && (
+                  <button
+                    disabled={testingId === acc.id}
+                    onClick={() => handleTestConnection(acc.id)}
+                    className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-lg bg-secondary text-[11px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-50"
+                  >
+                    <Wifi size={11} />
+                    {testingId === acc.id ? 'Перевіряю…' : 'Тест з\'єднання'}
+                  </button>
                 )}
               </div>
-              <button
-                onClick={() => handleDelete(acc.id)}
-                className="p-2 rounded-xl hover:bg-red-500/10 text-muted-foreground hover:text-red-400 transition-colors flex-shrink-0"
-              >
-                <Trash2 size={14} />
-              </button>
             </div>
           ))}
         </div>
