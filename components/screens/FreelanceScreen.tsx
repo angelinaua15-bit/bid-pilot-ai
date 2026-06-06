@@ -113,6 +113,7 @@ function ConnectPanel({ userId, account, onRefresh }: {
   const [error, setError]         = useState<string | null>(null);
   const [workerBusy, setWorkerBusy] = useState(false);
   const [runResult, setRunResult] = useState<{ ok: boolean; msg: string } | null>(null);
+  const [jobStats, setJobStats]   = useState<{ found: number; submitted: number; skipped: number; failed: number } | null>(null);
 
   const isConnected = account?.status === 'connected' && !!account?.apiToken;
 
@@ -151,7 +152,10 @@ function ConnectPanel({ userId, account, onRefresh }: {
 
   const handleToggleWorker = async (start: boolean) => {
     if (!userId) return;
-    haptic.medium(); setWorkerBusy(true); setRunResult(null);
+    haptic.medium();
+    setWorkerBusy(true);
+    setRunResult(null);
+    if (start) setJobStats(null);
     try {
       const res = await fetch(start ? '/api/freelance/start' : '/api/freelance/stop', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -160,13 +164,20 @@ function ConnectPanel({ userId, account, onRefresh }: {
 
       if (start && res.ok) {
         haptic.success();
-        setRunResult({ ok: true, msg: `Знайдено ${res.found ?? 0} проектів, надіслано ${res.submitted ?? 0} заявок` });
-        setTimeout(() => setRunResult(null), 6000);
+        const found     = res.found     ?? 0;
+        const submitted = res.submitted ?? 0;
+        const skipped   = (res.filter?.dailyLimit ?? found) - submitted;
+        setRunResult({ ok: true, msg: `Знайдено ${found}, надіслано ${submitted}` });
+        setJobStats({ found, submitted, skipped: Math.max(0, skipped), failed: res.errors?.length ?? 0 });
+        setTimeout(() => setRunResult(null), 8000);
+      } else if (!start && res.ok) {
+        haptic.success();
+        setRunResult({ ok: true, msg: 'Автопошук зупинено' });
+        setTimeout(() => setRunResult(null), 4000);
       } else {
         const msg = res.error ?? 'Помилка запуску';
         setRunResult({ ok: false, msg });
         haptic.error();
-        // If token is missing / invalid — show connect form
         if (res.setupRequired) setShowTokenInput(true);
       }
       onRefresh();
@@ -235,6 +246,21 @@ function ConnectPanel({ userId, account, onRefresh }: {
             <p className={cn('text-[11px] text-center px-2', runResult.ok ? 'text-green-400' : 'text-red-400')}>
               {runResult.msg}
             </p>
+          )}
+          {jobStats && (
+            <div className="grid grid-cols-4 gap-2 mt-1">
+              {[
+                { label: 'Знайдено',  value: jobStats.found },
+                { label: 'Надіслано', value: jobStats.submitted },
+                { label: 'Пропущено', value: jobStats.skipped },
+                { label: 'Помилок',   value: jobStats.failed },
+              ].map(({ label, value }) => (
+                <div key={label} className="rounded-xl bg-secondary border border-border p-2 text-center">
+                  <p className="text-sm font-bold">{value}</p>
+                  <p className="text-[9px] text-muted-foreground leading-tight mt-0.5">{label}</p>
+                </div>
+              ))}
+            </div>
           )}
         </div>
       )}

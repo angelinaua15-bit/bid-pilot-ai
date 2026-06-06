@@ -6,7 +6,7 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog } from '@/lib/db';
+import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob } from '@/lib/db';
 import { randomUUID } from 'crypto';
 import type { AutoBidLog } from '@/types';
 
@@ -29,6 +29,9 @@ export async function POST(req: NextRequest) {
     const existing = await getFreelanceFilter(userId);
     const filter   = await upsertFreelanceFilter({ ...(existing ?? {}), userId, isEnabled: true });
     await upsertFreelanceAccount({ userId, status: 'connected', lastCheckAt: new Date().toISOString() });
+
+    // Create a tracked automation job record
+    const job = await createAutomationJob(userId, account.id);
 
     // Fetch latest open projects
     const qs = new URLSearchParams({ 'page[size]': '20', 'page[number]': '1' });
@@ -202,18 +205,38 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    const cycleNow = new Date().toISOString();
+
     // Log scan complete
     await appendLog({
       id:        randomUUID(),
       userId,
       level:     'info',
       message:   `Скан завершено — надіслано ${submitted} заявок${errors.length ? `, помилок: ${errors.length}` : ''}`,
-      timestamp: new Date().toISOString(),
+      timestamp: cycleNow,
     }).catch(() => {});
+
+    // Update job with cycle results and mark stopped (one-shot cycle)
+    if (job) {
+      await updateAutomationJob(job.id, {
+        status:          'stopped',
+        stoppedAt:       cycleNow,
+        lastCycleAt:     cycleNow,
+        lastCycleError:  errors.length > 0 ? errors[0] : null,
+        cyclesCompleted: 1,
+        bidsSubmitted:   submitted,
+        bidsSkipped:     projects.length - matching.length,
+        bidsFailed:      errors.length,
+      }).catch(() => {});
+    }
+
+    // Disable filter after one-shot cycle
+    await upsertFreelanceFilter({ ...(filter ?? {}), userId, isEnabled: false }).catch(() => {});
 
     return NextResponse.json({
       ok: true,
-      isWorkerRunning: true,
+      isWorkerRunning: false,
+      jobId: job?.id,
       found: matching.length,
       submitted,
       errors: errors.length > 0 ? errors : undefined,
