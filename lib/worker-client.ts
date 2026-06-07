@@ -110,7 +110,10 @@ async function workerFetch<T>(
     try {
       json = JSON.parse(text) as T;
     } catch {
-      throw new WorkerError(`Worker returned non-JSON (HTTP ${res.status}): ${text.slice(0, 200)}`, res.status);
+      throw new WorkerError(
+        `Worker returned non-JSON HTTP ${res.status} with HTML. URL: ${url}${path} — check AUTOMATION_WORKER_URL env var. Preview: ${text.slice(0, 120)}`,
+        res.status,
+      );
     }
 
     if (!res.ok) {

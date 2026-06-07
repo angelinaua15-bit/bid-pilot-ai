@@ -808,10 +808,16 @@ const server = http.createServer(async (req, res) => {
     })
   }
 
+  // ── /health — unauthenticated, used by Railway health-checks and frontend ──
+  if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
+    return json(res, 200, { ok: true, service: 'worker' })
+  }
+
   if (!authenticate(req, url)) {
     return json(res, 401, {
       ok: false,
       error: 'Unauthorized',
+      requestedPath: pathname,
     })
   }
 
@@ -836,8 +842,13 @@ const server = http.createServer(async (req, res) => {
       return handleAutoBidStop(res)
     }
 
-    if (method === 'GET' && pathname === '/logs') {
+    if (method === 'GET' && (pathname === '/logs' || pathname === '/api/logs')) {
       return handleLogs(url, res)
+    }
+
+    // ── /api/status alias (in case AUTOMATION_WORKER_URL includes /api prefix) ─
+    if (method === 'GET' && pathname === '/api/status') {
+      return await handleStatus(res)
     }
 
     if (method === 'GET' && pathname === '/projects') {
@@ -943,6 +954,20 @@ const server = http.createServer(async (req, res) => {
     return json(res, 404, {
       ok: false,
       error: `Unknown route: ${method} ${pathname}`,
+      requestedUrl: `${method} ${pathname}`,
+      availableRoutes: [
+        'GET  /health',
+        'GET  /',
+        'GET  /status',
+        'GET  /logs',
+        'GET  /api/logs',
+        'GET  /api/status',
+        'POST /auto-bid/start',
+        'POST /auto-bid/stop',
+        'POST /campaigns/dispatch',
+        'POST /telegram/send-code',
+        'POST /telegram/verify-code',
+      ],
     })
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)

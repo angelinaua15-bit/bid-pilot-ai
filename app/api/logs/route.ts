@@ -18,7 +18,7 @@ export async function GET(req: NextRequest) {
     const projectId = searchParams.get('projectId') ?? undefined;
     const userId    = searchParams.get('userId')    ?? undefined;
 
-    // ── Worker mode: fetch logs from worker ───────────────────────────────────
+    // ── Worker mode: fetch logs from worker, fall back to Supabase DB ─────────
     if (config.worker.enabled) {
       try {
         const { getWorkerLogs } = await import('@/lib/worker-client');
@@ -40,26 +40,22 @@ export async function GET(req: NextRequest) {
           });
         }
 
-        // Worker returned ok:false — return empty list with the error for UI display
-        return NextResponse.json({
-          ok: true,
-          data: [],
-          total: 0,
-          source: 'worker',
-          workerError: workerResult.error,
-        });
+        // Worker returned ok:false — fall through to Supabase
+        console.warn('[logs] Worker returned ok:false, falling back to Supabase:', workerResult.error);
       } catch (err) {
-        // Worker unreachable — return empty list so the page renders, not crashes
+        // Worker unreachable or returned HTML — fall back to Supabase DB logs
         const message = err instanceof Error ? err.message : String(err);
+        console.warn('[logs] Worker unreachable, falling back to Supabase DB:', message);
 
-        console.warn('[logs] Worker unreachable, returning empty list:', message);
-
+        // Still return DB logs, but include the worker error for UI display
+        const { logs, total } = await getLogs({ limit, level, projectId, userId }).catch(() => ({ logs: [], total: 0 }));
         return NextResponse.json({
           ok: true,
-          data: [],
-          total: 0,
-          source: 'worker-unreachable',
+          data: Array.isArray(logs) ? logs : [],
+          total: total ?? 0,
+          source: 'db-fallback',
           workerError: message,
+          workerUrl: config.worker.url || '(not set)',
         });
       }
     }
