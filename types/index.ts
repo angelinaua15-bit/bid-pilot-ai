@@ -453,7 +453,15 @@ export interface Campaign {
 
 // ─── Campaign Message ─────────────────────────────────────────────────────────
 
-export type CampaignMessageStatus = 'pending' | 'sent' | 'failed' | 'skipped';
+export type CampaignMessageStatus =
+  | 'pending'
+  | 'sent'
+  | 'failed'
+  | 'skipped'
+  | 'waiting_approval'
+  | 'invalid_channel';
+
+export type CampaignMembershipStatus = 'member' | 'not_member' | 'approval_pending';
 
 export interface CampaignMessage {
   id: string;
@@ -463,6 +471,7 @@ export interface CampaignMessage {
   telegramAccountId?: string;
   accountPhone?: string;
   messageId?: number;
+  membershipStatus?: CampaignMembershipStatus;
   status: CampaignMessageStatus;
   errorReason?: string;
   sentAt?: string;
