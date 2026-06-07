@@ -4,7 +4,8 @@ import { useEffect, useState, useCallback } from 'react';
 import {
   TrendingUp, AlertTriangle, RefreshCw,
   Send, SkipForward, Play, Square, Wifi, WifiOff,
-  Clock, CheckCircle2, XCircle,
+  Clock, CheckCircle2, XCircle, ExternalLink, X,
+  Tag, Calendar, FileText, Ban,
 } from 'lucide-react';
 import type { SaaSUser, SaaSDashboardStats, FreelanceAccount, Application, NavTab } from '@/types';
 import { haptic } from '@/lib/telegram';
@@ -146,13 +147,14 @@ const LOG_ICONS: Record<string, React.ElementType> = {
 };
 
 export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
-  const [stats, setStats]     = useState<SaaSDashboardStats | null>(null);
-  const [account, setAccount] = useState<FreelanceAccount | null>(null);
-  const [apps, setApps]       = useState<Application[]>([]);
-  const [loading, setLoading] = useState(true);
+  const [stats, setStats]       = useState<SaaSDashboardStats | null>(null);
+  const [account, setAccount]   = useState<FreelanceAccount | null>(null);
+  const [apps, setApps]         = useState<Application[]>([]);
+  const [loading, setLoading]   = useState(true);
   const [appLoading, setAppLoading] = useState(true);
   const [workerBusy, setWorkerBusy] = useState(false);
-  const [appTab, setAppTab]   = useState<Application['status'] | 'all'>('sent');
+  const [appTab, setAppTab]     = useState<Application['status'] | 'all'>('sent');
+  const [selectedApp, setSelectedApp] = useState<Application | null>(null);
   const { toast, show: showToast } = useToast();
   const userId = user?.id;
 
@@ -236,6 +238,10 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
 
   return (
     <div className="px-4 pt-5 pb-28 flex flex-col gap-5">
+
+      {selectedApp && (
+        <ApplicationDetailDrawer app={selectedApp} onClose={() => setSelectedApp(null)} />
+      )}
 
       {/* Toast notification */}
       {toast && (
@@ -377,7 +383,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
         ) : (
           <div className="flex flex-col gap-2">
             {apps.map((app) => (
-              <AppRow key={app.id} app={app} />
+              <AppRow key={app.id} app={app} onSelect={setSelectedApp} />
             ))}
           </div>
         )}
@@ -386,7 +392,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
   );
 }
 
-function AppRow({ app }: { app: Application }) {
+function AppRow({ app, onSelect }: { app: Application; onSelect: (a: Application) => void }) {
   const statusColor = app.status === 'sent' ? 'text-green-400' :
     app.status === 'sent_unconfirmed' ? 'text-blue-400' :
     app.status === 'skipped' ? 'text-yellow-400' : 'text-red-400';
@@ -394,7 +400,10 @@ function AppRow({ app }: { app: Application }) {
     app.status === 'sent_unconfirmed' ? 'Надіслано?' :
     app.status === 'skipped' ? 'Пропущено' : 'Помилка';
   return (
-    <div className="glass-card p-3 rounded-xl">
+    <button
+      onClick={() => { haptic.light(); onSelect(app); }}
+      className="glass-card p-3 rounded-xl text-left w-full active:scale-[0.98] transition-transform"
+    >
       <div className="flex items-start gap-2.5">
         <div className="flex-1 min-w-0">
           <p className="text-xs font-medium truncate">{app.title}</p>
@@ -402,8 +411,10 @@ function AppRow({ app }: { app: Application }) {
             <span className="text-[11px] text-muted-foreground">{app.budget} {app.currency}</span>
             {app.aiScore !== undefined && <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>}
           </div>
-          {app.skippedReason && (
-            <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">{app.skippedReason}</p>
+          {(app.skippedReason ?? app.errorReason) && (
+            <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">
+              {app.skippedReason ?? app.errorReason}
+            </p>
           )}
         </div>
         <div className="flex flex-col items-end gap-0.5 flex-shrink-0">
@@ -412,6 +423,171 @@ function AppRow({ app }: { app: Application }) {
             {formatDistanceToNow(new Date(app.sentAt ?? app.createdAt), { addSuffix: true, locale: uk })}
           </span>
         </div>
+      </div>
+    </button>
+  );
+}
+
+// ── Application detail bottom-sheet drawer ────────────────────────────────────
+function ApplicationDetailDrawer({ app, onClose }: { app: Application; onClose: () => void }) {
+  const statusColor = app.status === 'sent' ? 'text-green-400' :
+    app.status === 'sent_unconfirmed' ? 'text-blue-400' :
+    app.status === 'skipped' ? 'text-yellow-400' : 'text-red-400';
+  const statusLabel = app.status === 'sent' ? 'Надіслано' :
+    app.status === 'sent_unconfirmed' ? 'Надіслано (не підтверджено)' :
+    app.status === 'skipped' ? 'Пропущено' : 'Помилка';
+
+  const hasValidUrl = app.url && app.url.startsWith('https://');
+
+  const handleOpenUrl = () => {
+    if (!hasValidUrl) return;
+    haptic.light();
+    window.open(app.url, '_blank', 'noopener,noreferrer');
+  };
+
+  return (
+    <div
+      className="fixed inset-0 z-50 flex flex-col justify-end"
+      onClick={onClose}
+    >
+      {/* Backdrop */}
+      <div className="absolute inset-0 bg-black/60 backdrop-blur-sm" />
+
+      {/* Sheet */}
+      <div
+        className="relative bg-card rounded-t-3xl p-5 flex flex-col gap-4 max-h-[85vh] overflow-y-auto"
+        onClick={(e) => e.stopPropagation()}
+      >
+        {/* Handle */}
+        <div className="w-10 h-1 rounded-full bg-muted-foreground/30 mx-auto -mt-1 mb-1" />
+
+        {/* Header */}
+        <div className="flex items-start gap-3">
+          <div className="flex-1 min-w-0">
+            <h2 className="text-sm font-bold leading-snug">{app.title}</h2>
+            <div className="flex items-center gap-2 mt-1">
+              <span className={cn('text-[11px] font-semibold', statusColor)}>{statusLabel}</span>
+              <span className="text-[11px] text-muted-foreground">
+                {app.budget} {app.currency}
+              </span>
+              {app.aiScore !== undefined && (
+                <span className="text-[11px] text-muted-foreground">· AI {app.aiScore}%</span>
+              )}
+            </div>
+          </div>
+          <button
+            onClick={onClose}
+            className="w-7 h-7 rounded-full bg-secondary flex items-center justify-center text-muted-foreground flex-shrink-0"
+          >
+            <X size={13} />
+          </button>
+        </div>
+
+        {/* Project URL */}
+        <div className="flex flex-col gap-1">
+          <p className="text-[11px] font-semibold text-muted-foreground uppercase tracking-wide">Посилання на проєкт</p>
+          {hasValidUrl ? (
+            <button
+              onClick={handleOpenUrl}
+              className="flex items-center gap-1.5 text-xs text-primary underline underline-offset-2 text-left break-all"
+            >
+              <ExternalLink size={11} className="flex-shrink-0" />
+              {app.url}
+            </button>
+          ) : (
+            <p className="text-xs text-muted-foreground italic">Немає посилання на проєкт</p>
+          )}
+        </div>
+
+        {/* Dates */}
+        <div className="grid grid-cols-2 gap-3">
+          <div className="glass-card p-3 rounded-xl flex flex-col gap-1">
+            <p className="text-[10px] font-semibold text-muted-foreground flex items-center gap-1">
+              <Calendar size={10} /> Створено
+            </p>
+            <p className="text-[11px]">
+              {new Date(app.createdAt).toLocaleString('uk-UA', { dateStyle: 'short', timeStyle: 'short' })}
+            </p>
+          </div>
+          {app.sentAt && (
+            <div className="glass-card p-3 rounded-xl flex flex-col gap-1">
+              <p className="text-[10px] font-semibold text-muted-foreground flex items-center gap-1">
+                <Send size={10} /> Надіслано
+              </p>
+              <p className="text-[11px]">
+                {new Date(app.sentAt).toLocaleString('uk-UA', { dateStyle: 'short', timeStyle: 'short' })}
+              </p>
+            </div>
+          )}
+        </div>
+
+        {/* Error reason */}
+        {app.errorReason && (
+          <div className="rounded-xl bg-red-500/10 border border-red-500/20 p-3 flex flex-col gap-1">
+            <p className="text-[11px] font-semibold text-red-400 flex items-center gap-1.5">
+              <XCircle size={11} /> Причина помилки
+            </p>
+            <p className="text-xs text-red-300 leading-relaxed">{app.errorReason}</p>
+          </div>
+        )}
+
+        {/* Skipped reason */}
+        {app.skippedReason && (
+          <div className="rounded-xl bg-yellow-500/10 border border-yellow-500/20 p-3 flex flex-col gap-1">
+            <p className="text-[11px] font-semibold text-yellow-400 flex items-center gap-1.5">
+              <Ban size={11} /> Причина пропуску
+            </p>
+            <p className="text-xs text-yellow-300 leading-relaxed">{app.skippedReason}</p>
+            {app.filterStage && (
+              <p className="text-[10px] text-muted-foreground">Фільтр: {app.filterStage}</p>
+            )}
+          </div>
+        )}
+
+        {/* Matched / blocked keywords */}
+        {(app.matchedKeywords?.length ?? 0) > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1">
+              <Tag size={10} /> Ключові слова
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {app.matchedKeywords!.map((kw) => (
+                <span key={kw} className="text-[10px] px-2 py-0.5 rounded-full bg-green-500/15 text-green-400">{kw}</span>
+              ))}
+            </div>
+          </div>
+        )}
+        {(app.blockedKeywords?.length ?? 0) > 0 && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1">
+              <Ban size={10} /> Заблоковані слова
+            </p>
+            <div className="flex flex-wrap gap-1">
+              {app.blockedKeywords!.map((kw) => (
+                <span key={kw} className="text-[10px] px-2 py-0.5 rounded-full bg-red-500/15 text-red-400">{kw}</span>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Proposal text */}
+        {app.proposalText && (
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[11px] font-semibold text-muted-foreground flex items-center gap-1">
+              <FileText size={10} /> Текст заявки
+            </p>
+            <div className="glass-card p-3 rounded-xl">
+              <p className="text-[11px] leading-relaxed whitespace-pre-wrap">{app.proposalText}</p>
+            </div>
+          </div>
+        )}
+
+        {/* Freelancehunt bid ID */}
+        {app.freelancehuntBidId && (
+          <p className="text-[10px] text-muted-foreground">
+            Freelancehunt bid ID: <span className="font-mono">{app.freelancehuntBidId}</span>
+          </p>
+        )}
       </div>
     </div>
   );
