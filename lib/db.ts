@@ -1008,12 +1008,16 @@ export async function saveCampaignMessage(
   try {
     const db = getDb(); if (!db) return;
     await db.from('campaign_messages').insert({
-      campaign_id:  msg.campaignId,
-      channel_id:   msg.channelId,
-      status:       msg.status,
-      error_reason: msg.errorReason ?? null,
-      sent_at:      msg.sentAt ?? null,
-      created_at:   new Date().toISOString(),
+      campaign_id:          msg.campaignId,
+      channel_id:           msg.channelId,
+      channel_title:        msg.channelTitle        ?? null,
+      telegram_account_id:  msg.telegramAccountId   ?? null,
+      account_phone:        msg.accountPhone        ?? null,
+      message_id:           msg.messageId           ?? null,
+      status:               msg.status,
+      error_reason:         msg.errorReason         ?? null,
+      sent_at:              msg.sentAt              ?? null,
+      created_at:           new Date().toISOString(),
     });
   } catch (err) { console.error('[db] saveCampaignMessage error:', err); }
 }
@@ -1071,13 +1075,17 @@ function mapCampaign(r: Record<string, unknown>): Campaign {
 
 function mapCampaignMessage(r: Record<string, unknown>): CampaignMessage {
   return {
-    id:           r.id as string,
-    campaignId:   r.campaign_id as string,
-    channelId:    r.channel_id as string,
-    status:       (r.status as CampaignMessage['status']) ?? 'pending',
-    errorReason:  r.error_reason as string | undefined,
-    sentAt:       r.sent_at as string | undefined,
-    createdAt:    r.created_at as string,
+    id:                 r.id as string,
+    campaignId:         r.campaign_id as string,
+    channelId:          r.channel_id as string,
+    channelTitle:       r.channel_title as string | undefined,
+    telegramAccountId:  r.telegram_account_id as string | undefined,
+    accountPhone:       r.account_phone as string | undefined,
+    messageId:          r.message_id != null ? Number(r.message_id) : undefined,
+    status:             (r.status as CampaignMessage['status']) ?? 'pending',
+    errorReason:        r.error_reason as string | undefined,
+    sentAt:             r.sent_at as string | undefined,
+    createdAt:          r.created_at as string,
   };
 }
 
