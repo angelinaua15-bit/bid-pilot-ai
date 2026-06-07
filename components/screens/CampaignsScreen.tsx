@@ -117,13 +117,31 @@ export function CampaignsScreen({ user }: Props) {
 function CampaignsList({ campaigns, userId, onRefresh }: {
   campaigns: Campaign[]; userId?: string; onRefresh: () => void;
 }) {
-  const [expanded, setExpanded] = useState<string | null>(null);
-  const [messages, setMessages] = useState<Record<string, CampaignMessage[]>>({});
+  const [expanded, setExpanded]   = useState<string | null>(null);
+  const [messages, setMessages]   = useState<Record<string, CampaignMessage[]>>({});
+  const [actionErr, setActionErr] = useState<Record<string, string>>({});
+  const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
-  const loadMessages = async (id: string) => {
+  const loadMessages = useCallback(async (id: string) => {
     const res = await fetch(`/api/campaigns/${id}/logs`).then((r) => r.json()).catch(() => null);
     if (res?.ok) setMessages((m) => ({ ...m, [id]: res.messages ?? [] }));
-  };
+  }, []);
+
+  // Auto-poll logs + parent list while any campaign is running
+  useEffect(() => {
+    const hasRunning = campaigns.some((c) => c.status === 'running');
+    if (hasRunning) {
+      pollRef.current = setInterval(() => {
+        campaigns.filter((c) => c.status === 'running').forEach((c) => {
+          if (expanded === c.id) loadMessages(c.id);
+        });
+        onRefresh();
+      }, 4000);
+    } else {
+      if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
+    }
+    return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  }, [campaigns, expanded, loadMessages, onRefresh]);
 
   const handleExpand = (id: string) => {
     if (expanded === id) { setExpanded(null); return; }
@@ -132,7 +150,15 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
 
   const handleAction = async (id: string, action: 'start' | 'pause') => {
     haptic.medium();
-    await fetch(`/api/campaigns/${id}/${action}`, { method: 'POST' });
+    setActionErr((e) => ({ ...e, [id]: '' }));
+    const res = await fetch(`/api/campaigns/${id}/${action}`, { method: 'POST' }).then((r) => r.json()).catch(() => null);
+    if (!res?.ok) {
+      const msg = res?.error ?? 'Помилка запуску';
+      setActionErr((e) => ({ ...e, [id]: msg }));
+      haptic.error();
+      return;
+    }
+    haptic.success();
     onRefresh();
   };
 
@@ -185,18 +211,23 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
             {/* Expanded: actions + message logs */}
             {expanded === c.id && (
               <div className="border-t border-border px-4 pb-4 pt-3 flex flex-col gap-3">
-                <div className="flex gap-2">
-                  {(c.status === 'draft' || c.status === 'paused') && (
-                    <button onClick={() => handleAction(c.id, 'start')}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500/15 text-green-400 text-[11px] font-semibold active:scale-95 transition-all">
-                      <Play size={11} /> Запустити
-                    </button>
-                  )}
-                  {c.status === 'running' && (
-                    <button onClick={() => handleAction(c.id, 'pause')}
-                      className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-500/15 text-yellow-400 text-[11px] font-semibold active:scale-95 transition-all">
-                      <Pause size={11} /> Пауза
-                    </button>
+                <div className="flex flex-col gap-1.5">
+                  <div className="flex gap-2">
+                    {(c.status === 'draft' || c.status === 'paused' || c.status === 'failed') && (
+                      <button onClick={() => handleAction(c.id, 'start')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500/15 text-green-400 text-[11px] font-semibold active:scale-95 transition-all">
+                        <Play size={11} /> Запустити
+                      </button>
+                    )}
+                    {c.status === 'running' && (
+                      <button onClick={() => handleAction(c.id, 'pause')}
+                        className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-500/15 text-yellow-400 text-[11px] font-semibold active:scale-95 transition-all">
+                        <Pause size={11} /> Пауза
+                      </button>
+                    )}
+                  </div>
+                  {actionErr[c.id] && (
+                    <p className="text-[11px] text-red-400 bg-red-500/10 rounded-lg px-2.5 py-1.5">{actionErr[c.id]}</p>
                   )}
                 </div>
 
@@ -210,7 +241,14 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                         {msg.status === 'failed'  && <XCircle size={11} className="text-red-400 flex-shrink-0" />}
                         {msg.status === 'pending' && <Clock size={11} className="text-muted-foreground flex-shrink-0" />}
                         {msg.status === 'skipped' && <Clock size={11} className="text-yellow-400 flex-shrink-0" />}
-                        <span className="text-[11px] flex-1 truncate">{msg.channelId}</span>
+                        <span className="text-[11px] flex-1 truncate">
+                          {msg.channelTitle ?? msg.channelId}
+                        </span>
+                        {msg.accountPhone && (
+                          <span className="text-[10px] text-muted-foreground flex-shrink-0 flex items-center gap-0.5">
+                            <Smartphone size={9} />{msg.accountPhone}
+                          </span>
+                        )}
                         {msg.errorReason && <span className="text-[10px] text-red-400 truncate max-w-[100px]">{msg.errorReason}</span>}
                         {msg.sentAt && <span className="text-[10px] text-muted-foreground flex-shrink-0">
                           {formatDistanceToNow(new Date(msg.sentAt), { addSuffix: true, locale: uk })}

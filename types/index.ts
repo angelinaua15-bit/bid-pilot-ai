@@ -460,6 +460,9 @@ export interface CampaignMessage {
   campaignId: string;
   channelId: string;
   channelTitle?: string;
+  telegramAccountId?: string;
+  accountPhone?: string;
+  messageId?: number;
   status: CampaignMessageStatus;
   errorReason?: string;
   sentAt?: string;
