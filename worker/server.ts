@@ -323,8 +323,14 @@ async function handleConnectStart(res: http.ServerResponse) {
     try {
       const { chromium } = await import('playwright')
       const browser = await chromium.launch({
-        headless: false, // visible so user can log in
-        args: ['--no-sandbox', '--disable-setuid-sandbox'],
+        headless: true, // must be headless in Railway/production (no display server)
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-zygote',
+        ],
       })
       const context = await browser.newContext({
         userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
@@ -810,6 +816,22 @@ const server = http.createServer(async (req, res) => {
 
   // ── /health — unauthenticated, used by Railway health-checks and frontend ──
   if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
+    const full = url.searchParams.get('check') === 'browser'
+    if (full) {
+      try {
+        const { chromium } = await import('playwright')
+        const b = await chromium.launch({
+          headless: true,
+          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
+        })
+        const version = b.version()
+        await b.close()
+        return json(res, 200, { ok: true, service: 'worker', browser: 'ok', chromiumVersion: version })
+      } catch (e) {
+        const msg = e instanceof Error ? e.message : String(e)
+        return json(res, 500, { ok: false, service: 'worker', browser: 'error', error: msg })
+      }
+    }
     return json(res, 200, { ok: true, service: 'worker' })
   }
 

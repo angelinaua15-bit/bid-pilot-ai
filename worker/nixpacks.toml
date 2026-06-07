@@ -1,0 +1,38 @@
+# Nixpacks config for Railway (fallback if Dockerfile is not used)
+# Installs Playwright system dependencies via apt on Ubuntu/Debian base
+
+[phases.setup]
+nixPkgs = [
+  "nodejs_20",
+  "chromium",
+  "nss",
+  "nspr",
+  "at-spi2-atk",
+  "cups",
+  "libdrm",
+  "libxkbcommon",
+  "xorg.libXcomposite",
+  "xorg.libXdamage",
+  "xorg.libXfixes",
+  "xorg.libXrandr",
+  "xorg.libxcb",
+  "mesa",
+  "alsa-lib",
+  "pango",
+  "cairo",
+  "glib",
+  "expat",
+  "udev",
+]
+
+[phases.install]
+cmds = [
+  "npm install --legacy-peer-deps",
+  "npx playwright install --with-deps chromium",
+]
+
+[phases.build]
+cmds = []
+
+[start]
+cmd = "npx tsx worker/index.ts"
