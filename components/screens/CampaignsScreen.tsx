@@ -236,23 +236,52 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                 ) : (
                   <div className="flex flex-col gap-1.5">
                     {(messages[c.id] ?? []).map((msg) => (
-                      <div key={msg.id} className="flex items-center gap-2.5">
-                        {msg.status === 'sent'    && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
-                        {msg.status === 'failed'  && <XCircle size={11} className="text-red-400 flex-shrink-0" />}
-                        {msg.status === 'pending' && <Clock size={11} className="text-muted-foreground flex-shrink-0" />}
-                        {msg.status === 'skipped' && <Clock size={11} className="text-yellow-400 flex-shrink-0" />}
-                        <span className="text-[11px] flex-1 truncate">
+                      <div key={msg.id} className="flex items-center gap-2">
+                        {/* Status icon */}
+                        {msg.status === 'sent'             && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
+                        {msg.status === 'failed'           && <XCircle      size={11} className="text-red-400 flex-shrink-0" />}
+                        {msg.status === 'pending'          && <Clock        size={11} className="text-muted-foreground flex-shrink-0" />}
+                        {msg.status === 'skipped'          && <Clock        size={11} className="text-yellow-400 flex-shrink-0" />}
+                        {msg.status === 'waiting_approval' && <Clock        size={11} className="text-blue-400 flex-shrink-0" />}
+                        {msg.status === 'invalid_channel'  && <XCircle      size={11} className="text-orange-400 flex-shrink-0" />}
+
+                        {/* Channel name */}
+                        <span className="text-[11px] flex-1 truncate min-w-0">
                           {msg.channelTitle ?? msg.channelId}
                         </span>
+
+                        {/* Status badge for non-trivial statuses */}
+                        {msg.status === 'waiting_approval' && (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">
+                            очікує
+                          </span>
+                        )}
+                        {msg.status === 'invalid_channel' && (
+                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">
+                            не знайдено
+                          </span>
+                        )}
+
+                        {/* Account phone */}
                         {msg.accountPhone && (
                           <span className="text-[10px] text-muted-foreground flex-shrink-0 flex items-center gap-0.5">
                             <Smartphone size={9} />{msg.accountPhone}
                           </span>
                         )}
-                        {msg.errorReason && <span className="text-[10px] text-red-400 truncate max-w-[100px]">{msg.errorReason}</span>}
-                        {msg.sentAt && <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                          {formatDistanceToNow(new Date(msg.sentAt), { addSuffix: true, locale: uk })}
-                        </span>}
+
+                        {/* Error (for failed only — approval reason is shown as badge) */}
+                        {msg.errorReason && msg.status === 'failed' && (
+                          <span className="text-[10px] text-red-400 truncate max-w-[90px]" title={msg.errorReason}>
+                            {msg.errorReason}
+                          </span>
+                        )}
+
+                        {/* Sent time */}
+                        {msg.sentAt && (
+                          <span className="text-[10px] text-muted-foreground flex-shrink-0">
+                            {formatDistanceToNow(new Date(msg.sentAt), { addSuffix: true, locale: uk })}
+                          </span>
+                        )}
                       </div>
                     ))}
                   </div>
