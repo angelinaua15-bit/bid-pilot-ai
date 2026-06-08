@@ -664,6 +664,20 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
               status === 'skipped'          ? 'Пропущено'  : 'Помилка';
             const projectUrl = typeof app.url === 'string' && app.url.startsWith('https://') ? app.url : null;
 
+            // Extract human label from error code prefix "CODE: human text"
+            const rawError = app.errorReason as string | undefined;
+            const errorDisplay = rawError
+              ? rawError.includes(': ') ? rawError.split(': ').slice(1).join(': ') : rawError
+              : null;
+            const errorCode = rawError
+              ? rawError.split(':')[0].trim()
+              : null;
+
+            const rawSkip = app.skippedReason as string | undefined;
+            const skipDisplay = rawSkip
+              ? rawSkip.includes(': ') ? rawSkip.split(': ').slice(1).join(': ') : rawSkip
+              : null;
+
             return (
               <div key={app.id as string} className="glass-card p-3 rounded-xl">
                 <div className="flex items-start gap-2.5">
@@ -677,15 +691,22 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
                         <span className="text-[11px] text-muted-foreground">· AI {app.aiScore as number}%</span>
                       )}
                     </div>
-                    {(app.skippedReason as string) && (
-                      <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">
-                        {app.skippedReason as string}
+                    {skipDisplay && (
+                      <p className="text-[10px] text-yellow-400/80 mt-0.5 truncate" title={rawSkip}>
+                        {skipDisplay}
                       </p>
                     )}
-                    {(app.errorReason as string) && (
-                      <p className="text-[10px] text-red-400/80 mt-0.5 truncate">
-                        {app.errorReason as string}
-                      </p>
+                    {errorDisplay && (
+                      <div className="mt-1 flex flex-col gap-0.5">
+                        {errorCode && errorCode !== 'UNKNOWN_ERROR' && (
+                          <span className="text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 self-start">
+                            {errorCode}
+                          </span>
+                        )}
+                        <p className="text-[10px] text-red-400/90 leading-snug" title={rawError}>
+                          {errorDisplay}
+                        </p>
+                      </div>
                     )}
                     {/* Safe open — button with window.open, never <a href> in Telegram WebView */}
                     {projectUrl && (
