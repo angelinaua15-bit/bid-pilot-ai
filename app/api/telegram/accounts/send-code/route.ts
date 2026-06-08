@@ -1,8 +1,8 @@
 /**
  * POST /api/telegram/accounts/send-code
  *
- * Pure proxy to the Railway worker.
- * No GramJS / TelegramClient runs on Vercel — all MTProto happens on Railway.
+ * Calls GramJS MTProto directly on Vercel to send a login OTP.
+ * Saves the phoneHash in telegram_otp_sessions and updates account status.
  *
  * Body: { accountId, requesterId? }
  */
@@ -12,6 +12,7 @@ import {
   upsertTelegramAccount,
   saveTelegramOtpSession,
 } from '@/lib/db';
+import { sendTelegramCode } from '@/services/telegram-mtproto.service';
 
 export async function POST(req: NextRequest) {
   let accountId: string | undefined;
@@ -25,27 +26,22 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'accountId is required' }, { status: 400 });
     }
 
-    // ── Require Railway worker — GramJS never runs on Vercel ─────────────────
-    const workerUrl    = process.env.AUTOMATION_WORKER_URL?.replace(/\/$/, '');
-    const workerSecret = process.env.AUTOMATION_SECRET ?? '';
+    // Validate env vars up front — give a clear error instead of a cryptic GramJS crash
+    const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0);
+    const apiHash = process.env.TELEGRAM_API_HASH ?? '';
 
     console.log('[send-code] handler', {
       accountId,
-      requesterId:       requesterId ?? '(none)',
-      workerUrlExists:   Boolean(workerUrl),
-      workerUrl:         workerUrl ? workerUrl.replace(/\/\/.+@/, '//***@') : '(not set)',
-      automationSecretExists: Boolean(workerSecret),
-      authHeaderWillBeSent:   Boolean(workerUrl && workerSecret),
+      requesterId:   requesterId ?? '(not provided)',
+      apiIdSet:      Boolean(apiId),
+      apiHashLen:    apiHash.length,
+      handledBy:     'vercel',
     });
 
-    if (!workerUrl || !workerSecret) {
-      console.error('[send-code] AUTOMATION_WORKER_URL or AUTOMATION_SECRET not set — cannot proxy to Railway');
+    if (!apiId || !apiHash) {
+      console.error('[send-code] TELEGRAM_API_ID or TELEGRAM_API_HASH not set');
       return NextResponse.json(
-        {
-          ok:              false,
-          error:           'Railway worker not configured. Set AUTOMATION_WORKER_URL and AUTOMATION_SECRET in Vercel env vars.',
-          phoneHashExists: false,
-        },
+        { ok: false, error: 'Telegram API credentials not configured on server', phoneHashExists: false },
         { status: 503 }
       );
     }
@@ -56,99 +52,40 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
 
-    console.log('[send-code] proxying to Railway', {
-      url:         `${workerUrl}/telegram/accounts/send-code`,
+    console.log('[send-code] account found, invoking GramJS sendTelegramCode', {
       phoneNumber: account.phoneNumber,
+      status:      account.status,
     });
 
-    // ── Proxy to Railway ──────────────────────────────────────────────────────
-    console.log('[send-code] sending Authorization: Bearer header to Railway', {
-      endpoint: `${workerUrl}/telegram/accounts/send-code`,
-    });
-
-    const workerRes = await fetch(`${workerUrl}/telegram/accounts/send-code`, {
-      method: 'POST',
-      headers: {
-        'Content-Type':  'application/json',
-        'Authorization': `Bearer ${workerSecret}`,
-      },
-      body: JSON.stringify({
-        phoneNumber: account.phoneNumber,
-        accountId,
-      }),
-      // 180 s — Railway handles its own GramJS timeout internally
-      signal: AbortSignal.timeout(180_000),
-    });
-
-    const workerData = await workerRes.json() as {
-      ok:             boolean;
-      error?:         string;
-      telegramError?: string;
-      phoneHash?:     string;
-      sessionString?: string;
-      isCodeViaApp?:  boolean;
-      phoneHashExists?: boolean;
-    };
-
-    console.log('[send-code] Railway response', {
-      status:          workerRes.status,
-      ok:              workerData.ok,
-      phoneHashExists: !!workerData.phoneHash,
-      telegramError:   workerData.telegramError ?? workerData.error ?? null,
-    });
-
-    // Railway returned 401 — secret mismatch
-    if (workerRes.status === 401) {
-      const errMsg = 'Automation secret mismatch between Vercel and Railway. Ensure AUTOMATION_SECRET is the same in both environments.';
-      console.error('[send-code] Railway returned 401 — secret mismatch', {
-        railwayStatus: workerRes.status,
-        workerSecretLength: workerSecret.length,
-      });
-      return NextResponse.json(
-        { ok: false, error: errMsg, telegramError: errMsg, phoneHashExists: false },
-        { status: 503 }
-      );
-    }
-
-    if (!workerData.ok || !workerData.phoneHash) {
-      const errMsg = workerData.telegramError ?? workerData.error ?? 'Railway did not return phoneHash';
-
-      // Store error on account row
-      await upsertTelegramAccount({
-        ...account,
-        status:       'invalid',
-        errorMessage: errMsg,
-      }).catch(() => {});
-
-      return NextResponse.json(
-        {
-          ok:             false,
-          error:          errMsg,
-          telegramError:  errMsg,
-          phoneHashExists: false,
-        },
-        { status: workerRes.status >= 400 ? workerRes.status : 500 }
-      );
-    }
+    // ── Run GramJS directly on Vercel ─────────────────────────────────────────
+    const result = await sendTelegramCode(account.phoneNumber);
 
     // Persist OTP session and advance account status
     await Promise.all([
-      saveTelegramOtpSession(accountId, workerData.phoneHash, workerData.sessionString ?? ''),
+      saveTelegramOtpSession(accountId, result.phoneHash, result.sessionString),
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
 
+    console.log('[send-code] success', {
+      phoneNumber:  account.phoneNumber,
+      isCodeViaApp: result.isCodeViaApp,
+      hashPrefix:   result.phoneHash.slice(0, 8),
+      handledBy:    'vercel',
+    });
+
     return NextResponse.json({
-      ok:             true,
-      message:        'Code sent',
-      isCodeViaApp:   workerData.isCodeViaApp ?? false,
+      ok:              true,
+      message:         'Code sent',
+      isCodeViaApp:    result.isCodeViaApp,
       phoneHashExists: true,
-      handledBy:      'railway',
+      handledBy:       'vercel',
     });
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[send-code] proxy error', { message, accountId });
+    console.error('[send-code] FAILED', { message, accountId });
 
+    // Persist error on the account row
     if (accountId) {
       const account = await getTelegramAccountById(accountId).catch(() => null);
       if (account) {
@@ -160,14 +97,41 @@ export async function POST(req: NextRequest) {
       }
     }
 
+    // Map well-known Telegram errors to friendly messages
+    let friendlyError = message;
+    let status = 500;
+
+    if (/PHONE_NUMBER_INVALID|INVALID_PHONE/i.test(message)) {
+      friendlyError = 'Invalid phone number format';
+      status = 400;
+    } else if (/PHONE_NUMBER_BANNED/i.test(message)) {
+      friendlyError = 'This phone number is banned by Telegram';
+      status = 403;
+    } else if (/FLOOD_WAIT/i.test(message)) {
+      const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
+      friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
+      status = 429;
+    } else if (/API_ID_INVALID|api_id/i.test(message)) {
+      friendlyError = 'Invalid Telegram API credentials (API_ID_INVALID)';
+      status = 503;
+    } else if (/^Unauthorized$|UNAUTHORIZED/i.test(message)) {
+      friendlyError =
+        'Telegram rejected the request (401 Unauthorized). ' +
+        'The api_id may be blocked on cloud IPs — create a new app at my.telegram.org.';
+      status = 503;
+    } else if (/ECONNREFUSED|ENOTFOUND|fetch failed|network|timed out/i.test(message)) {
+      friendlyError = 'Cannot reach Telegram servers. Check network connection.';
+      status = 503;
+    }
+
     return NextResponse.json(
       {
-        ok:             false,
-        error:          message,
-        telegramError:  message,
+        ok:              false,
+        error:           friendlyError,
+        telegramError:   message,
         phoneHashExists: false,
       },
-      { status: 500 }
+      { status }
     );
   }
 }
