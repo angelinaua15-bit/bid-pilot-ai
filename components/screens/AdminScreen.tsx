@@ -534,6 +534,13 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
   const [isCodeViaApp, setIsCodeViaApp]         = useState(false);
   const [testingId, setTestingId]               = useState<string | null>(null);
   const [testResult, setTestResult]             = useState<Record<string, boolean>>({});
+  const [sendCodeDebug, setSendCodeDebug]       = useState<{
+    url: string;
+    status: number;
+    json: Record<string, unknown>;
+    phoneHashExists: boolean;
+    telegramError?: string;
+  } | null>(null);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -564,13 +571,33 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const accountId = data.account!.id;
       setCurrentAccountId(accountId);
       // Send OTP
-      const codeRes = await fetch('/api/telegram/accounts/send-code', {
+      const codeUrl = '/api/telegram/accounts/send-code';
+      const codeRes = await fetch(codeUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId }),
       });
-      const codeData = await codeRes.json() as { ok: boolean; error?: string; isCodeViaApp?: boolean };
-      if (!codeData.ok) { setError(codeData.error ?? 'Не вдалося відправити код'); return; }
+      const codeData = await codeRes.json() as {
+        ok: boolean; error?: string; telegramError?: string;
+        isCodeViaApp?: boolean; phoneHashExists?: boolean;
+      };
+      // Always populate debug panel so developer can see exactly what happened
+      setSendCodeDebug({
+        url:             codeUrl,
+        status:          codeRes.status,
+        json:            codeData as Record<string, unknown>,
+        phoneHashExists: codeData.phoneHashExists ?? false,
+        telegramError:   codeData.telegramError,
+      });
+      if (!codeData.ok) {
+        setError(codeData.telegramError ?? codeData.error ?? 'Не вдалося відправити код');
+        return;
+      }
+      // Only advance when Telegram confirmed the send with a real phoneCodeHash
+      if (!codeData.phoneHashExists) {
+        setError('Telegram не повернув phoneCodeHash — код не відправлено');
+        return;
+      }
       setIsCodeViaApp(codeData.isCodeViaApp ?? false);
       setStep('code');
       await load();
@@ -633,14 +660,27 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setError('');
     setWorking(true);
     setCurrentAccountId(accountId);
+    setSendCodeDebug(null);
     try {
-      const res = await fetch('/api/telegram/accounts/send-code', {
+      const codeUrl = '/api/telegram/accounts/send-code';
+      const res = await fetch(codeUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId }),
       });
-      const data = await res.json() as { ok: boolean; error?: string; isCodeViaApp?: boolean };
-      if (!data.ok) { setError(data.error ?? 'Не вдалося відправити код'); return; }
+      const data = await res.json() as {
+        ok: boolean; error?: string; telegramError?: string;
+        isCodeViaApp?: boolean; phoneHashExists?: boolean;
+      };
+      setSendCodeDebug({
+        url:             codeUrl,
+        status:          res.status,
+        json:            data as Record<string, unknown>,
+        phoneHashExists: data.phoneHashExists ?? false,
+        telegramError:   data.telegramError,
+      });
+      if (!data.ok) { setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код'); return; }
+      if (!data.phoneHashExists) { setError('Telegram не повернув phoneCodeHash — код не відправлено'); return; }
       setIsCodeViaApp(data.isCodeViaApp ?? false);
       setCode('');
       setStep('code');
@@ -680,6 +720,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setError('');
     setCurrentAccountId(null);
     setIsCodeViaApp(false);
+    setSendCodeDebug(null);
   }
 
   async function handleDelete(id: string) {
@@ -785,7 +826,44 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
           {error && (
             <div className="flex items-start gap-2 rounded-xl bg-red-500/10 px-3 py-2">
               <AlertTriangle size={13} className="text-red-400 mt-0.5 flex-shrink-0" />
-              <p className="text-[11px] text-red-400">{error}</p>
+              <p className="text-[11px] text-red-400 break-words">{error}</p>
+            </div>
+          )}
+
+          {/* Debug panel — always shown after attempting to send code */}
+          {sendCodeDebug && (
+            <div className="rounded-xl border border-border bg-secondary/50 p-3 flex flex-col gap-1.5 text-[10px] font-mono overflow-x-auto">
+              <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide font-sans mb-0.5">
+                Debug: send-code request
+              </p>
+              <div className="flex gap-2 items-center">
+                <span className="text-muted-foreground">URL:</span>
+                <span className="text-foreground">{sendCodeDebug.url}</span>
+              </div>
+              <div className="flex gap-2 items-center">
+                <span className="text-muted-foreground">Status:</span>
+                <span className={sendCodeDebug.status === 200 ? 'text-green-400' : 'text-red-400'}>
+                  {sendCodeDebug.status}
+                </span>
+              </div>
+              <div className="flex gap-2 items-center">
+                <span className="text-muted-foreground">phoneHashExists:</span>
+                <span className={sendCodeDebug.phoneHashExists ? 'text-green-400' : 'text-red-400'}>
+                  {String(sendCodeDebug.phoneHashExists)}
+                </span>
+              </div>
+              {sendCodeDebug.telegramError && (
+                <div className="flex flex-col gap-0.5">
+                  <span className="text-muted-foreground">telegramError:</span>
+                  <span className="text-red-400 break-words whitespace-pre-wrap">{sendCodeDebug.telegramError}</span>
+                </div>
+              )}
+              <div className="flex flex-col gap-0.5">
+                <span className="text-muted-foreground">response JSON:</span>
+                <span className="text-foreground break-words whitespace-pre-wrap">
+                  {JSON.stringify(sendCodeDebug.json, null, 2)}
+                </span>
+              </div>
             </div>
           )}
 
