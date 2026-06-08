@@ -51,7 +51,20 @@ export function LogsScreen({ userId: _userId }: { userId?: string }) {
         : Array.isArray(res.logs)
           ? res.logs
           : [];
-      setLogs(rawData as AutoBidLog[]);
+      // Normalise each entry: coerce message/level to strings in case the DB
+      // or worker returns JSONB objects or unexpected shapes
+      const normalised = (rawData as Array<Record<string, unknown>>).map((entry) => ({
+        id:        String(entry.id        ?? entry._id       ?? Math.random()),
+        level:     String(entry.level     ?? 'info')          as AutoBidLog['level'],
+        message:   typeof entry.message === 'string'
+                     ? entry.message
+                     : entry.message != null
+                       ? JSON.stringify(entry.message)
+                       : '(no message)',
+        timestamp: String(entry.timestamp ?? entry.created_at ?? new Date().toISOString()),
+        meta:      (entry.meta ?? entry.metadata ?? undefined) as AutoBidLog['meta'],
+      }));
+      setLogs(normalised);
 
       if (res.workerError) {
         setError(`Worker: ${res.workerError}`);
@@ -169,7 +182,7 @@ export function LogsScreen({ userId: _userId }: { userId?: string }) {
               </div>
               <div className="flex-1 min-w-0">
                 <p className={cn('text-xs leading-snug', isPlaywrightStep && 'font-mono text-[11px]')}>
-                  {log.message}
+                  {typeof log.message === 'string' ? log.message : JSON.stringify(log.message)}
                 </p>
                 {log.projectTitle && (
                   <p className="text-[11px] text-muted-foreground truncate mt-0.5">{log.projectTitle}</p>
