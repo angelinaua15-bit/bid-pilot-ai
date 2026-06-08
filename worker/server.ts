@@ -933,8 +933,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Telegram MTProto: send OTP ────────────────────────────────────────────
-    if (method === 'POST' && pathname === '/telegram/send-code') {
+    // ── Telegram MTProto: send OTP (/telegram/accounts/send-code + legacy /telegram/send-code) ──
+    if (method === 'POST' && (pathname === '/telegram/accounts/send-code' || pathname === '/telegram/send-code')) {
       try {
         const body = await readBody(req)
         const { phoneNumber, accountId } = body as { phoneNumber?: string; accountId?: string }
@@ -969,8 +969,8 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Telegram MTProto: verify OTP (+ optional 2FA) ─────────────────────────
-    if (method === 'POST' && pathname === '/telegram/verify-code') {
+    // ── Telegram MTProto: verify OTP (/telegram/accounts/verify-code + legacy /telegram/verify-code) ──
+    if (method === 'POST' && (pathname === '/telegram/accounts/verify-code' || pathname === '/telegram/verify-code')) {
       try {
         const body = await readBody(req)
         const { phoneNumber, phoneHash, code, password } = body as {
