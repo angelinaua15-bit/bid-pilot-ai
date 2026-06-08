@@ -814,25 +814,49 @@ const server = http.createServer(async (req, res) => {
     })
   }
 
-  // ── /health — unauthenticated, used by Railway health-checks and frontend ──
+  // ── /health — unauthenticated, basic liveness ────────────────────────────────
   if (method === 'GET' && (pathname === '/health' || pathname === '/api/health')) {
-    const full = url.searchParams.get('check') === 'browser'
-    if (full) {
-      try {
-        const { chromium } = await import('playwright')
-        const b = await chromium.launch({
-          headless: true,
-          args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage'],
-        })
-        const version = b.version()
-        await b.close()
-        return json(res, 200, { ok: true, service: 'worker', browser: 'ok', chromiumVersion: version })
-      } catch (e) {
-        const msg = e instanceof Error ? e.message : String(e)
-        return json(res, 500, { ok: false, service: 'worker', browser: 'error', error: msg })
-      }
+    return json(res, 200, { ok: true, service: 'worker', uptime: process.uptime() })
+  }
+
+  // ── /health/playwright — launches real Chromium, verifies browser works ──────
+  if (method === 'GET' && (pathname === '/health/playwright' || pathname === '/api/health/playwright')) {
+    try {
+      const { chromium } = await import('playwright')
+      const b = await chromium.launch({
+        headless: true,
+        args: [
+          '--no-sandbox',
+          '--disable-setuid-sandbox',
+          '--disable-dev-shm-usage',
+          '--disable-gpu',
+          '--no-zygote',
+        ],
+      })
+      const version = b.version()
+      await b.close()
+      console.log(`[health/playwright] Chromium launched OK — version ${version}`)
+      return json(res, 200, {
+        ok: true,
+        service: 'worker',
+        browser: 'ok',
+        chromiumVersion: version,
+      })
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e)
+      const isDepsMissing = msg.includes('libglib') || msg.includes('cannot open shared object') || msg.includes('error while loading')
+      console.error(`[health/playwright] Chromium launch FAILED: ${msg}`)
+      return json(res, 500, {
+        ok: false,
+        service: 'worker',
+        browser: 'error',
+        code: isDepsMissing ? 'MISSING_SYSTEM_DEPS' : 'CHROMIUM_LAUNCH_FAILED',
+        error: msg,
+        hint: isDepsMissing
+          ? 'System libraries missing. Ensure Dockerfile uses mcr.microsoft.com/playwright image and runs "npx playwright install --with-deps chromium" after npm install.'
+          : 'Chromium binary not found or failed to start. Run "npx playwright install chromium" inside the container.',
+      })
     }
-    return json(res, 200, { ok: true, service: 'worker' })
   }
 
   if (!authenticate(req, url)) {
