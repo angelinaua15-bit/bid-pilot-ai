@@ -460,7 +460,15 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
   const load = useCallback(async () => {
     setLoading(true);
     const res = await fetch(`/api/logs?userId=${user.id}&limit=100`).then((r) => r.json()).catch(() => null);
-    setLogs(res?.ok ? (res.logs ?? res.data ?? []) : []);
+    const rawLogs: Array<Record<string, unknown>> = res?.ok ? (res.logs ?? res.data ?? []) : [];
+    setLogs(rawLogs.map((entry) => ({
+      id:        String(entry.id ?? Math.random()),
+      level:     String(entry.level ?? 'info'),
+      message:   typeof entry.message === 'string'
+                   ? entry.message
+                   : entry.message != null ? JSON.stringify(entry.message) : '(no message)',
+      timestamp: String(entry.timestamp ?? entry.created_at ?? new Date().toISOString()),
+    })));
     setLoading(false);
   }, [user.id]);
 
@@ -489,7 +497,7 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
               {log.level}
             </span>
             <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-foreground leading-snug">{log.message}</p>
+              <p className="text-[11px] text-foreground leading-snug">{typeof log.message === 'string' ? log.message : JSON.stringify(log.message)}</p>
               <p className="text-[10px] text-muted-foreground/50">{new Date(log.timestamp).toLocaleString('uk-UA')}</p>
             </div>
           </div>
@@ -826,7 +834,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
           {error && (
             <div className="flex items-start gap-2 rounded-xl bg-red-500/10 px-3 py-2">
               <AlertTriangle size={13} className="text-red-400 mt-0.5 flex-shrink-0" />
-              <p className="text-[11px] text-red-400 break-words">{error}</p>
+              <p className="text-[11px] text-red-400 break-words">{typeof error === 'string' ? error : JSON.stringify(error)}</p>
             </div>
           )}
 
@@ -934,7 +942,9 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                     )}
                   </div>
                   {acc.errorMessage && (
-                    <p className="text-[10px] text-red-400 mt-0.5 truncate">{acc.errorMessage}</p>
+                    <p className="text-[10px] text-red-400 mt-0.5 truncate">
+                      {typeof acc.errorMessage === 'string' ? acc.errorMessage : JSON.stringify(acc.errorMessage)}
+                    </p>
                   )}
                 </div>
                 <button
