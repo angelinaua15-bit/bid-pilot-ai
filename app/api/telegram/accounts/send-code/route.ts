@@ -4,7 +4,10 @@
  * Calls GramJS MTProto directly (no worker proxy) to send a login OTP.
  * Saves the phoneHash in telegram_otp_sessions and updates account status.
  *
- * Body: { accountId }
+ * Body: { accountId, requesterId? }
+ *   requesterId — optional: SaaSUser.id of the caller (used for owner diagnostics only,
+ *                 this route does NOT require auth — any logged-in Telegram user whose
+ *                 account row exists may call it).
  */
 import { NextRequest, NextResponse } from 'next/server';
 import {
@@ -13,21 +16,46 @@ import {
   saveTelegramOtpSession,
 } from '@/lib/db';
 import { sendTelegramCode } from '@/services/telegram-mtproto.service';
+import { OWNER_TELEGRAM_ID } from '@/types';
+
+/** Determine if a requesterId string belongs to the hard-coded owner. */
+function isOwnerRequester(requesterId?: string | null): boolean {
+  if (!requesterId) return false;
+  // local_<telegramId> pattern (Supabase not configured or preview mode)
+  if (requesterId.startsWith('local_')) {
+    return Number(requesterId.slice(6)) === OWNER_TELEGRAM_ID;
+  }
+  // UUID — will be resolved via account.userId comparison below
+  return false;
+}
 
 export async function POST(req: NextRequest) {
   let accountId: string | undefined;
 
   try {
-    const body = await req.json();
-    accountId = (body as { accountId?: string }).accountId;
+    const body        = await req.json();
+    accountId         = (body as { accountId?: string }).accountId;
+    const requesterId = (body as { requesterId?: string }).requesterId ?? null;
 
     if (!accountId) {
       return NextResponse.json({ ok: false, error: 'accountId is required' }, { status: 400 });
     }
 
-    // Validate env vars up front — give a clear error instead of a cryptic GramJS crash
+    // ── Auth diagnostics (requirements 6-8) ──────────────────────────────────
+    const isOwner = isOwnerRequester(requesterId);
     const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0);
     const apiHash = process.env.TELEGRAM_API_HASH ?? '';
+
+    console.log('[send-code] auth check', {
+      accountId,
+      requesterId:       requesterId ?? '(not provided)',
+      isOwner,
+      apiIdSet:          Boolean(apiId),
+      apiHashLen:        apiHash.length,
+      workerConfigured:  Boolean(process.env.AUTOMATION_WORKER_URL),
+    });
+
+    // Validate env vars up front — give a clear error instead of a cryptic GramJS crash
     if (!apiId || !apiHash) {
       console.error('[send-code] TELEGRAM_API_ID or TELEGRAM_API_HASH not set');
       return NextResponse.json(
@@ -38,8 +66,16 @@ export async function POST(req: NextRequest) {
 
     const account = await getTelegramAccountById(accountId);
     if (!account) {
+      console.error('[send-code] account not found', { accountId, isOwner });
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
+
+    console.log('[send-code] account found', {
+      phoneNumber: account.phoneNumber,
+      status:      account.status,
+      userId:      account.userId,
+      isOwner,
+    });
 
     // ── Route to Railway worker if configured (avoids Vercel 10s timeout) ──────
     const workerUrl  = process.env.AUTOMATION_WORKER_URL?.replace(/\/$/, '');
@@ -146,9 +182,22 @@ export async function POST(req: NextRequest) {
       friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
       status = 429;
     } else if (/API_ID_INVALID|api_id/i.test(message)) {
-      friendlyError = 'Invalid Telegram API credentials';
+      friendlyError = 'Invalid Telegram API credentials (API_ID_INVALID)';
       status = 503;
-    } else if (/ECONNREFUSED|ENOTFOUND|fetch failed|network/i.test(message)) {
+    } else if (/^Unauthorized$|401.*Unauthorized|Unauthorized.*401/i.test(message) || message === 'Unauthorized') {
+      // Telegram sends 401 UNAUTHORIZED when api_id is blocked on this IP/environment
+      // or when the auth key is corrupted. This is NOT a user auth issue.
+      friendlyError =
+        'Telegram rejected the API credentials with 401 Unauthorized. ' +
+        'Possible causes: (1) api_id is banned on cloud IPs — try a new api_id from my.telegram.org, ' +
+        '(2) the auth key is corrupted — restart the server, ' +
+        '(3) the api_hash does not match the api_id.';
+      status = 503;
+      console.error('[send-code] Telegram 401 UNAUTHORIZED — api_id may be blocked on this server IP', {
+        apiId: process.env.TELEGRAM_API_ID,
+        apiHashLength: process.env.TELEGRAM_API_HASH?.length,
+      });
+    } else if (/ECONNREFUSED|ENOTFOUND|fetch failed|network|timed out/i.test(message)) {
       friendlyError = 'Cannot reach Telegram servers. Check network connection';
       status = 503;
     }
