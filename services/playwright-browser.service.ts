@@ -91,7 +91,6 @@ async function getContext(log: BidLogFn): Promise<BrowserContext> {
         '--disable-gpu',
         '--no-first-run',
         '--no-zygote',
-        '--single-process',
       ],
     });
 
@@ -697,7 +696,7 @@ export async function submitBidViaPlaywright(
   }
 }
 
-// ─── Project feed parser ──────────────────────────────────────────────────────
+// ─── Project feed parser ────────────────────────────────────────���─────────────
 
 export interface FeedProject {
   id: string;
