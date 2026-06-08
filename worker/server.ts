@@ -937,15 +937,35 @@ const server = http.createServer(async (req, res) => {
     if (method === 'POST' && pathname === '/telegram/send-code') {
       try {
         const body = await readBody(req)
-        const { phoneNumber } = body as { phoneNumber?: string }
+        const { phoneNumber, accountId } = body as { phoneNumber?: string; accountId?: string }
         if (!phoneNumber) return json(res, 400, { ok: false, error: 'phoneNumber is required' })
+
+        console.log(`[worker/telegram/send-code] starting for ${phoneNumber} accountId:${accountId ?? 'none'}`)
+        addLog({ level: 'info', message: `[MTProto] sendCode started: ${phoneNumber}` })
+
         const { sendTelegramCode } = await import('../services/telegram-mtproto.service')
         const result = await sendTelegramCode(phoneNumber)
-        return json(res, 200, { ok: true, phoneHash: result.phoneHash, isCodeViaApp: result.isCodeViaApp })
+
+        console.log(`[worker/telegram/send-code] success — phoneHashExists:${!!result.phoneHash} isCodeViaApp:${result.isCodeViaApp}`)
+        addLog({ level: 'success', message: `[MTProto] sendCode OK: ${phoneNumber} hash:${result.phoneHash?.slice(0, 8)}` })
+
+        return json(res, 200, {
+          ok:            true,
+          phoneHash:     result.phoneHash,
+          isCodeViaApp:  result.isCodeViaApp,
+          sessionString: result.sessionString, // returned so Vercel can persist it to DB
+          phoneHashExists: !!result.phoneHash,
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        console.error(`[worker/telegram/send-code] FAILED: ${message}`)
         addLog({ level: 'error', message: `[MTProto] sendCode error: ${message}` })
-        return json(res, 500, { ok: false, error: message })
+        return json(res, 500, {
+          ok:             false,
+          error:          message,
+          telegramError:  message,
+          phoneHashExists: false,
+        })
       }
     }
 
@@ -962,18 +982,32 @@ const server = http.createServer(async (req, res) => {
         if (!phoneNumber || !phoneHash || !code) {
           return json(res, 400, { ok: false, error: 'phoneNumber, phoneHash and code are required' })
         }
+
+        console.log(`[worker/telegram/verify-code] starting for ${phoneNumber}`)
+        addLog({ level: 'info', message: `[MTProto] verifyCode started: ${phoneNumber}` })
+
         const { signInWithCode } = await import('../services/telegram-mtproto.service')
         const result = await signInWithCode(phoneNumber, phoneHash, code, password)
-        addLog({ level: 'success', message: `[MTProto] Account signed in: ${phoneNumber}` })
-        return json(res, 200, { ok: true, sessionString: result.sessionString })
+
+        console.log(`[worker/telegram/verify-code] success — telegramId:${result.telegramId}`)
+        addLog({ level: 'success', message: `[MTProto] Account signed in: ${phoneNumber} id:${result.telegramId}` })
+
+        return json(res, 200, {
+          ok:            true,
+          sessionString: result.sessionString,
+          telegramId:    result.telegramId,
+          username:      result.username,
+          firstName:     result.firstName,
+        })
       } catch (err) {
         const message = err instanceof Error ? err.message : String(err)
+        console.error(`[worker/telegram/verify-code] FAILED: ${message}`)
         addLog({ level: 'error', message: `[MTProto] verifyCode error: ${message}` })
         // Signal 2FA requirement so the caller can prompt for the password
         if (message.includes('SESSION_PASSWORD_NEEDED')) {
           return json(res, 422, { ok: false, error: message, requires2fa: true })
         }
-        return json(res, 500, { ok: false, error: message })
+        return json(res, 500, { ok: false, error: message, telegramError: message })
       }
     }
 
