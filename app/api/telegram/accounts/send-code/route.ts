@@ -41,24 +41,69 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
 
-    console.log('[send-code] calling sendTelegramCode for', account.phoneNumber);
+    // ── Route to Railway worker if configured (avoids Vercel 10s timeout) ──────
+    const workerUrl  = process.env.AUTOMATION_WORKER_URL?.replace(/\/$/, '');
+    const workerSecret = process.env.AUTOMATION_SECRET ?? '';
+    const viaWorker  = Boolean(workerUrl && workerSecret);
 
-    let result: Awaited<ReturnType<typeof sendTelegramCode>> | null = null;
-    try {
-      result = await sendTelegramCode(account.phoneNumber);
-      console.log('[send-code] result', {
-        phoneNumber:      account.phoneNumber,
-        phoneHashExists:  !!result.phoneHash,
-        phoneHashPrefix:  result.phoneHash?.slice(0, 8),
-        isCodeViaApp:     result.isCodeViaApp,
-        sessionStrLength: result.sessionString?.length ?? 0,
+    console.log(`[send-code] routing via ${viaWorker ? 'Railway worker: ' + workerUrl : 'Vercel direct GramJS'} for ${account.phoneNumber}`);
+
+    let phoneHash: string;
+    let isCodeViaApp: boolean;
+    let sessionString: string;
+
+    if (viaWorker) {
+      // ── Worker path: POST {workerUrl}/telegram/send-code ─────────────────────
+      const workerRes = await fetch(`${workerUrl}/telegram/send-code`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-automation-secret': workerSecret,
+        },
+        body: JSON.stringify({
+          phoneNumber: account.phoneNumber,
+          accountId,
+        }),
+        // 180s signal — worker handles its own internal 60s*3 retry
+        signal: AbortSignal.timeout(180_000),
       });
-    } catch (sendErr) {
-      console.error('[send-code] error', sendErr instanceof Error ? sendErr.message : sendErr);
-      throw sendErr; // re-throw to outer catch block
-    }
 
-    const { phoneHash, isCodeViaApp, sessionString } = result;
+      const workerData = await workerRes.json() as {
+        ok: boolean; error?: string;
+        phoneHash?: string; sessionString?: string; isCodeViaApp?: boolean;
+      };
+      console.log('[send-code] worker response', { status: workerRes.status, ok: workerData.ok, phoneHashExists: !!workerData.phoneHash });
+
+      if (!workerData.ok || !workerData.phoneHash) {
+        const errMsg = workerData.error ?? 'Worker did not return phoneHash';
+        throw new Error(errMsg);
+      }
+
+      phoneHash     = workerData.phoneHash;
+      isCodeViaApp  = workerData.isCodeViaApp ?? false;
+      sessionString = workerData.sessionString ?? '';
+
+    } else {
+      // ── Direct path: GramJS runs inside Vercel function ──────────────────────
+      let result: Awaited<ReturnType<typeof sendTelegramCode>> | null = null;
+      try {
+        result = await sendTelegramCode(account.phoneNumber);
+        console.log('[send-code] result', {
+          phoneNumber:      account.phoneNumber,
+          phoneHashExists:  !!result.phoneHash,
+          phoneHashPrefix:  result.phoneHash?.slice(0, 8),
+          isCodeViaApp:     result.isCodeViaApp,
+          sessionStrLength: result.sessionString?.length ?? 0,
+        });
+      } catch (sendErr) {
+        console.error('[send-code] error', sendErr instanceof Error ? sendErr.message : sendErr);
+        throw sendErr;
+      }
+
+      phoneHash     = result.phoneHash;
+      isCodeViaApp  = result.isCodeViaApp;
+      sessionString = result.sessionString;
+    }
 
     // Guard: if no phoneCodeHash, Telegram never confirmed the send — do NOT say "code sent"
     if (!phoneHash) {

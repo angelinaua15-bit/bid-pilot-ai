@@ -85,53 +85,82 @@ export interface SignInResult {
 // 1. sendTelegramCode
 // ---------------------------------------------------------------------------
 
+const SEND_CODE_MAX_ATTEMPTS = 3
+const SEND_CODE_RETRY_DELAY_MS = 5_000
+
 export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeResult> {
   const { apiId, apiHash } = getCredentials()
-  const client = makeClient(apiId, apiHash)
 
-  console.log('[telegram/sendCode] connecting for', phoneNumber)
+  let lastError: Error = new Error('sendTelegramCode: no attempts made')
 
-  await withTimeout(client.connect(), 20_000, 'connect')
+  for (let attempt = 1; attempt <= SEND_CODE_MAX_ATTEMPTS; attempt++) {
+    const client = makeClient(apiId, apiHash)
 
-  console.log('[telegram/sendCode] connected, invoking auth.SendCode')
+    console.log(`[telegram/sendCode] attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} — connecting for ${phoneNumber}`)
 
-  try {
-    const result = await withTimeout(
-      client.invoke(
-        new Api.auth.SendCode({
-          phoneNumber,
-          apiId,
-          apiHash,
-          settings: new Api.CodeSettings({
-            allowFlashcall: false,
-            currentNumber:  false,
-            allowAppHash:   true,
-          }),
-        })
-      ),
-      20_000,
-      'auth.SendCode',
-    ) as Api.auth.SentCode
+    try {
+      await withTimeout(client.connect(), 60_000, `connect (attempt ${attempt})`)
 
-    const sessionString = (client.session.save() as unknown) as string
+      console.log(`[telegram/sendCode] connected (attempt ${attempt}) — invoking auth.SendCode`)
 
-    // GramJS v2: check both className and CONSTRUCTOR_ID for the app-code type
-    const typeClass   = result.type?.className ?? ''
-    const typeId      = (result.type as unknown as { CONSTRUCTOR_ID?: number })?.CONSTRUCTOR_ID
-    const isCodeViaApp = typeClass === 'auth.SentCodeTypeApp' ||
-                         typeClass.includes('SentCodeTypeApp') ||
-                         typeId === 0x3dbb5986
+      const result = await withTimeout(
+        client.invoke(
+          new Api.auth.SendCode({
+            phoneNumber,
+            apiId,
+            apiHash,
+            settings: new Api.CodeSettings({
+              allowFlashcall: false,
+              currentNumber:  false,
+              allowAppHash:   true,
+            }),
+          })
+        ),
+        60_000,
+        `auth.SendCode (attempt ${attempt})`,
+      ) as Api.auth.SentCode
 
-    console.log('[telegram/sendCode] success — type:', typeClass, 'typeId:', typeId, 'isCodeViaApp:', isCodeViaApp)
+      const sessionString = (client.session.save() as unknown) as string
 
-    return {
-      phoneHash: result.phoneCodeHash,
-      isCodeViaApp,
-      sessionString,
+      // GramJS v2: check both className and CONSTRUCTOR_ID for the app-code type
+      const typeClass    = result.type?.className ?? ''
+      const typeId       = (result.type as unknown as { CONSTRUCTOR_ID?: number })?.CONSTRUCTOR_ID
+      const isCodeViaApp = typeClass === 'auth.SentCodeTypeApp' ||
+                           typeClass.includes('SentCodeTypeApp') ||
+                           typeId === 0x3dbb5986
+
+      console.log(`[telegram/sendCode] success (attempt ${attempt}) — type:${typeClass} typeId:${typeId} isCodeViaApp:${isCodeViaApp} hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`)
+
+      return {
+        phoneHash: result.phoneCodeHash,
+        isCodeViaApp,
+        sessionString,
+      }
+    } catch (err) {
+      lastError = err instanceof Error ? err : new Error(String(err))
+      console.error(`[telegram/sendCode] attempt ${attempt} FAILED: ${lastError.message}`)
+
+      // Do not retry permanent Telegram errors
+      const msg = lastError.message
+      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|PHONE_NUMBER_FLOOD|API_ID_INVALID|PHONE_NUMBER_UNOCCUPIED/.test(msg)) {
+        console.log('[telegram/sendCode] permanent error — not retrying')
+        throw lastError
+      }
+
+      if (attempt < SEND_CODE_MAX_ATTEMPTS) {
+        console.log(`[telegram/sendCode] retrying in ${SEND_CODE_RETRY_DELAY_MS / 1000}s…`)
+        await new Promise(r => setTimeout(r, SEND_CODE_RETRY_DELAY_MS))
+      }
+    } finally {
+      client.disconnect().catch(() => {})
     }
-  } finally {
-    client.disconnect().catch(() => {})
   }
+
+  throw new Error(
+    `Telegram connection timeout after ${SEND_CODE_MAX_ATTEMPTS} attempts. ` +
+    `Last error: ${lastError.message}. ` +
+    `Try again or use the Railway auth endpoint.`
+  )
 }
 
 // ---------------------------------------------------------------------------

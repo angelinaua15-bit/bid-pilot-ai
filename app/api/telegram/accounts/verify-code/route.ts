@@ -59,15 +59,62 @@ export async function POST(req: NextRequest) {
       );
     }
 
-    console.log('[verify-code] verifying code for', account.phoneNumber);
+    // ── Route to Railway worker if configured (avoids Vercel 10s timeout) ──────
+    const workerUrl    = process.env.AUTOMATION_WORKER_URL?.replace(/\/$/, '');
+    const workerSecret = process.env.AUTOMATION_SECRET ?? '';
+    const viaWorker    = Boolean(workerUrl && workerSecret);
 
-    const { sessionString, telegramId, username, firstName } = await signInWithCode(
-      account.phoneNumber,
-      otpSession.phoneHash,
-      code,
-      password,
-      otpSession.sessionString ?? undefined,
-    );
+    console.log(`[verify-code] routing via ${viaWorker ? 'Railway worker' : 'Vercel direct'} for ${account.phoneNumber}`);
+
+    let sessionString: string;
+    let telegramId: string | undefined;
+    let username: string | undefined;
+    let firstName: string | undefined;
+
+    if (viaWorker) {
+      const workerRes = await fetch(`${workerUrl}/telegram/verify-code`, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          'x-automation-secret': workerSecret,
+        },
+        body: JSON.stringify({
+          phoneNumber: account.phoneNumber,
+          phoneHash:   otpSession.phoneHash,
+          code,
+          password:    password ?? '',
+        }),
+        signal: AbortSignal.timeout(180_000),
+      });
+
+      const workerData = await workerRes.json() as {
+        ok: boolean; error?: string; requires2fa?: boolean;
+        sessionString?: string; telegramId?: string; username?: string; firstName?: string;
+      };
+      console.log('[verify-code] worker response', { status: workerRes.status, ok: workerData.ok, requires2fa: workerData.requires2fa });
+
+      if (!workerData.ok) {
+        if (workerData.requires2fa) throw Object.assign(new Error('SESSION_PASSWORD_NEEDED'), { requires2fa: true });
+        throw new Error(workerData.error ?? 'Worker verify-code failed');
+      }
+      sessionString = workerData.sessionString ?? '';
+      telegramId    = workerData.telegramId;
+      username      = workerData.username;
+      firstName     = workerData.firstName;
+
+    } else {
+      const result = await signInWithCode(
+        account.phoneNumber,
+        otpSession.phoneHash,
+        code,
+        password,
+        otpSession.sessionString ?? undefined,
+      );
+      sessionString = result.sessionString;
+      telegramId    = result.telegramId;
+      username      = result.username;
+      firstName     = result.firstName;
+    }
 
     console.log('[verify-code] sign-in successful for', account.phoneNumber,
       '— telegramId:', telegramId, 'username:', username);
@@ -96,7 +143,7 @@ export async function POST(req: NextRequest) {
     console.error('[verify-code] error:', message);
 
     // 2FA required — tell the frontend to show the password field
-    if (message.includes('SESSION_PASSWORD_NEEDED')) {
+    if (message.includes('SESSION_PASSWORD_NEEDED') || (err as { requires2fa?: boolean })?.requires2fa) {
       if (accountId) {
         const account = await getTelegramAccountById(accountId).catch(() => null);
         if (account) {
