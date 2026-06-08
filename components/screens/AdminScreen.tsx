@@ -507,7 +507,7 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
   );
 }
 
-// ── Telegram Accounts Tab ─────────────────────────────────────────────────────
+// ── Telegram Accounts Tab ───────────────────���─────────────────────────────────
 
 type WizardStep = 'idle' | 'phone' | 'code' | 'password' | 'done';
 
@@ -583,7 +583,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const codeRes = await fetch(codeUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId }),
+        body: JSON.stringify({ accountId, requesterId: user.id }),
       });
       const codeData = await codeRes.json() as {
         ok: boolean; error?: string; telegramError?: string;
@@ -674,7 +674,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch(codeUrl, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId }),
+        body: JSON.stringify({ accountId, requesterId: user.id }),
       });
       const data = await res.json() as {
         ok: boolean; error?: string; telegramError?: string;

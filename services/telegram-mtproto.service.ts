@@ -96,26 +96,43 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
   for (let attempt = 1; attempt <= SEND_CODE_MAX_ATTEMPTS; attempt++) {
     const client = makeClient(apiId, apiHash)
 
-    console.log(`[telegram/sendCode] attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} — connecting for ${phoneNumber}`)
+    console.log(`[telegram/sendCode] attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} — connecting for ${phoneNumber} apiId:${apiId}`)
 
     try {
       await withTimeout(client.connect(), 60_000, `connect (attempt ${attempt})`)
 
-      console.log(`[telegram/sendCode] connected (attempt ${attempt}) — invoking auth.SendCode`)
+      console.log(`[telegram/sendCode] connected (attempt ${attempt}) — running initConnection then auth.SendCode`)
+
+      // Wrap auth.SendCode in invokeWithLayer + initConnection so Telegram's auth
+      // server recognises the client on cloud IPs. Without this, cloud-hosted api_ids
+      // can receive 401 UNAUTHORIZED on auth.SendCode even with valid credentials.
+      const sendCodeRequest = new Api.auth.SendCode({
+        phoneNumber,
+        apiId,
+        apiHash,
+        settings: new Api.CodeSettings({
+          allowFlashcall: false,
+          currentNumber:  false,
+          allowAppHash:   true,
+        }),
+      })
+
+      const wrappedRequest = new Api.InvokeWithLayer({
+        layer: 167, // current TL schema layer
+        query: new Api.InitConnection({
+          apiId,
+          deviceModel:   'Server',
+          systemVersion: 'Linux',
+          appVersion:    '1.0.0',
+          langCode:      'en',
+          langPack:      '',
+          systemLangCode: 'en',
+          query: sendCodeRequest,
+        }),
+      })
 
       const result = await withTimeout(
-        client.invoke(
-          new Api.auth.SendCode({
-            phoneNumber,
-            apiId,
-            apiHash,
-            settings: new Api.CodeSettings({
-              allowFlashcall: false,
-              currentNumber:  false,
-              allowAppHash:   true,
-            }),
-          })
-        ),
+        client.invoke(wrappedRequest),
         60_000,
         `auth.SendCode (attempt ${attempt})`,
       ) as Api.auth.SentCode
@@ -142,8 +159,9 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 
       // Do not retry permanent Telegram errors
       const msg = lastError.message
-      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|PHONE_NUMBER_FLOOD|API_ID_INVALID|PHONE_NUMBER_UNOCCUPIED/.test(msg)) {
-        console.log('[telegram/sendCode] permanent error — not retrying')
+      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|PHONE_NUMBER_FLOOD|API_ID_INVALID|PHONE_NUMBER_UNOCCUPIED|^Unauthorized$/.test(msg) ||
+          msg === 'Unauthorized') {
+        console.log('[telegram/sendCode] permanent error — not retrying:', msg)
         throw lastError
       }
 
