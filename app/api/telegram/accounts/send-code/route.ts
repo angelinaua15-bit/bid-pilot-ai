@@ -41,11 +41,33 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
 
-    console.log('[send-code] sending code to', account.phoneNumber);
+    console.log('[send-code] calling sendTelegramCode for', account.phoneNumber);
 
-    const { phoneHash, isCodeViaApp, sessionString } = await sendTelegramCode(account.phoneNumber);
+    let result: Awaited<ReturnType<typeof sendTelegramCode>> | null = null;
+    try {
+      result = await sendTelegramCode(account.phoneNumber);
+      console.log('[send-code] result', {
+        phoneNumber:      account.phoneNumber,
+        phoneHashExists:  !!result.phoneHash,
+        phoneHashPrefix:  result.phoneHash?.slice(0, 8),
+        isCodeViaApp:     result.isCodeViaApp,
+        sessionStrLength: result.sessionString?.length ?? 0,
+      });
+    } catch (sendErr) {
+      console.error('[send-code] error', sendErr instanceof Error ? sendErr.message : sendErr);
+      throw sendErr; // re-throw to outer catch block
+    }
 
-    console.log('[send-code] code sent, isCodeViaApp=', isCodeViaApp);
+    const { phoneHash, isCodeViaApp, sessionString } = result;
+
+    // Guard: if no phoneCodeHash, Telegram never confirmed the send — do NOT say "code sent"
+    if (!phoneHash) {
+      console.error('[send-code] phoneCodeHash is empty — GramJS returned no hash');
+      return NextResponse.json(
+        { ok: false, error: 'Telegram did not return a phoneCodeHash. Code was NOT sent.', phoneHashExists: false },
+        { status: 500 }
+      );
+    }
 
     // Persist OTP session (including DC session string) and update account status
     await Promise.all([
@@ -53,10 +75,16 @@ export async function POST(req: NextRequest) {
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
 
-    return NextResponse.json({ ok: true, message: 'Code sent', isCodeViaApp });
+    return NextResponse.json({
+      ok:            true,
+      message:       'Code sent',
+      isCodeViaApp,
+      phoneHashExists: true,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[send-code] error:', message);
+    const stack   = err instanceof Error ? err.stack?.split('\n').slice(0, 4).join(' | ') : '';
+    console.error('[send-code] error', { message, stack, accountId });
 
     // Map well-known Telegram errors to friendly messages
     let friendlyError = message;
@@ -92,6 +120,11 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    return NextResponse.json({ ok: false, error: friendlyError }, { status });
+    return NextResponse.json({
+      ok:            false,
+      error:         friendlyError,
+      telegramError: message,     // exact raw Telegram/GramJS error for debugging
+      phoneHashExists: false,
+    }, { status });
   }
 }
