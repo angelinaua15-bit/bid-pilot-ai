@@ -77,7 +77,11 @@ export function FreelanceScreen({ user }: Props) {
         {tabs.map(({ id, label }) => (
           <button
             key={id}
-            onClick={() => { haptic.light(); setSubTab(id); }}
+            onClick={() => {
+              console.log('[FreelanceScreen] subTab changed to:', id);
+              haptic.light();
+              setSubTab(id);
+            }}
             className={cn(
               'flex-1 py-1.5 rounded-lg text-[11px] font-semibold transition-all',
               subTab === id ? 'bg-card text-foreground shadow-sm' : 'text-muted-foreground'
@@ -552,39 +556,60 @@ function FilterPanel({ userId, filter, onSaved }: {
 // ── Applications panel ────────────────────────────────────────────────────────
 function ApplicationsPanel({ userId }: { userId?: string }) {
   type AppStatus = 'all' | 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed';
-  const [apps, setApps]   = useState<Array<Record<string, unknown>>>([]);
-  const [tab, setTab]     = useState<AppStatus>('all');
+  const [apps, setApps]     = useState<Array<Record<string, unknown>>>([]);
+  const [tab, setTab]       = useState<AppStatus>('all');
   const [loading, setLoading] = useState(true);
+  const [error, setError]   = useState<string | null>(null);
 
   const load = useCallback(async (s: AppStatus) => {
+    console.log('[FreelanceScreen] ApplicationsPanel load tab:', s, 'userId:', userId);
     if (!userId) { setLoading(false); return; }
     setLoading(true);
+    setError(null);
     try {
-      const url = s === 'all'
-        ? `/api/freelance/bids?userId=${userId}`
-        : `/api/freelance/bids?userId=${userId}&status=${s}`;
-      const res = await fetch(url).then((r) => r.json()).catch(() => null);
-      setApps(res?.ok && Array.isArray(res.data) ? res.data : []);
-    } finally { setLoading(false); }
+      const qs = new URLSearchParams({ userId, limit: '50' });
+      if (s !== 'all') qs.set('status', s);
+      const res = await fetch(`/api/applications?${qs}`).then((r) => r.json());
+      if (!res?.ok) {
+        setError(res?.error ?? 'Не вдалося завантажити заявки');
+        setApps([]);
+      } else {
+        setApps(Array.isArray(res.data) ? res.data : []);
+      }
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : 'Помилка мережі';
+      console.log('[FreelanceScreen] ApplicationsPanel fetch error:', msg);
+      setError(msg);
+      setApps([]);
+    } finally {
+      setLoading(false);
+    }
   }, [userId]);
+
+  const handleTabChange = (id: AppStatus) => {
+    console.log('[FreelanceScreen] tab changed to:', id);
+    haptic.light();
+    setTab(id);
+  };
 
   useEffect(() => { load(tab); }, [load, tab]);
 
-  const tabs: Array<{ id: AppStatus; label: string; color: string }> = [
-    { id: 'all',             label: 'Всі',                color: '' },
-    { id: 'sent',            label: 'Надіслані',          color: 'text-green-400' },
-    { id: 'sent_unconfirmed',label: 'Непідтверджені',     color: 'text-blue-400' },
-    { id: 'skipped',         label: 'Пропущені',          color: 'text-yellow-400' },
-    { id: 'failed',          label: 'Помилки',            color: 'text-red-400' },
+  const tabs: Array<{ id: AppStatus; label: string }> = [
+    { id: 'all',              label: 'Всі' },
+    { id: 'sent',             label: 'Надіслані' },
+    { id: 'sent_unconfirmed', label: 'Непідтверджені' },
+    { id: 'skipped',          label: 'Пропущені' },
+    { id: 'failed',           label: 'Помилки' },
   ];
 
   return (
     <div className="flex flex-col gap-3">
+      {/* Sub-filter tabs */}
       <div className="flex flex-wrap gap-1">
         {tabs.map(({ id, label }) => (
           <button
             key={id}
-            onClick={() => { haptic.light(); setTab(id); }}
+            onClick={() => handleTabChange(id)}
             className={cn(
               'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
               tab === id ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'
@@ -595,48 +620,95 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
         ))}
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-10"><RefreshCw size={16} className="animate-spin text-muted-foreground" /></div>
-      ) : apps.length === 0 ? (
-        <div className="glass-card p-6 rounded-2xl text-center">
-          <p className="text-xs text-muted-foreground">Немає заявок для відображення</p>
+      {/* Error state — inline, never crashes the page */}
+      {error && !loading && (
+        <div className="glass-card p-4 rounded-2xl border border-red-500/20 bg-red-500/5 flex items-start gap-2.5">
+          <XCircle size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
+          <div className="flex-1 min-w-0">
+            <p className="text-xs font-semibold text-red-400">Помилка завантаження</p>
+            <p className="text-[11px] text-muted-foreground mt-0.5 break-words">{error}</p>
+            <button
+              onClick={() => load(tab)}
+              className="mt-2 text-[11px] text-primary font-semibold"
+            >
+              Спробувати знову
+            </button>
+          </div>
         </div>
-      ) : (
+      )}
+
+      {loading ? (
+        <div className="flex items-center justify-center py-10">
+          <RefreshCw size={16} className="animate-spin text-muted-foreground" />
+        </div>
+      ) : !error && apps.length === 0 ? (
+        <div className="glass-card p-6 rounded-2xl text-center">
+          <p className="text-sm font-medium mb-1">Немає заявок</p>
+          <p className="text-[11px] text-muted-foreground">
+            {tab === 'all'
+              ? 'Запустіть автопошук у вкладці "Підключення", щоб відправити перші заявки.'
+              : `Немає заявок зі статусом "${tabs.find((t) => t.id === tab)?.label ?? tab}".`}
+          </p>
+        </div>
+      ) : !error ? (
         <div className="flex flex-col gap-2">
           {apps.map((app) => {
             const status = app.status as string;
-            const statusColor = status === 'sent' ? 'text-green-400' :
-              status === 'sent_unconfirmed' ? 'text-blue-400' :
-              status === 'skipped' ? 'text-yellow-400' : 'text-red-400';
-            const statusLabel = status === 'sent' ? 'Надіслано' :
+            const statusColor =
+              status === 'sent'             ? 'text-green-400' :
+              status === 'sent_unconfirmed' ? 'text-blue-400'  :
+              status === 'skipped'          ? 'text-yellow-400' : 'text-red-400';
+            const statusLabel =
+              status === 'sent'             ? 'Надіслано'  :
               status === 'sent_unconfirmed' ? 'Надіслано?' :
-              status === 'skipped' ? 'Пропущено' : 'Помилка';
+              status === 'skipped'          ? 'Пропущено'  : 'Помилка';
+            const projectUrl = typeof app.url === 'string' && app.url.startsWith('https://') ? app.url : null;
+
             return (
               <div key={app.id as string} className="glass-card p-3 rounded-xl">
                 <div className="flex items-start gap-2.5">
                   <div className="flex-1 min-w-0">
                     <p className="text-xs font-medium truncate">{app.title as string}</p>
                     <div className="flex flex-wrap gap-x-2 mt-0.5">
-                      <span className="text-[11px] text-muted-foreground">{app.budget as number} {app.currency as string}</span>
-                      {app.aiScore !== undefined && <span className="text-[11px] text-muted-foreground">· AI {app.aiScore as number}%</span>}
+                      <span className="text-[11px] text-muted-foreground">
+                        {app.budget as number} {app.currency as string}
+                      </span>
+                      {app.aiScore !== undefined && (
+                        <span className="text-[11px] text-muted-foreground">· AI {app.aiScore as number}%</span>
+                      )}
                     </div>
                     {(app.skippedReason as string) && (
-                      <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">{app.skippedReason as string}</p>
+                      <p className="text-[10px] text-muted-foreground mt-0.5 truncate opacity-70">
+                        {app.skippedReason as string}
+                      </p>
                     )}
-                    {typeof app.url === 'string' && app.url && (
-                      <a href={app.url} target="_blank" rel="noopener noreferrer"
-                        className="text-[10px] text-primary mt-0.5 block truncate">
-                        {app.url}
-                      </a>
+                    {(app.errorReason as string) && (
+                      <p className="text-[10px] text-red-400/80 mt-0.5 truncate">
+                        {app.errorReason as string}
+                      </p>
+                    )}
+                    {/* Safe open — button with window.open, never <a href> in Telegram WebView */}
+                    {projectUrl && (
+                      <button
+                        onClick={() => {
+                          haptic.light();
+                          window.open(projectUrl, '_blank', 'noopener,noreferrer');
+                        }}
+                        className="text-[10px] text-primary mt-0.5 block truncate text-left"
+                      >
+                        Відкрити проєкт
+                      </button>
                     )}
                   </div>
-                  <span className={cn('text-[10px] font-semibold flex-shrink-0', statusColor)}>{statusLabel}</span>
+                  <span className={cn('text-[10px] font-semibold flex-shrink-0', statusColor)}>
+                    {statusLabel}
+                  </span>
                 </div>
               </div>
             );
           })}
         </div>
-      )}
+      ) : null}
     </div>
   );
 }
