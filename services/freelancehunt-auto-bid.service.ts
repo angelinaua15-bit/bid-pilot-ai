@@ -513,11 +513,26 @@ export async function runAutoBidCycle(
         msg.toLowerCase().includes('already applied');
 
       if (isApiSkip) {
+        const skipCode  = msg.startsWith('ALREADY_BID:') ? 'ALREADY_BID' : 'PROJECT_CLOSED';
+        const skipLabel = skipCode === 'ALREADY_BID' ? 'Заявка вже подана' : 'Проєкт закрито';
         log(logs, 'warning',
-          `SKIPPED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | reason: ${msg.slice(0, 300)} | url: ${projectUrl}`,
+          `SKIPPED [${i + 1}/${filtered.length}] — "${projectTitle}" | code:${skipCode} | url:${projectUrl}`,
           { projectId: project.id, projectTitle, meta: { projectUrl, reason: msg } }
         );
         bidsSkipped++;
+        await saveApplication({
+          id:              `app_skip_browser_${project.id}_${Date.now()}`,
+          userId:          settings.userId,
+          projectId:       project.id,
+          freelancehuntId: project.freelancehuntId ?? undefined,
+          title:           projectTitle,
+          url:             projectUrl,
+          budget:          project.budget,
+          currency:        project.currency ?? 'UAH',
+          status:          'skipped',
+          createdAt:       new Date().toISOString(),
+          skippedReason:   `${skipCode}: ${skipLabel}`,
+        }).catch(() => {});
         // Mark as seen so we don't retry this project
         bidSet.add(project.id);
         if (project.freelancehuntId) bidSet.add(project.freelancehuntId);
@@ -525,19 +540,77 @@ export async function runAutoBidCycle(
       }
 
       // All other errors: log full error, count as failure, continue to next project
+
+      // Extract canonical error code from message prefix (e.g. "FORM_NOT_FOUND: ...")
+      const ERROR_CODES = [
+        'PLAYWRIGHT_BROWSER_ERROR',
+        'SESSION_EXPIRED',
+        'FORM_NOT_FOUND',
+        'SUBMIT_NOT_FOUND',
+        'VALIDATION_ERROR',
+        'PROJECT_CLOSED',
+        'ALREADY_BID',
+        'INSUFFICIENT_FUNDS',
+        'TOKEN_INVALID',
+        'CAPTCHA_REQUIRED',
+        'VERIFY_REQUIRED',
+        'UNAVAILABLE',
+        'ACCESS_DENIED',
+        'SESSION_MISSING',
+      ];
+      const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
+
+      // Human-readable labels for each error code
+      const ERROR_LABELS: Record<string, string> = {
+        PLAYWRIGHT_BROWSER_ERROR: 'Браузер не запустився (Playwright)',
+        SESSION_EXPIRED:          'Сесія закінчилась — потрібно повторно увійти',
+        SESSION_MISSING:          'Файл сесії не знайдено',
+        FORM_NOT_FOUND:           'Форма подання заявки не знайдена',
+        SUBMIT_NOT_FOUND:         'Кнопка надсилання не знайдена',
+        VALIDATION_ERROR:         'Помилка валідації форми',
+        PROJECT_CLOSED:           'Проєкт закрито',
+        ALREADY_BID:              'Заявка вже подана',
+        INSUFFICIENT_FUNDS:       'Недостатньо коштів',
+        TOKEN_INVALID:            'Невірний токен',
+        CAPTCHA_REQUIRED:         'Потрібна капча',
+        VERIFY_REQUIRED:          'Потрібна верифікація акаунту',
+        UNAVAILABLE:              'Заявка недоступна',
+        ACCESS_DENIED:            'Доступ заборонено',
+        UNKNOWN_ERROR:            'Невідома помилка',
+      };
+      const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);
+
       log(logs, 'error',
-        `FAILED_REASON [${i + 1}/${filtered.length}] — "${projectTitle}" | error: ${msg} | url: ${projectUrl}`,
-        { projectId: project.id, projectTitle, meta: { projectUrl, apiError: msg } }
+        `FAILED [${i + 1}/${filtered.length}] — "${projectTitle}" | code:${detectedCode} | ${msg.slice(0, 300)} | url:${projectUrl}`,
+        { projectId: project.id, projectTitle, meta: { projectUrl, errorCode: detectedCode, errorMsg: msg } }
       );
       errors++;
 
-      // Telegram error notification (send but don't block the cycle)
+      // Persist failed application so Dashboard and Заявки tab show it with reason
+      await saveApplication({
+        id:              `app_fail_${project.id}_${Date.now()}`,
+        userId:          settings.userId,
+        projectId:       project.id,
+        freelancehuntId: project.freelancehuntId ?? undefined,
+        title:           projectTitle,
+        url:             projectUrl,
+        budget:          filter.budget ?? project.budget,
+        currency:        filter.currency ?? project.currency ?? 'UAH',
+        status:          'failed',
+        createdAt:       new Date().toISOString(),
+        errorReason:     `${detectedCode}: ${humanLabel}`,
+        aiScore:         filter.aiScore,
+        matchedKeywords: filter.matchedKeywords,
+      }).catch(() => {});
+
+      // Telegram error notification
       if (chatId) {
         const errMsg = [
           '<b>Bid failed</b>',
           '',
           `<b>Project:</b> ${projectTitle}`,
-          `<b>Error:</b> ${msg.slice(0, 300)}`,
+          `<b>Error code:</b> <code>${detectedCode}</code>`,
+          `<b>Details:</b> ${humanLabel}`,
           projectUrl ? `<a href="${projectUrl}">View project</a>` : '',
         ].filter(Boolean).join('\n');
         await sendTelegramMessage(chatId, errMsg, { parseMode: 'HTML', disableWebPagePreview: true }).catch(() => {});
@@ -546,7 +619,7 @@ export async function runAutoBidCycle(
       continue;
     }
 
-    // ── 7. Delay between bids ─────────────────────────────────────────────────
+    // ── 7. Delay between bids ──────────────��──────────────────────────────────
     const delayMs =
       (settings.delayBetweenBidsMin +
         Math.random() * (settings.delayBetweenBidsMax - settings.delayBetweenBidsMin)) *
