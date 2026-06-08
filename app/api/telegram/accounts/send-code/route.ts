@@ -31,17 +31,19 @@ export async function POST(req: NextRequest) {
 
     console.log('[send-code] handler', {
       accountId,
-      requesterId:      requesterId ?? '(none)',
-      workerConfigured: Boolean(workerUrl && workerSecret),
-      workerUrl:        workerUrl ?? '(not set)',
+      requesterId:       requesterId ?? '(none)',
+      workerUrlExists:   Boolean(workerUrl),
+      workerUrl:         workerUrl ? workerUrl.replace(/\/\/.+@/, '//***@') : '(not set)',
+      automationSecretExists: Boolean(workerSecret),
+      authHeaderWillBeSent:   Boolean(workerUrl && workerSecret),
     });
 
     if (!workerUrl || !workerSecret) {
       console.error('[send-code] AUTOMATION_WORKER_URL or AUTOMATION_SECRET not set — cannot proxy to Railway');
       return NextResponse.json(
         {
-          ok:            false,
-          error:         'Railway worker not configured. Set AUTOMATION_WORKER_URL and AUTOMATION_SECRET in Vercel env vars.',
+          ok:              false,
+          error:           'Railway worker not configured. Set AUTOMATION_WORKER_URL and AUTOMATION_SECRET in Vercel env vars.',
           phoneHashExists: false,
         },
         { status: 503 }
@@ -60,11 +62,15 @@ export async function POST(req: NextRequest) {
     });
 
     // ── Proxy to Railway ──────────────────────────────────────────────────────
+    console.log('[send-code] sending Authorization: Bearer header to Railway', {
+      endpoint: `${workerUrl}/telegram/accounts/send-code`,
+    });
+
     const workerRes = await fetch(`${workerUrl}/telegram/accounts/send-code`, {
       method: 'POST',
       headers: {
-        'Content-Type':          'application/json',
-        'x-automation-secret':   workerSecret,
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${workerSecret}`,
       },
       body: JSON.stringify({
         phoneNumber: account.phoneNumber,
@@ -90,6 +96,19 @@ export async function POST(req: NextRequest) {
       phoneHashExists: !!workerData.phoneHash,
       telegramError:   workerData.telegramError ?? workerData.error ?? null,
     });
+
+    // Railway returned 401 — secret mismatch
+    if (workerRes.status === 401) {
+      const errMsg = 'Automation secret mismatch between Vercel and Railway. Ensure AUTOMATION_SECRET is the same in both environments.';
+      console.error('[send-code] Railway returned 401 — secret mismatch', {
+        railwayStatus: workerRes.status,
+        workerSecretLength: workerSecret.length,
+      });
+      return NextResponse.json(
+        { ok: false, error: errMsg, telegramError: errMsg, phoneHashExists: false },
+        { status: 503 }
+      );
+    }
 
     if (!workerData.ok || !workerData.phoneHash) {
       const errMsg = workerData.telegramError ?? workerData.error ?? 'Railway did not return phoneHash';

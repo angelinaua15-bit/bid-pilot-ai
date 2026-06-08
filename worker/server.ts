@@ -190,10 +190,21 @@ function json(res: http.ServerResponse, statusCode: number, body: unknown) {
 }
 
 function authenticate(req: http.IncomingMessage, url: URL): boolean {
-  const auth = req.headers.authorization || ''
-  const querySecret = url.searchParams.get('secret') || ''
+  const authHeader   = req.headers.authorization || ''
+  const legacyHeader = (req.headers['x-automation-secret'] as string) || ''
+  const querySecret  = url.searchParams.get('secret') || ''
 
-  return auth === `Bearer ${SECRET}` || querySecret === SECRET
+  const receivedAuth = authHeader || legacyHeader
+
+  console.log('[worker/auth] checking request', {
+    path:            url.pathname,
+    hasAuthHeader:   Boolean(authHeader),
+    hasLegacyHeader: Boolean(legacyHeader),
+    hasQuerySecret:  Boolean(querySecret),
+    secretConfigured: Boolean(SECRET),
+  })
+
+  return authHeader === `Bearer ${SECRET}` || legacyHeader === SECRET || querySecret === SECRET
 }
 
 function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
@@ -860,9 +871,16 @@ const server = http.createServer(async (req, res) => {
   }
 
   if (!authenticate(req, url)) {
+    console.error('[worker/auth] 401 — secret mismatch or missing', {
+      path:            pathname,
+      hasAuth:         Boolean(req.headers.authorization),
+      hasLegacySecret: Boolean(req.headers['x-automation-secret']),
+      secretConfigured: Boolean(SECRET),
+    })
     return json(res, 401, {
-      ok: false,
-      error: 'Unauthorized',
+      ok:    false,
+      error: 'Automation secret mismatch between Vercel and Railway. Check AUTOMATION_SECRET env var on both sides.',
+      hint:  'Send Authorization: Bearer <AUTOMATION_SECRET> header or x-automation-secret: <secret> header.',
       requestedPath: pathname,
     })
   }

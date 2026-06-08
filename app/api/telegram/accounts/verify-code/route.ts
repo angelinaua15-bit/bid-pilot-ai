@@ -38,7 +38,10 @@ export async function POST(req: NextRequest) {
 
     console.log('[verify-code] handler', {
       accountId,
-      workerConfigured: Boolean(workerUrl && workerSecret),
+      workerUrlExists:        Boolean(workerUrl),
+      workerUrl:              workerUrl ? workerUrl.replace(/\/\/.+@/, '//***@') : '(not set)',
+      automationSecretExists: Boolean(workerSecret),
+      authHeaderWillBeSent:   Boolean(workerUrl && workerSecret),
     });
 
     if (!workerUrl || !workerSecret) {
@@ -65,16 +68,17 @@ export async function POST(req: NextRequest) {
     }
 
     console.log('[verify-code] proxying to Railway', {
-      url:         `${workerUrl}/telegram/accounts/verify-code`,
-      phoneNumber: account.phoneNumber,
+      url:                  `${workerUrl}/telegram/accounts/verify-code`,
+      phoneNumber:          account.phoneNumber,
+      authorizationSent:    true,
     });
 
     // ── Proxy to Railway ──────────────────────────────────────────────────────
     const workerRes = await fetch(`${workerUrl}/telegram/accounts/verify-code`, {
       method: 'POST',
       headers: {
-        'Content-Type':          'application/json',
-        'x-automation-secret':   workerSecret,
+        'Content-Type':  'application/json',
+        'Authorization': `Bearer ${workerSecret}`,
       },
       body: JSON.stringify({
         phoneNumber: account.phoneNumber,
@@ -101,6 +105,13 @@ export async function POST(req: NextRequest) {
       requires2fa: workerData.requires2fa ?? false,
       telegramId:  workerData.telegramId ?? null,
     });
+
+    // Railway returned 401 — secret mismatch
+    if (workerRes.status === 401) {
+      const errMsg = 'Automation secret mismatch between Vercel and Railway. Ensure AUTOMATION_SECRET is the same in both environments.';
+      console.error('[verify-code] Railway returned 401 — secret mismatch');
+      return NextResponse.json({ ok: false, error: errMsg }, { status: 503 });
+    }
 
     // 2FA required
     if (!workerData.ok && workerData.requires2fa) {
