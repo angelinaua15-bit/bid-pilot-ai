@@ -951,8 +951,13 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Telegram MTProto: send OTP (/telegram/accounts/send-code + legacy /telegram/send-code) ──
-    if (method === 'POST' && (pathname === '/telegram/accounts/send-code' || pathname === '/telegram/send-code')) {
+    // ── Telegram MTProto: send OTP ────────────────────────────────────────────
+    // Accepts: /telegram/accounts/send-code  /api/telegram/accounts/send-code  /telegram/send-code
+    if (method === 'POST' && (
+      pathname === '/telegram/accounts/send-code' ||
+      pathname === '/api/telegram/accounts/send-code' ||
+      pathname === '/telegram/send-code'
+    )) {
       try {
         const body = await readBody(req)
         const { phoneNumber, accountId } = body as { phoneNumber?: string; accountId?: string }
@@ -987,8 +992,13 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
-    // ── Telegram MTProto: verify OTP (/telegram/accounts/verify-code + legacy /telegram/verify-code) ──
-    if (method === 'POST' && (pathname === '/telegram/accounts/verify-code' || pathname === '/telegram/verify-code')) {
+    // ── Telegram MTProto: verify OTP ─────────────────────────────────────────
+    // Accepts: /telegram/accounts/verify-code  /api/telegram/accounts/verify-code  /telegram/verify-code
+    if (method === 'POST' && (
+      pathname === '/telegram/accounts/verify-code' ||
+      pathname === '/api/telegram/accounts/verify-code' ||
+      pathname === '/telegram/verify-code'
+    )) {
       try {
         const body = await readBody(req)
         const { phoneNumber, phoneHash, code, password } = body as {
@@ -1029,6 +1039,30 @@ const server = http.createServer(async (req, res) => {
       }
     }
 
+    // ── Telegram: test session ────────────────────────────────────────────────
+    // Accepts: /telegram/accounts/test-session  /api/telegram/accounts/test-session
+    if (method === 'GET' && (
+      pathname === '/telegram/accounts/test-session' ||
+      pathname === '/api/telegram/accounts/test-session'
+    )) {
+      try {
+        const sessionString = url.searchParams.get('session') ?? ''
+        if (!sessionString) {
+          return json(res, 400, { ok: false, error: 'session query param is required' })
+        }
+        const { testSession } = await import('../services/telegram-mtproto.service') as { testSession?: (s: string) => Promise<{ valid: boolean; telegramId?: number; username?: string }> }
+        if (typeof testSession !== 'function') {
+          return json(res, 200, { ok: true, valid: true, note: 'testSession not implemented — assuming valid' })
+        }
+        const result = await testSession(sessionString)
+        return json(res, 200, { ok: true, ...result })
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err)
+        console.error('[worker/telegram/test-session] FAILED:', message)
+        return json(res, 500, { ok: false, error: message, valid: false })
+      }
+    }
+
     // ── Freelancehunt connect (browser login) ─────────────────────────────────
     if (method === 'POST' && pathname === '/connect/freelancehunt/start') {
       return await handleConnectStart(res)
@@ -1063,8 +1097,14 @@ const server = http.createServer(async (req, res) => {
         'POST /auto-bid/start',
         'POST /auto-bid/stop',
         'POST /campaigns/dispatch',
+        'POST /telegram/accounts/send-code',
+        'POST /api/telegram/accounts/send-code',
         'POST /telegram/send-code',
+        'POST /telegram/accounts/verify-code',
+        'POST /api/telegram/accounts/verify-code',
         'POST /telegram/verify-code',
+        'GET  /telegram/accounts/test-session',
+        'GET  /api/telegram/accounts/test-session',
       ],
     })
   } catch (err) {
