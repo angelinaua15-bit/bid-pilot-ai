@@ -61,7 +61,7 @@ export async function POST(req: NextRequest) {
 
     console.log('[verify-code] verifying code for', account.phoneNumber);
 
-    const { sessionString } = await signInWithCode(
+    const { sessionString, telegramId, username, firstName } = await signInWithCode(
       account.phoneNumber,
       otpSession.phoneHash,
       code,
@@ -69,18 +69,28 @@ export async function POST(req: NextRequest) {
       otpSession.sessionString ?? undefined,
     );
 
-    console.log('[verify-code] sign-in successful for', account.phoneNumber);
+    console.log('[verify-code] sign-in successful for', account.phoneNumber,
+      '— telegramId:', telegramId, 'username:', username);
 
-    // Persist session and mark account active
+    // Persist session and mark account active; include user info from getMe()
     await upsertTelegramAccount({
       ...account,
       status:        'active',
       sessionString,
       lastActiveAt:  new Date().toISOString(),
       errorMessage:  undefined,
+      ...(telegramId && { telegramId }),
+      ...(username   && { username }),
+      ...(firstName  && { displayName: firstName }),
     });
 
-    return NextResponse.json({ ok: true, message: 'Account connected' });
+    return NextResponse.json({
+      ok: true,
+      message: 'Account connected',
+      telegramId,
+      username,
+      firstName,
+    });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     console.error('[verify-code] error:', message);

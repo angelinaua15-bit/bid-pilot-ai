@@ -38,13 +38,15 @@ function getCredentials(): { apiId: number; apiHash: string } {
 
 function makeClient(apiId: number, apiHash: string, sessionStr = ''): TelegramClient {
   const session = new StringSession(sessionStr)
-
-  const logger = new Logger(LogLevel.ERROR)
+  const logger  = new Logger(LogLevel.ERROR)
 
   return new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 3,
-    retryDelay:        1000,
-    useWSS:            false,
+    // useWSS: true — CRITICAL for Vercel/Railway: raw TCP port 443 is blocked
+    // by most cloud providers; WSS (WebSocket over HTTPS) works through all firewalls.
+    // useWSS: false causes silent hangs/timeouts and codes are never delivered.
+    connectionRetries: 1,
+    retryDelay:        500,
+    useWSS:            true,
     baseLogger:        logger,
   })
 }
@@ -74,6 +76,9 @@ export interface SendCodeResult {
 
 export interface SignInResult {
   sessionString: string
+  telegramId?:   string
+  username?:     string
+  firstName?:    string
 }
 
 // ---------------------------------------------------------------------------
@@ -110,11 +115,18 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 
     const sessionString = (client.session.save() as unknown) as string
 
-    console.log('[telegram/sendCode] success — isCodeViaApp:', result.type?.className === 'auth.SentCodeTypeApp')
+    // GramJS v2: check both className and CONSTRUCTOR_ID for the app-code type
+    const typeClass   = result.type?.className ?? ''
+    const typeId      = (result.type as unknown as { CONSTRUCTOR_ID?: number })?.CONSTRUCTOR_ID
+    const isCodeViaApp = typeClass === 'auth.SentCodeTypeApp' ||
+                         typeClass.includes('SentCodeTypeApp') ||
+                         typeId === 0x3dbb5986
+
+    console.log('[telegram/sendCode] success — type:', typeClass, 'typeId:', typeId, 'isCodeViaApp:', isCodeViaApp)
 
     return {
-      phoneHash:    result.phoneCodeHash,
-      isCodeViaApp: result.type?.className === 'auth.SentCodeTypeApp',
+      phoneHash: result.phoneCodeHash,
+      isCodeViaApp,
       sessionString,
     }
   } finally {
@@ -180,8 +192,31 @@ export async function signInWithCode(
     }
 
     const sessionString = (client.session.save() as unknown) as string
-    console.log('[telegram/signIn] sign-in successful for', phoneNumber)
-    return { sessionString }
+    console.log('[telegram/signIn] sign-in successful for', phoneNumber, '— calling getMe()')
+
+    // Validate session immediately with getMe() — confirms the auth key works
+    let telegramId: string | undefined
+    let username:   string | undefined
+    let firstName:  string | undefined
+    try {
+      const me = await withTimeout(
+        client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] })),
+        10_000,
+        'getMe',
+      ) as Api.User[]
+      const user = me?.[0]
+      if (user) {
+        telegramId = String(user.id)
+        username   = user.username ?? undefined
+        firstName  = user.firstName ?? undefined
+        console.log('[telegram/signIn] getMe OK — id:', telegramId, 'username:', username)
+      }
+    } catch (getMeErr) {
+      // getMe failed but sign-in succeeded — session is probably valid, continue
+      console.warn('[telegram/signIn] getMe failed (non-fatal):', (getMeErr as Error)?.message)
+    }
+
+    return { sessionString, telegramId, username, firstName }
   } finally {
     client.disconnect().catch(() => {})
   }
@@ -199,13 +234,15 @@ export async function sendMessageMTProto(
   const { apiId, apiHash } = getCredentials()
   const client = makeClient(apiId, apiHash, sessionString)
 
-  await withTimeout(client.connect(), 20_000, 'connect')
+  console.log('[telegram/sendMessage] connecting for peer', peer)
+  await withTimeout(client.connect(), 25_000, 'connect')
   try {
     await withTimeout(
       client.sendMessage(peer, { message: text, parseMode: 'html' }),
       30_000,
       'sendMessage',
     )
+    console.log('[telegram/sendMessage] sent to', peer)
   } finally {
     client.disconnect().catch(() => {})
   }
