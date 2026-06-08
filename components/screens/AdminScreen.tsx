@@ -732,9 +732,21 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
           )}
           {step === 'code' && (
             <>
-              <div className="flex items-center gap-2">
-                <KeyRound size={15} className="text-primary" />
-                <p className="text-[13px] font-medium">Введіть код з Telegram</p>
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  <KeyRound size={15} className="text-primary" />
+                  <p className="text-[13px] font-medium">Введіть код з Telegram</p>
+                </div>
+                {currentAccountId && (
+                  <button
+                    disabled={working}
+                    onClick={() => currentAccountId && handleResendCode(currentAccountId)}
+                    className="text-[11px] text-primary disabled:opacity-40 flex items-center gap-1"
+                  >
+                    <RefreshCw size={10} className={working ? 'animate-spin' : ''} />
+                    Надіслати знову
+                  </button>
+                )}
               </div>
               <p className="text-[11px] text-muted-foreground -mt-1">
                 {isCodeViaApp

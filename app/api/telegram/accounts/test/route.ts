@@ -40,9 +40,10 @@ export async function POST(req: NextRequest) {
 
     const session = new StringSession(account.sessionString);
     const client  = new TelegramClient(session, apiId, apiHash, {
-      connectionRetries: 2,
+      connectionRetries: 1,
       retryDelay:        500,
-      useWSS:            false,
+      // useWSS:true required on Vercel/Railway — raw TCP is blocked
+      useWSS:            true,
       baseLogger:        logger,
     });
 
@@ -50,22 +51,32 @@ export async function POST(req: NextRequest) {
     await client.connect();
 
     try {
-      // GetMe is the cheapest authenticated call — confirms the session is valid
-      await client.invoke(new Api.users.GetFullUser({
-        id: new Api.InputUserSelf(),
-      }));
+      // GetUsers with InputUserSelf is the cheapest authenticated call
+      const meResult = await client.invoke(new Api.users.GetUsers({
+        id: [new Api.InputUserSelf()],
+      })) as Api.User[];
+      const me = meResult?.[0];
 
-      console.log('[test-connection] session valid for', account.phoneNumber);
+      console.log('[test-connection] session valid for', account.phoneNumber,
+        '— id:', me?.id?.toString(), 'username:', me?.username);
 
-      // Update lastActiveAt
+      // Update lastActiveAt and any new user info from getMe
       await upsertTelegramAccount({
         ...account,
         lastActiveAt: new Date().toISOString(),
         status:       'active',
         errorMessage: undefined,
+        ...(me?.id       && { telegramId: String(me.id) }),
+        ...(me?.username && { username: me.username }),
       }).catch(() => {});
 
-      return NextResponse.json({ ok: true, message: 'Session is valid' });
+      return NextResponse.json({
+        ok:         true,
+        message:    'Session is valid',
+        telegramId: me?.id?.toString(),
+        username:   me?.username,
+        firstName:  me?.firstName,
+      });
     } catch (invokeErr) {
       const msg = (invokeErr as Error)?.message ?? '';
       console.error('[test-connection] invoke error:', msg);
