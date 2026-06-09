@@ -19,7 +19,7 @@ import type { AutoBidSettings, AutoBidLog, Project } from '@/types';
 import type { StepLogFn } from './freelancehunt-parser.service';
 import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
-import { submitBidViaPlaywright } from './playwright-browser.service';
+import { sendFreelancehuntBid } from './freelancehunt.service';
 import { sendTelegramMessage } from './telegram.service';
 import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
@@ -156,49 +156,17 @@ export async function runAutoBidCycle(
     meta: { dailyUsed, dailyLimit: settings.dailyLimit, userId: settings.userId },
   });
 
-  // ── Pre-flight ──────────────────────────────────────────────────────────────
+  // ── Pre-flight — validate API token ─────────────────────────────────────────
+  const apiToken = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (isMockMode) {
-    log(logs, 'warning', '[Pre-flight] Auth mode: MOCK (FREELANCEHUNT_MOCK=1) — no real browser automation');
+    log(logs, 'warning', '[Pre-flight] MOCK mode (FREELANCEHUNT_MOCK=1) — bids will not be submitted to Freelancehunt');
   } else {
-    // Verify Playwright session: open /my/ and confirm we are not on the login page
-    try {
-      const { verifySession, sessionExists, resolveSessionPath } = await import('./playwright-browser.service');
-
-      if (!sessionExists()) {
-        log(logs, 'error',
-          '[Pre-flight] FAILED: storageState.json not found. ' +
-          'Run: npm run login:freelancehunt to save your session.'
-        );
-        errors++;
-        return { logs, bidsSubmitted, bidsSkipped, errors };
-      }
-
-      log(logs, 'info', `[Pre-flight] Session file found: ${resolveSessionPath()}`);
-
-      const sessionLog = (level: 'info' | 'success' | 'warning' | 'error', msg: string) => {
-        log(logs, level, msg);
-        externalStepLog?.(level, msg);
-      };
-
-      const verification = await verifySession(sessionLog);
-      if (!verification.valid) {
-        log(logs, 'error',
-          `[Pre-flight] Session verification FAILED — ${verification.reason}. ` +
-          'Re-run: npm run login:freelancehunt to refresh your session.'
-        );
-        errors++;
-        return { logs, bidsSubmitted, bidsSkipped, errors };
-      }
-
-      log(logs, 'success',
-        `[Pre-flight] Session valid — logged in as: ${verification.username ?? 'unknown'}. Starting auto-bid.`
-      );
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err);
-      log(logs, 'error', `[Pre-flight] Session check error: ${msg}`);
+    if (!apiToken) {
+      log(logs, 'error', '[Pre-flight] FAILED: FREELANCEHUNT_TOKEN is not set. Add it to environment variables.');
       errors++;
       return { logs, bidsSubmitted, bidsSkipped, errors };
     }
+    log(logs, 'success', `[Pre-flight] FREELANCEHUNT_TOKEN is set (${apiToken.length} chars) — submitting bids via REST API POST /v2/projects/{id}/bids`);
   }
 
   // ── Step logger — pipes parser/submission logs into this cycle's log[] ──────
@@ -361,23 +329,8 @@ export async function runAutoBidCycle(
       );
     }
 
-    // ── 5. Submit bid via Playwright browser automation ───────────────────────
-    // POST /v2/projects/{id}/bids was removed (410 Gone) from the Freelancehunt API.
-    // We now submit bids by automating the website with Playwright.
-    if (!projectUrl) {
-      log(logs, 'error',
-        `[${i + 1}/${filtered.length}] SKIP: "${projectTitle}" — project URL is empty, cannot open in browser`,
-        { projectId: project.id, projectTitle }
-      );
-      errors++;
-      continue;
-    }
-
-    log(logs, 'info',
-      `[${i + 1}/${filtered.length}] Opening browser for: "${projectTitle}" — ${projectUrl}`,
-      { projectId: project.id, projectTitle, meta: { projectUrl } }
-    );
-
+    // ── 5. Submit bid via Freelancehunt REST API ──────────────────────────────
+    // POST /v2/projects/{id}/bids — official documented endpoint
     // Parse days from deadline string: "14 днів" → 14, "21 день" → 21
     const daysRaw = parseInt(String(bid.deadline ?? '14'), 10);
     const days    = isNaN(daysRaw) || daysRaw <= 0 ? 14 : daysRaw;
@@ -389,48 +342,38 @@ export async function runAutoBidCycle(
         ? project.budget
         : 500;
 
+    const projectIdentifier = numericId || project.freelancehuntId || projectUrl;
+
+    if (!projectIdentifier) {
+      log(logs, 'error',
+        `[${i + 1}/${filtered.length}] SKIP: "${projectTitle}" — no project ID or URL to submit bid`,
+        { projectId: project.id, projectTitle }
+      );
+      errors++;
+      continue;
+    }
+
     log(logs, 'info',
-      `[${i + 1}/${filtered.length}] Bid details — budget: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | proposal: ${(bid.text ?? '').length} chars`,
+      `[${i + 1}/${filtered.length}] Submitting via REST API — "${projectTitle}" | id:${projectIdentifier} | budget:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days}`,
       { projectId: project.id, projectTitle }
     );
 
     try {
-      // Retry on browser/network errors only — not on FORM_NOT_FOUND / ALREADY_BID / PROJECT_CLOSED
-      let result: Awaited<ReturnType<typeof submitBidViaPlaywright>> | undefined;
-      const MAX_RETRIES = 2;
-      for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
-        try {
-          result = await submitBidViaPlaywright({
-            projectUrl,
-            text:     bid.text ?? '',
-            budget:   budgetAmount!,
-            days,
-            currency: project.currency ?? 'UAH',
-            logFn:    stepLog,
-          });
-          break; // success
-        } catch (retryErr) {
-          const retryMsg = retryErr instanceof Error ? retryErr.message : String(retryErr);
-          // Non-retryable errors — re-throw immediately
-          const isNonRetryable =
-            retryMsg.startsWith('ALREADY_BID:') ||
-            retryMsg.startsWith('PROJECT_CLOSED:') ||
-            retryMsg.startsWith('FORM_NOT_FOUND:') ||
-            retryMsg.startsWith('INVALID_ID:');
-          if (isNonRetryable || attempt === MAX_RETRIES) throw retryErr;
-          log(logs, 'warning',
-            `[${i + 1}/${filtered.length}] Browser error (attempt ${attempt}/${MAX_RETRIES}), retrying in 5s: ${retryMsg}`,
-            { projectId: project.id, projectTitle }
-          );
-          await sleep(5000);
+      const result = await sendFreelancehuntBid(
+        isMockMode ? '' : apiToken,
+        projectIdentifier,
+        {
+          text:     bid.text ?? '',
+          budget:   budgetAmount!,
+          days,
+          currency: project.currency ?? 'UAH',
+          logFn:    (level, message) => stepLog(level as 'info' | 'success' | 'warning' | 'error', message),
         }
-      }
-      if (!result) throw new Error('submitBidViaPlaywright returned no result after retries');
+      );
 
       if (result.success) {
         bidSet.add(project.id);
         if (project.freelancehuntId) bidSet.add(project.freelancehuntId);
-        // Also record in cross-cycle global set
         globalProcessedIds?.add(project.id);
         if (project.freelancehuntId) globalProcessedIds?.add(project.freelancehuntId);
         if (numericId) globalProcessedIds?.add(numericId);
@@ -438,17 +381,14 @@ export async function runAutoBidCycle(
         bidsSubmitted++;
 
         const sentAt = new Date().toISOString();
-        const appStatus: import('@/types').ApplicationStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
-        const bidStatus = result.unconfirmed ? 'sent_unconfirmed' : 'sent';
 
         await saveBid({
           ...bid,
-          status: bidStatus,
+          status:             'sent',
           freelancehuntBidId: result.bidId,
           sentAt,
         });
 
-        // Also persist to applications table for Dashboard display
         await saveApplication({
           id:                 `app_sent_${project.id}_${Date.now()}`,
           userId:             settings.userId,
@@ -459,7 +399,7 @@ export async function runAutoBidCycle(
           budget:             budgetAmount ?? project.budget,
           currency:           project.currency ?? 'UAH',
           deadline:           bid.deadline,
-          status:             appStatus,
+          status:             'sent',
           createdAt:          bid.createdAt ?? sentAt,
           sentAt,
           proposalText:       bid.text,
@@ -467,17 +407,13 @@ export async function runAutoBidCycle(
           freelancehuntBidId: result.bidId,
           aiScore:            filter.aiScore,
           matchedKeywords:    filter.matchedKeywords,
-          skippedReason:      result.unconfirmed
-            ? `Sent unconfirmed — submit clicked, no error. preUrl:${result.preSubmitUrl} postUrl:${result.postSubmitUrl}`
-            : undefined,
         }).catch(() => {});
 
-        const statusLabel = result.unconfirmed ? 'SENT_UNCONFIRMED' : 'SUBMITTED';
-        log(logs, result.unconfirmed ? 'warning' : 'success',
-          `${statusLabel} [${i + 1}/${filtered.length}] — "${projectTitle}" | strategy: ${result.strategy} | bidId: ${result.bidId ?? 'n/a'} | price: ${budgetAmount} ${project.currency ?? 'UAH'} | days: ${days} | preUrl: ${result.preSubmitUrl ?? projectUrl} | postUrl: ${result.postSubmitUrl ?? projectUrl}`,
+        log(logs, 'success',
+          `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: result.strategy, unconfirmed: result.unconfirmed },
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'api' },
           }
         );
 
@@ -490,8 +426,8 @@ export async function runAutoBidCycle(
             `<b>Price:</b> ${bid.price ?? '?'} ${project.currency ?? 'UAH'}`,
             `<b>Deadline:</b> ${bid.deadline ?? '?'}`,
             `<b>Match:</b> ${project.matchScore ?? '?'}%`,
-            `<a href="${projectUrl}">View project</a>`,
-          ].join('\n');
+            projectUrl ? `<a href="${projectUrl}">View project</a>` : '',
+          ].filter(Boolean).join('\n');
 
           await sendTelegramMessage(chatId, msg, {
             parseMode: 'HTML',
@@ -499,7 +435,7 @@ export async function runAutoBidCycle(
           });
         }
       } else {
-        throw new Error('API returned success: false');
+        throw new Error('sendFreelancehuntBid returned success: false');
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -541,42 +477,35 @@ export async function runAutoBidCycle(
 
       // All other errors: log full error, count as failure, continue to next project
 
-      // Extract canonical error code from message prefix (e.g. "FORM_NOT_FOUND: ...")
+      // Extract canonical error code from REST API error message prefix
       const ERROR_CODES = [
-        'PLAYWRIGHT_BROWSER_ERROR',
-        'SESSION_EXPIRED',
-        'FORM_NOT_FOUND',
-        'SUBMIT_NOT_FOUND',
-        'VALIDATION_ERROR',
-        'PROJECT_CLOSED',
+        'INVALID_TOKEN',
+        'FORBIDDEN',
+        'NOT_FOUND',
+        'RATE_LIMITED',
         'ALREADY_BID',
-        'INSUFFICIENT_FUNDS',
-        'TOKEN_INVALID',
-        'CAPTCHA_REQUIRED',
-        'VERIFY_REQUIRED',
-        'UNAVAILABLE',
-        'ACCESS_DENIED',
-        'SESSION_MISSING',
+        'PROJECT_CLOSED',
+        'INVALID_ID',
+        'API_ERROR_400',
+        'API_ERROR_422',
+        'API_ERROR_500',
+        'JSON_PARSE_ERROR',
       ];
       const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
 
-      // Human-readable labels for each error code
       const ERROR_LABELS: Record<string, string> = {
-        PLAYWRIGHT_BROWSER_ERROR: 'Браузер не запустився (Playwright)',
-        SESSION_EXPIRED:          'Сесія закінчилась — потрібно повторно увійти',
-        SESSION_MISSING:          'Файл сесії не знайдено',
-        FORM_NOT_FOUND:           'Форма подання заявки не знайдена',
-        SUBMIT_NOT_FOUND:         'Кнопка надсилання не знайдена',
-        VALIDATION_ERROR:         'Помилка валідації форми',
-        PROJECT_CLOSED:           'Проєкт закрито',
-        ALREADY_BID:              'Заявка вже подана',
-        INSUFFICIENT_FUNDS:       'Недостатньо коштів',
-        TOKEN_INVALID:            'Невірний токен',
-        CAPTCHA_REQUIRED:         'Потрібна капча',
-        VERIFY_REQUIRED:          'Потрібна верифікація акаунту',
-        UNAVAILABLE:              'Заявка недоступна',
-        ACCESS_DENIED:            'Доступ заборонено',
-        UNKNOWN_ERROR:            'Невідома помилка',
+        INVALID_TOKEN:    'Невірний або відсутній FREELANCEHUNT_TOKEN',
+        FORBIDDEN:        'Доступ заборонено — акаунт може бути обмежений',
+        NOT_FOUND:        'Проєкт не знайдено (404)',
+        RATE_LIMITED:     'Перевищено ліміт запитів — зачекайте',
+        ALREADY_BID:      'Заявка вже подана на цей проєкт',
+        PROJECT_CLOSED:   'Проєкт закрито або завершено',
+        INVALID_ID:       'Невірний ідентифікатор проєкту',
+        API_ERROR_400:    'Помилка запиту (400) — невірні дані',
+        API_ERROR_422:    'Помилка валідації (422)',
+        API_ERROR_500:    'Помилка сервера Freelancehunt (500)',
+        JSON_PARSE_ERROR: 'Некоректна відповідь від API',
+        UNKNOWN_ERROR:    'Невідома помилка API',
       };
       const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);
 

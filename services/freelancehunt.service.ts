@@ -239,12 +239,14 @@ export async function fetchFreelancehuntProject(
 // ─── Bid submission ───────────────────────────────────────────────────────────
 
 /**
- * @deprecated
- * POST /v2/projects/{id}/bids was removed from the Freelancehunt API (410 Gone).
- * Bid submission must be done via Playwright browser automation.
- * Use submitBidViaPlaywright() from services/playwright-browser.service.ts instead.
+ * Submit a bid via Freelancehunt REST API v2.
+ * POST /v2/projects/{id}/bids
  *
- * This function always throws API_GONE_410 so callers fail fast and clearly.
+ * Official payload (from Freelancehunt API docs):
+ *   { days, safe_type, budget: { amount, currency }, comment, is_hidden }
+ *
+ * Returns { success: true, bidId, strategy: 'api' } on success.
+ * Throws with a prefixed error code (INVALID_TOKEN, ALREADY_BID, PROJECT_CLOSED, etc.)
  */
 export async function sendFreelancehuntBid(
   token: string,
@@ -257,13 +259,52 @@ export async function sendFreelancehuntBid(
     logFn?: (level: string, message: string, meta?: Record<string, unknown>) => void;
   }
 ): Promise<{ success: boolean; bidId?: string; strategy?: string }> {
-  // Suppress unused-variable warnings for the deprecated signature
-  void token; void projectIdOrUrl; void bid;
+  const log: LogFn = bid.logFn
+    ? (level, message) => bid.logFn!(level, message)
+    : noop;
 
-  throw new Error(
-    'API_GONE_410: POST /v2/projects/{id}/bids is no longer available (Freelancehunt deprecated this endpoint). ' +
-    'Use submitBidViaPlaywright() from services/playwright-browser.service.ts instead.'
+  if (!token) throw new Error('INVALID_TOKEN: FREELANCEHUNT_TOKEN is not set');
+
+  // Extract numeric project ID from fh_NNNN, a full URL, or a plain numeric string
+  let numericId: string;
+  if (/^\d+$/.test(projectIdOrUrl)) {
+    numericId = projectIdOrUrl;
+  } else if (projectIdOrUrl.startsWith('fh_')) {
+    numericId = projectIdOrUrl.slice(3);
+  } else {
+    const match = projectIdOrUrl.match(/\/(\d+)\/?(?:[/?#]|$)/);
+    if (!match) throw new Error(`INVALID_ID: Cannot extract numeric project ID from "${projectIdOrUrl}"`);
+    numericId = match[1];
+  }
+
+  const amount   = bid.budget > 0 ? bid.budget : 500;
+  const days     = bid.days > 0 ? bid.days : 14;
+  const currency = bid.currency ?? 'UAH';
+  const comment  = bid.text?.trim() || 'I am interested in your project.';
+
+  const payload = {
+    days,
+    safe_type: 'employer' as const,
+    budget:    { amount, currency },
+    comment,
+    is_hidden: false,
+  };
+
+  log('info', `[FH] POST /v2/projects/${numericId}/bids — amount:${amount} ${currency} days:${days}`);
+
+  const response = await fhFetch<{
+    data?: { id?: number | string };
+  }>(
+    `/projects/${numericId}/bids`,
+    token,
+    { method: 'POST', body: JSON.stringify(payload) },
+    log
   );
+
+  const bidId = String(response.data?.id ?? '');
+  log('info', `[FH] Bid submitted — bidId: ${bidId || 'n/a'}`);
+
+  return { success: true, bidId: bidId || undefined, strategy: 'api' };
 }
 
 
