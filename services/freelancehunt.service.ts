@@ -20,7 +20,7 @@ import type { Project } from '@/types';
 const BASE_URL = 'https://api.freelancehunt.com/v2';
 
 type LogFn = (level: string, message: string) => void;
-const noop: LogFn = () => { };
+const noop: LogFn = () => {};
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
