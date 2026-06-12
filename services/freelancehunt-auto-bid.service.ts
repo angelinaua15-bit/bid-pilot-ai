@@ -359,17 +359,15 @@ export async function runAutoBidCycle(
     );
 
     try {
-      const result = await sendFreelancehuntBid(
-        isMockMode ? '' : apiToken,
-        projectIdentifier,
-        {
-          text:     bid.text ?? '',
-          budget:   budgetAmount!,
-          days,
-          currency: project.currency ?? 'UAH',
-          logFn:    (level, message) => stepLog(level as 'info' | 'success' | 'warning' | 'error', message),
-        }
-      );
+      const result = await submitBidViaBrowser({
+        projectId:  numericId,
+        projectUrl,                       // потрібен реальний URL сторінки проєкту
+        comment:    bid.text ?? '',
+        amount:     budgetAmount!,
+        days,
+        safeType:   'no_safe',
+        log: (level, message, meta) => stepLog(level, message, meta),
+      });
 
       if (result.success) {
         bidSet.add(project.id);
@@ -388,54 +386,45 @@ export async function runAutoBidCycle(
           freelancehuntBidId: result.bidId,
           sentAt,
         });
-
         await saveApplication({
-          id:                 `app_sent_${project.id}_${Date.now()}`,
-          userId:             settings.userId,
-          projectId:          project.id,
-          freelancehuntId:    project.freelancehuntId ?? undefined,
-          title:              projectTitle,
-          url:                projectUrl,
-          budget:             budgetAmount ?? project.budget,
-          currency:           project.currency ?? 'UAH',
-          deadline:           bid.deadline,
-          status:             'sent',
-          createdAt:          bid.createdAt ?? sentAt,
-          sentAt,
-          proposalText:       bid.text,
-          proposalPrice:      bid.price,
+          id: `app_sent_${project.id}_${Date.now()}`,
+          userId: settings.userId, projectId: project.id,
+          freelancehuntId: project.freelancehuntId ?? undefined,
+          title: projectTitle, url: projectUrl,
+          budget: budgetAmount ?? project.budget, currency: project.currency ?? 'UAH',
+          deadline: bid.deadline, status: 'sent',
+          createdAt: bid.createdAt ?? sentAt, sentAt,
+          proposalText: bid.text, proposalPrice: bid.price,
           freelancehuntBidId: result.bidId,
-          aiScore:            filter.aiScore,
-          matchedKeywords:    filter.matchedKeywords,
+          aiScore: filter.aiScore, matchedKeywords: filter.matchedKeywords,
         }).catch(() => {});
 
         log(logs, 'success',
           `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
-          {
-            projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'api' },
-          }
-        );
+          { projectId: project.id, projectTitle, bidId: result.bidId,
+            meta: { price: budgetAmount, deadline: days, projectUrl, strategy: 'browser' } });
 
-        // ── 6. Telegram notification ────────────────────────────────────────
         if (chatId) {
-          const msg = [
-            '<b>Bid submitted!</b>',
-            '',
+          const msg = ['<b>Bid submitted!</b>', '',
             `<b>Project:</b> ${projectTitle}`,
             `<b>Price:</b> ${bid.price ?? '?'} ${project.currency ?? 'UAH'}`,
             `<b>Deadline:</b> ${bid.deadline ?? '?'}`,
-            `<b>Match:</b> ${project.matchScore ?? '?'}%`,
-            projectUrl ? `<a href="${projectUrl}">View project</a>` : '',
+            projectUrl ? `<a href="${projectUrl}">View project</a>` : ''
           ].filter(Boolean).join('\n');
-
-          await sendTelegramMessage(chatId, msg, {
-            parseMode: 'HTML',
-            disableWebPagePreview: true,
-          });
+          await sendTelegramMessage(chatId, msg, { parseMode: 'HTML', disableWebPagePreview: true });
         }
       } else {
-        throw new Error('sendFreelancehuntBid returned success: false');
+        // Перетворюємо точний status браузерного сабміту на ваші коди помилок
+        const map: Record<string, string> = {
+          already_bid:    'ALREADY_BID',
+          project_closed: 'PROJECT_CLOSED',
+          login_required: 'INVALID_TOKEN',
+        };
+        const prefix = map[result.status] ?? 'BROWSER_SUBMIT_FAILED';
+        throw new Error(`${prefix}: ${result.reason}`);
+      }
+    } catch (err) {
+      // …(твій наявний catch-блок лишається без змін — він уже логує точну причину)…
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
