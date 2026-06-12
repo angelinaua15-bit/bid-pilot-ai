@@ -149,20 +149,26 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="applications"
-            label="Заявок на місяць"
-            values={{ free: '20', pro: '300', agency: '999', unlimited: 'Необмежено' }}
+            label="Bids / month"
+            values={{ free: '—', pro: '20', agency: '100', unlimited: 'Unlimited' }}
+          />
+          <PlanFeatureRow
+            plan={user.subscriptionPlan}
+            feature="accounts"
+            label="Telegram accounts"
+            values={{ free: '1', pro: '3', agency: '10', unlimited: 'Unlimited' }}
+          />
+          <PlanFeatureRow
+            plan={user.subscriptionPlan}
+            feature="channels"
+            label="Channels / groups"
+            values={{ free: '—', pro: '300', agency: '1 000+', unlimited: 'Unlimited' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="campaigns"
             label="Telegram campaigns"
-            values={{ free: 'Недоступно', pro: 'Доступно', agency: 'Доступно', unlimited: 'Доступно' }}
-          />
-          <PlanFeatureRow
-            plan={user.subscriptionPlan}
-            feature="accounts"
-            label="Акаунтів"
-            values={{ free: '1', pro: '1', agency: '5', unlimited: 'Необмежено' }}
+            values={{ free: '—', pro: 'Yes', agency: 'Yes', unlimited: 'Yes' }}
           />
         </div>
 
@@ -171,7 +177,7 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
             onClick={() => { haptic.medium(); setShowUpgrade(true); }}
             className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform"
           >
-            <Crown size={13} /> {user.subscriptionPlan === 'free' ? 'Перейти на Pro' : 'Перейти на Agency'}
+            <Crown size={13} /> {user.subscriptionPlan === 'free' ? 'Upgrade to Premium' : 'Upgrade to Agency'}
           </button>
         )}
       </div>

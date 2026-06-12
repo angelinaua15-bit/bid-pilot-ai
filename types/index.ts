@@ -496,14 +496,19 @@ export interface SaaSDashboardStats {
 
 export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   applicationsPerMonth: number;
-  accounts: number;
+  telegramAccounts: number;
+  channels: number;
   campaigns: boolean;
   adminAccess: boolean;
 }> = {
-  free:      { applicationsPerMonth: 20,       accounts: 1,    campaigns: false, adminAccess: false },
-  pro:       { applicationsPerMonth: 300,      accounts: 1,    campaigns: true,  adminAccess: false },
-  agency:    { applicationsPerMonth: 999,      accounts: 5,    campaigns: true,  adminAccess: true  },
-  unlimited: { applicationsPerMonth: 999999,   accounts: 999,  campaigns: true,  adminAccess: true  },
+  // free: very limited access for unapproved users
+  free:      { applicationsPerMonth: 5,       telegramAccounts: 1,   channels: 0,       campaigns: false, adminAccess: false },
+  // pro = Premium $20: solo freelancers
+  pro:       { applicationsPerMonth: 20,      telegramAccounts: 3,   channels: 300,     campaigns: true,  adminAccess: false },
+  // agency = Agency $30: teams
+  agency:    { applicationsPerMonth: 100,     telegramAccounts: 10,  channels: 1000,    campaigns: true,  adminAccess: false },
+  // unlimited = Enterprise $50: unlimited
+  unlimited: { applicationsPerMonth: 999999,  telegramAccounts: 999, channels: 999999,  campaigns: true,  adminAccess: true  },
 };
 
 // ─── Owner ─────────────────────────────────────��──────────────────────────���───
