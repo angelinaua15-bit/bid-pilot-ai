@@ -19,7 +19,7 @@ import type { AutoBidSettings, AutoBidLog, Project } from '@/types';
 import type { StepLogFn } from './freelancehunt-parser.service';
 import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
-import { sendFreelancehuntBid } from './freelancehunt.service';
+import { submitBidViaBrowser } from './playwright-bid.service';
 import { sendTelegramMessage } from './telegram.service';
 import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
@@ -359,17 +359,19 @@ export async function runAutoBidCycle(
     );
 
     try {
-      const result = await sendFreelancehuntBid(
-        isMockMode ? '' : apiToken,
-        projectIdentifier,
-        {
-          text:     bid.text ?? '',
-          budget:   budgetAmount!,
-          days,
-          currency: project.currency ?? 'UAH',
-          logFn:    (level, message) => stepLog(level as 'info' | 'success' | 'warning' | 'error', message),
-        }
-      );
+      // Submit via the AUTHENTICATED BROWSER session (storageState reused from
+      // playwright-browser.service.ts) — NOT the API. The v2 API has no
+      // create-bid endpoint; the old route returns 410.
+      const result = await submitBidViaBrowser({
+        projectId:  numericId,
+        projectUrl,                                  // real project page URL is required
+        comment:    bid.text ?? '',
+        amount:     budgetAmount!,
+        days,
+        safeType:   'no_safe',
+        log: (level, message, meta) =>
+          stepLog(level as 'info' | 'success' | 'warning' | 'error', message, meta),
+      });
 
       if (result.success) {
         bidSet.add(project.id);
@@ -413,7 +415,7 @@ export async function runAutoBidCycle(
           `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'api' },
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'browser' },
           }
         );
 
@@ -435,7 +437,16 @@ export async function runAutoBidCycle(
           });
         }
       } else {
-        throw new Error('sendFreelancehuntBid returned success: false');
+        // Map the browser submit's exact status to your canonical error prefixes
+        // so the catch-block below classifies and persists the precise reason.
+        const statusToCode: Record<string, string> = {
+          already_bid:    'ALREADY_BID',
+          project_closed: 'PROJECT_CLOSED',
+          login_required: 'INVALID_TOKEN',
+          failed:         'BROWSER_SUBMIT_FAILED',
+        };
+        const prefix = statusToCode[result.status] ?? 'BROWSER_SUBMIT_FAILED';
+        throw new Error(`${prefix}: ${result.reason}`);
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -490,6 +501,16 @@ export async function runAutoBidCycle(
         'API_ERROR_422',
         'API_ERROR_500',
         'JSON_PARSE_ERROR',
+        // Browser-submit + deprecated-endpoint codes
+        'ENDPOINT_GONE_410',
+        'BID_API_UNSUPPORTED',
+        'BROWSER_SUBMIT_FAILED',
+        'LOGIN_REQUIRED',
+        'NO_SESSION',
+        'NO_BID_FORM',
+        'FORM_FIELD_MISSING',
+        'VALIDATION_ERROR',
+        'UNCONFIRMED',
       ];
       const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
 
@@ -505,7 +526,16 @@ export async function runAutoBidCycle(
         API_ERROR_422:    'Помилка валідації (422)',
         API_ERROR_500:    'Помилка сервера Freelancehunt (500)',
         JSON_PARSE_ERROR: 'Некоректна відповідь від API',
-        UNKNOWN_ERROR:    'Невідома помилка API',
+        ENDPOINT_GONE_410:     'Endpoint застарів (410) — використовуйте браузерний сабміт',
+        BID_API_UNSUPPORTED:   'API не підтримує подачу заявок — потрібен браузерний сабміт',
+        BROWSER_SUBMIT_FAILED: 'Не вдалося подати заявку через браузер',
+        LOGIN_REQUIRED:        'Сесію втрачено — потрібно повторно увійти у Freelancehunt',
+        NO_SESSION:            'Немає автентифікованої сесії браузера',
+        NO_BID_FORM:           'Форму заявки не знайдено (перевірте селектори / право подачі)',
+        FORM_FIELD_MISSING:    'Поле форми не знайдено (перевірте селектори)',
+        VALIDATION_ERROR:      'Форма повернула помилку валідації',
+        UNCONFIRMED:           'Сабміт не підтверджено — заявку не зараховано',
+        UNKNOWN_ERROR:    'Невідома помилка',
       };
       const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);
 

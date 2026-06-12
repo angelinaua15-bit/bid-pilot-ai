@@ -5,8 +5,11 @@
  * Authentication: Bearer token via FREELANCEHUNT_TOKEN env var.
  * No browser automation. No session files. No Playwright.
  *
- * Project listing:  GET  /v2/projects
- * Bid submission:   POST /v2/projects/{id}/bids
+ * Project listing:  GET  /v2/projects   (read-only)
+ * Token validation: GET  /v2/my/profile
+ * Bid submission:   NOT SUPPORTED by the API — use submitBidViaBrowser()
+ *                   (the v2 API has no create-bid endpoint; the old public
+ *                    route returns HTTP 410).
  *
  * Full request + response logging on every call.
  * No silent failures — every error surface with exact reason.
@@ -17,7 +20,7 @@ import type { Project } from '@/types';
 const BASE_URL = 'https://api.freelancehunt.com/v2';
 
 type LogFn = (level: string, message: string) => void;
-const noop: LogFn = () => {};
+const noop: LogFn = () => { };
 
 // ─── HTTP helper ──────────────────────────────────────────────────────────────
 
@@ -96,6 +99,12 @@ async function fhFetch<T = unknown>(
     }
     if (res.status === 404) {
       throw new Error(`NOT_FOUND: ${reason}`);
+    }
+    // 410 Gone — a retired/deprecated public endpoint. This is exactly what the
+    // old POST /v2/projects/{id}/bids route returns. Surface it explicitly so it
+    // is never reported as a generic/unknown error.
+    if (res.status === 410) {
+      throw new Error(`ENDPOINT_GONE_410: ${reason}`);
     }
     if (res.status === 429) {
       throw new Error(`RATE_LIMITED: ${reason}`);
@@ -236,21 +245,27 @@ export async function fetchFreelancehuntProject(
   }
 }
 
-// ─── Bid submission ───────────────────────────────────────────────────────────
+// ─── Bid submission — DISABLED ────────────────────────────────────────────────
 
 /**
- * Submit a bid via Freelancehunt REST API v2.
- * POST /v2/projects/{id}/bids
+ * @deprecated DO NOT USE. Freelancehunt API v2 has NO create-bid endpoint.
  *
- * Official payload (from Freelancehunt API docs):
- *   { days, safe_type, budget: { amount, currency }, comment, is_hidden }
+ * The old public route `POST /v2/projects/{id}/bids` was retired and now
+ * returns HTTP 410 ("This public endpoint is no longer available due to API v2
+ * deprecation"). There is NO API replacement — the v2 Bids API only supports
+ * reading bids and employer/owner actions (choose, reject, revoke, restore),
+ * never creating one.
  *
- * Returns { success: true, bidId, strategy: 'api' } on success.
- * Throws with a prefixed error code (INVALID_TOKEN, ALREADY_BID, PROJECT_CLOSED, etc.)
+ * Bids must be placed through the authenticated browser session instead:
+ *   import { submitBidViaBrowser } from './playwright-bid.service';
+ *
+ * This function is kept only so any lingering caller fails loudly and clearly
+ * rather than silently hitting the dead endpoint. The signature is preserved
+ * for type-compatibility with old call sites.
  */
 export async function sendFreelancehuntBid(
-  token: string,
-  projectIdOrUrl: string,
+  _token: string,
+  _projectIdOrUrl: string,
   bid: {
     text: string;
     budget: number;
@@ -259,52 +274,11 @@ export async function sendFreelancehuntBid(
     logFn?: (level: string, message: string, meta?: Record<string, unknown>) => void;
   }
 ): Promise<{ success: boolean; bidId?: string; strategy?: string }> {
-  const log: LogFn = bid.logFn
-    ? (level, message) => bid.logFn!(level, message)
-    : noop;
-
-  if (!token) throw new Error('INVALID_TOKEN: FREELANCEHUNT_TOKEN is not set');
-
-  // Extract numeric project ID from fh_NNNN, a full URL, or a plain numeric string
-  let numericId: string;
-  if (/^\d+$/.test(projectIdOrUrl)) {
-    numericId = projectIdOrUrl;
-  } else if (projectIdOrUrl.startsWith('fh_')) {
-    numericId = projectIdOrUrl.slice(3);
-  } else {
-    const match = projectIdOrUrl.match(/\/(\d+)\/?(?:[/?#]|$)/);
-    if (!match) throw new Error(`INVALID_ID: Cannot extract numeric project ID from "${projectIdOrUrl}"`);
-    numericId = match[1];
-  }
-
-  const amount   = bid.budget > 0 ? bid.budget : 500;
-  const days     = bid.days > 0 ? bid.days : 14;
-  const currency = bid.currency ?? 'UAH';
-  const comment  = bid.text?.trim() || 'I am interested in your project.';
-
-  const payload = {
-    days,
-    safe_type: 'employer' as const,
-    budget:    { amount, currency },
-    comment,
-    is_hidden: false,
-  };
-
-  log('info', `[FH] POST /v2/projects/${numericId}/bids — amount:${amount} ${currency} days:${days}`);
-
-  const response = await fhFetch<{
-    data?: { id?: number | string };
-  }>(
-    `/projects/${numericId}/bids`,
-    token,
-    { method: 'POST', body: JSON.stringify(payload) },
-    log
+  bid.logFn?.(
+    'error',
+    '[FH] sendFreelancehuntBid is disabled — Freelancehunt API v2 cannot create bids (POST /v2/projects/{id}/bids returns 410). Use submitBidViaBrowser().'
   );
-
-  const bidId = String(response.data?.id ?? '');
-  log('info', `[FH] Bid submitted — bidId: ${bidId || 'n/a'}`);
-
-  return { success: true, bidId: bidId || undefined, strategy: 'api' };
+  throw new Error(
+    'BID_API_UNSUPPORTED: Freelancehunt API v2 has no create-bid endpoint (old route returns 410). Use submitBidViaBrowser() from playwright-bid.service.ts.'
+  );
 }
-
-
