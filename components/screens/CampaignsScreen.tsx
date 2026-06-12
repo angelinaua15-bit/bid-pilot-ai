@@ -2,14 +2,16 @@
 
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  RefreshCw, Plus, Send, CheckCircle2, XCircle, Clock,
-  ChevronRight, Trash2, Play, Pause, Radio, Search, X, Smartphone,
+  RefreshCw, Send, CheckCircle2, XCircle, Clock,
+  ChevronRight, Trash2, Play, Pause, Radio, Search, Smartphone,
+  Users, AlertTriangle, BarChart2, Filter,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
-import { formatDistanceToNow } from 'date-fns';
+import { formatDistanceToNow, format } from 'date-fns';
 import { uk } from 'date-fns/locale';
 import type { SaaSUser, Campaign, TelegramChannel, CampaignMessage, TelegramAccount } from '@/types';
+import { PLAN_LIMITS } from '@/types';
 
 const PAGE_SIZE = 50;
 
@@ -105,7 +107,7 @@ export function CampaignsScreen({ user }: Props) {
             />
           )}
           {subTab === 'create'    && (
-            <CreateCampaignForm userId={userId} onCreated={() => { setSubTab('campaigns'); load(); }} />
+            <CreateCampaignForm userId={userId} user={user} onCreated={() => { setSubTab('campaigns'); load(); }} />
           )}
         </>
       )}
@@ -117,9 +119,11 @@ export function CampaignsScreen({ user }: Props) {
 function CampaignsList({ campaigns, userId, onRefresh }: {
   campaigns: Campaign[]; userId?: string; onRefresh: () => void;
 }) {
-  const [expanded, setExpanded]   = useState<string | null>(null);
-  const [messages, setMessages]   = useState<Record<string, CampaignMessage[]>>({});
-  const [actionErr, setActionErr] = useState<Record<string, string>>({});
+  const [expanded, setExpanded]         = useState<string | null>(null);
+  const [messages, setMessages]         = useState<Record<string, CampaignMessage[]>>({});
+  const [actionErr, setActionErr]       = useState<Record<string, string>>({});
+  const [statusFilter, setStatusFilter] = useState<string>('all');
+  const [dateFilter, setDateFilter]     = useState<string>('');
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
   const loadMessages = useCallback(async (id: string) => {
@@ -208,9 +212,10 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
               <ChevronRight size={14} className={cn('text-muted-foreground flex-shrink-0 transition-transform', expanded === c.id && 'rotate-90')} />
             </button>
 
-            {/* Expanded: actions + message logs */}
+            {/* Expanded: stats + filters + message logs */}
             {expanded === c.id && (
               <div className="border-t border-border px-4 pb-4 pt-3 flex flex-col gap-3">
+                {/* Action buttons */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex gap-2">
                     {(c.status === 'draft' || c.status === 'paused' || c.status === 'failed') && (
@@ -231,61 +236,159 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                   )}
                 </div>
 
-                {(messages[c.id] ?? []).length === 0 ? (
-                  <p className="text-[11px] text-muted-foreground">Немає логів розсилки</p>
-                ) : (
-                  <div className="flex flex-col gap-1.5">
-                    {(messages[c.id] ?? []).map((msg) => (
-                      <div key={msg.id} className="flex items-center gap-2">
-                        {/* Status icon */}
-                        {msg.status === 'sent'             && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
-                        {msg.status === 'failed'           && <XCircle      size={11} className="text-red-400 flex-shrink-0" />}
-                        {msg.status === 'pending'          && <Clock        size={11} className="text-muted-foreground flex-shrink-0" />}
-                        {msg.status === 'skipped'          && <Clock        size={11} className="text-yellow-400 flex-shrink-0" />}
-                        {msg.status === 'waiting_approval' && <Clock        size={11} className="text-blue-400 flex-shrink-0" />}
-                        {msg.status === 'invalid_channel'  && <XCircle      size={11} className="text-orange-400 flex-shrink-0" />}
-
-                        {/* Channel name */}
-                        <span className="text-[11px] flex-1 truncate min-w-0">
-                          {msg.channelTitle ?? msg.channelId}
-                        </span>
-
-                        {/* Status badge for non-trivial statuses */}
-                        {msg.status === 'waiting_approval' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">
-                            очікує
-                          </span>
-                        )}
-                        {msg.status === 'invalid_channel' && (
-                          <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">
-                            не знайдено
-                          </span>
-                        )}
-
-                        {/* Account phone */}
-                        {msg.accountPhone && (
-                          <span className="text-[10px] text-muted-foreground flex-shrink-0 flex items-center gap-0.5">
-                            <Smartphone size={9} />{msg.accountPhone}
-                          </span>
-                        )}
-
-                        {/* Error (for failed only — approval reason is shown as badge) */}
-                        {msg.errorReason && msg.status === 'failed' && (
-                          <span className="text-[10px] text-red-400 truncate max-w-[90px]" title={msg.errorReason}>
-                            {msg.errorReason}
-                          </span>
-                        )}
-
-                        {/* Sent time */}
-                        {msg.sentAt && (
-                          <span className="text-[10px] text-muted-foreground flex-shrink-0">
-                            {formatDistanceToNow(new Date(msg.sentAt), { addSuffix: true, locale: uk })}
-                          </span>
-                        )}
+                {/* Statistics grid */}
+                <div>
+                  <div className="flex items-center gap-1.5 mb-2">
+                    <BarChart2 size={11} className="text-muted-foreground" />
+                    <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Статистика</p>
+                  </div>
+                  <div className="grid grid-cols-3 gap-2">
+                    {[
+                      { label: 'Всього',    value: c.totalCount,  color: 'text-foreground' },
+                      { label: 'Надіслано', value: c.sentCount,   color: 'text-green-400' },
+                      { label: 'Помилки',   value: c.failedCount, color: 'text-red-400' },
+                    ].map(({ label, value, color }) => (
+                      <div key={label} className="bg-secondary/50 rounded-xl px-2.5 py-2 text-center">
+                        <p className={cn('text-sm font-bold', color)}>{value}</p>
+                        <p className="text-[10px] text-muted-foreground mt-0.5">{label}</p>
                       </div>
                     ))}
                   </div>
+                  {/* Additional stats from messages */}
+                  {(messages[c.id] ?? []).length > 0 && (() => {
+                    const msgs = messages[c.id]!;
+                    const waiting   = msgs.filter((m) => m.status === 'waiting_approval').length;
+                    const invalid   = msgs.filter((m) => m.status === 'invalid_channel').length;
+                    const skipped   = msgs.filter((m) => m.status === 'skipped').length;
+                    const accounts  = [...new Set(msgs.filter((m) => m.accountPhone).map((m) => m.accountPhone))];
+                    const firstSent = msgs.find((m) => m.sentAt)?.sentAt;
+                    const lastSent  = [...msgs].reverse().find((m) => m.sentAt)?.sentAt;
+                    return (
+                      <div className="mt-2 flex flex-col gap-1">
+                        {(waiting > 0 || invalid > 0 || skipped > 0) && (
+                          <div className="flex gap-3 flex-wrap mt-1">
+                            {waiting > 0  && <span className="text-[10px] text-blue-400">{waiting} очікує підтв.</span>}
+                            {invalid > 0  && <span className="text-[10px] text-orange-400">{invalid} не знайдено</span>}
+                            {skipped > 0  && <span className="text-[10px] text-yellow-400">{skipped} пропущено</span>}
+                          </div>
+                        )}
+                        {accounts.length > 0 && (
+                          <div className="flex items-center gap-1 flex-wrap">
+                            <Smartphone size={9} className="text-muted-foreground" />
+                            <span className="text-[10px] text-muted-foreground">{accounts.join(', ')}</span>
+                          </div>
+                        )}
+                        {firstSent && (
+                          <p className="text-[10px] text-muted-foreground">
+                            Початок: {format(new Date(firstSent), 'dd MMM yyyy HH:mm', { locale: uk })}
+                            {lastSent && lastSent !== firstSent && ` — ${format(new Date(lastSent), 'HH:mm')}`}
+                          </p>
+                        )}
+                      </div>
+                    );
+                  })()}
+                </div>
+
+                {/* Progress bar when running */}
+                {c.status === 'running' && c.totalCount > 0 && (
+                  <div className="flex flex-col gap-1">
+                    <div className="flex justify-between">
+                      <span className="text-[10px] text-muted-foreground">Прогрес</span>
+                      <span className="text-[10px] text-muted-foreground">
+                        {Math.round(((c.sentCount + c.failedCount) / c.totalCount) * 100)}%
+                      </span>
+                    </div>
+                    <div className="h-1.5 rounded-full bg-secondary overflow-hidden">
+                      <div className="h-full bg-primary rounded-full transition-all"
+                        style={{ width: `${Math.min(100, ((c.sentCount + c.failedCount) / c.totalCount) * 100)}%` }} />
+                    </div>
+                  </div>
                 )}
+
+                {/* Logs section */}
+                <div>
+                  <div className="flex items-center justify-between mb-2">
+                    <div className="flex items-center gap-1.5">
+                      <Filter size={10} className="text-muted-foreground" />
+                      <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Логи розсилки</p>
+                    </div>
+                    <div className="flex gap-1.5">
+                      <select
+                        value={statusFilter}
+                        onChange={(e) => setStatusFilter(e.target.value)}
+                        className="bg-secondary rounded-md px-1.5 py-0.5 text-[10px] outline-none">
+                        <option value="all">Всі</option>
+                        <option value="sent">Надіслано</option>
+                        <option value="failed">Помилка</option>
+                        <option value="waiting_approval">Очікує</option>
+                        <option value="invalid_channel">Не знайдено</option>
+                        <option value="skipped">Пропущено</option>
+                      </select>
+                      <input
+                        type="date"
+                        value={dateFilter}
+                        onChange={(e) => setDateFilter(e.target.value)}
+                        className="bg-secondary rounded-md px-1.5 py-0.5 text-[10px] outline-none w-28"
+                      />
+                    </div>
+                  </div>
+                  {(messages[c.id] ?? []).length === 0 ? (
+                    <p className="text-[11px] text-muted-foreground">Немає логів розсилки</p>
+                  ) : (() => {
+                    const filtered = (messages[c.id] ?? []).filter((msg) => {
+                      if (statusFilter !== 'all' && msg.status !== statusFilter) return false;
+                      if (dateFilter && msg.sentAt) {
+                        const d = new Date(msg.sentAt).toISOString().slice(0, 10);
+                        if (d !== dateFilter) return false;
+                      }
+                      return true;
+                    });
+                    if (filtered.length === 0) return (
+                      <p className="text-[11px] text-muted-foreground">Немає записів за фільтром</p>
+                    );
+                    return (
+                      <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto">
+                        {filtered.map((msg) => (
+                          <div key={msg.id} className="flex items-center gap-2 py-0.5">
+                            {msg.status === 'sent'             && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
+                            {msg.status === 'failed'           && <XCircle      size={11} className="text-red-400 flex-shrink-0" />}
+                            {msg.status === 'pending'          && <Clock        size={11} className="text-muted-foreground flex-shrink-0" />}
+                            {msg.status === 'skipped'          && <Clock        size={11} className="text-yellow-400 flex-shrink-0" />}
+                            {msg.status === 'waiting_approval' && <Clock        size={11} className="text-blue-400 flex-shrink-0" />}
+                            {msg.status === 'invalid_channel'  && <XCircle      size={11} className="text-orange-400 flex-shrink-0" />}
+
+                            <span className="text-[11px] flex-1 truncate min-w-0">
+                              {msg.channelTitle ?? msg.channelId}
+                            </span>
+
+                            {msg.status === 'waiting_approval' && (
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">очікує</span>
+                            )}
+                            {msg.status === 'invalid_channel' && (
+                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">не знайдено</span>
+                            )}
+
+                            {msg.accountPhone && (
+                              <span className="text-[10px] text-muted-foreground flex-shrink-0 flex items-center gap-0.5">
+                                <Smartphone size={9} />{msg.accountPhone}
+                              </span>
+                            )}
+                            {msg.errorReason && msg.status === 'failed' && (
+                              <span className="text-[10px] text-red-400 truncate max-w-[90px]" title={msg.errorReason}>
+                                {msg.errorReason.slice(0, 30)}
+                              </span>
+                            )}
+                            {msg.sentAt && (
+                              <span className="text-[10px] text-muted-foreground flex-shrink-0 whitespace-nowrap">
+                                {format(new Date(msg.sentAt), 'HH:mm', { locale: uk })}
+                              </span>
+                            )}
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
+                </div>
               </div>
             )}
           </div>
@@ -597,23 +700,30 @@ function ChannelsList({ isAdmin, userId, onTotalChange }: {
 }
 
 // ── Create campaign form ───────────────────────────────────────────────────────
-function CreateCampaignForm({ userId, onCreated }: {
-  userId?: string; onCreated: () => void;
+function CreateCampaignForm({ userId, user, onCreated }: {
+  userId?: string; user: SaaSUser | null; onCreated: () => void;
 }) {
+  const plan       = user?.subscriptionPlan ?? 'free';
+  const limits     = PLAN_LIMITS[plan] ?? PLAN_LIMITS.free;
+  const channelCap = limits.channels >= 999999 ? Infinity : limits.channels;
+  const accountCap = limits.telegramAccounts >= 999 ? Infinity : limits.telegramAccounts;
+
   const [activeChannels, setActiveChannels] = useState<TelegramChannel[]>([]);
   const [chLoading, setChLoading]           = useState(true);
   const [chSearch, setChSearch]             = useState('');
   const [accounts, setAccounts]             = useState<TelegramAccount[]>([]);
 
-  // Load active channels for the picker — paginated, max 200 at once for the selector
+  // Load active channels up to the plan limit (max 5000 rows for the picker)
   useEffect(() => {
     setChLoading(true);
-    fetch('/api/channels?pageSize=200&status=active')
+    const cap = channelCap === Infinity ? 5000 : Math.min(channelCap, 5000);
+    fetch(`/api/channels?pageSize=${cap}&status=active`)
       .then((r) => r.json())
       .then((res) => { if (res?.ok) setActiveChannels(res.channels ?? []); })
       .catch(() => {})
       .finally(() => setChLoading(false));
-  }, []);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [plan]);
 
   // Load active Telegram accounts for sender picker
   useEffect(() => {
@@ -626,26 +736,54 @@ function CreateCampaignForm({ userId, onCreated }: {
   }, []);
 
   const [form, setForm] = useState({
-    title:            '',
-    messageText:      '',
-    accountId:        '',
-    scheduleType:     'now' as 'now' | 'scheduled' | 'interval' | 'daily',
-    scheduledAt:      '',
-    delayMinSeconds:  3,
-    delayMaxSeconds:  10,
-    selectedChannels: [] as string[],
+    title:              '',
+    messageText:        '',
+    selectedAccountIds: [] as string[],
+    scheduleType:       'now' as 'now' | 'scheduled' | 'interval' | 'daily',
+    scheduledAt:        '',
+    delayMinSeconds:    3,
+    delayMaxSeconds:    10,
+    selectedChannels:   [] as string[],
   });
   const [saving, setSaving] = useState(false);
   const [error, setError]   = useState<string | null>(null);
   const charCount = form.messageText.length;
 
+  const atAccountCap = accountCap !== Infinity && form.selectedAccountIds.length >= accountCap;
+  const atChannelCap = channelCap !== Infinity && form.selectedChannels.length >= channelCap;
+
+  const toggleAccount = (id: string) => {
+    setForm((f) => {
+      const has = f.selectedAccountIds.includes(id);
+      if (!has && accountCap !== Infinity && f.selectedAccountIds.length >= accountCap) return f;
+      return {
+        ...f,
+        selectedAccountIds: has
+          ? f.selectedAccountIds.filter((a) => a !== id)
+          : [...f.selectedAccountIds, id],
+      };
+    });
+  };
+
   const toggleChannel = (id: string) => {
-    setForm((f) => ({
-      ...f,
-      selectedChannels: f.selectedChannels.includes(id)
-        ? f.selectedChannels.filter((c) => c !== id)
-        : [...f.selectedChannels, id],
-    }));
+    setForm((f) => {
+      const has = f.selectedChannels.includes(id);
+      if (!has && channelCap !== Infinity && f.selectedChannels.length >= channelCap) return f;
+      return {
+        ...f,
+        selectedChannels: has
+          ? f.selectedChannels.filter((c) => c !== id)
+          : [...f.selectedChannels, id],
+      };
+    });
+  };
+
+  const handleSelectAllChannels = () => {
+    const visible = activeChannels.filter(
+      (ch) => !chSearch || ch.title.toLowerCase().includes(chSearch.toLowerCase()) || (ch.usernameOrLink ?? '').toLowerCase().includes(chSearch.toLowerCase()),
+    );
+    const limited = channelCap === Infinity ? visible : visible.slice(0, channelCap);
+    setForm((f) => ({ ...f, selectedChannels: limited.map((c) => c.id) }));
   };
 
   const handleCreate = async () => {
@@ -659,7 +797,10 @@ function CreateCampaignForm({ userId, onCreated }: {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
           userId,
-          accountId:        form.accountId || undefined,
+          // Send first selected account as primary accountId for backward compat,
+          // plus full accountIds array for multi-account rotation
+          accountId:        form.selectedAccountIds[0] ?? undefined,
+          accountIds:       form.selectedAccountIds.length > 0 ? form.selectedAccountIds : undefined,
           title:            form.title,
           messageText:      form.messageText,
           targetChannelIds: form.selectedChannels,
@@ -697,30 +838,66 @@ function CreateCampaignForm({ userId, onCreated }: {
           />
         </div>
 
-        {/* Telegram account selector */}
-        <div className="flex flex-col gap-1">
-          <label className="text-[10px] text-muted-foreground">
-            Аккаунт-відправник
-            {accounts.length === 0 && <span className="text-[10px] text-yellow-500 ml-1">(немає активних)</span>}
-          </label>
-          {accounts.length > 0 ? (
-            <select
-              value={form.accountId}
-              onChange={(e) => setForm((f) => ({ ...f, accountId: e.target.value }))}
-              className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none"
-            >
-              <option value="">— Без акаунту (через бот) —</option>
-              {accounts.map((a) => (
-                <option key={a.id} value={a.id}>{a.phoneNumber}</option>
-              ))}
-            </select>
-          ) : (
+        {/* Multi-account sender selector */}
+        <div className="flex flex-col gap-2">
+          <div className="flex items-center justify-between">
+            <label className="text-[10px] text-muted-foreground flex items-center gap-1">
+              <Users size={10} />
+              Акаунти-відправники
+              <span className="text-muted-foreground/60">
+                ({form.selectedAccountIds.length}/{accountCap === Infinity ? '∞' : accountCap})
+              </span>
+            </label>
+            {form.selectedAccountIds.length > 0 && (
+              <button onClick={() => setForm((f) => ({ ...f, selectedAccountIds: [] }))}
+                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+                Скинути
+              </button>
+            )}
+          </div>
+          {accounts.length === 0 ? (
             <div className="flex items-center gap-2 bg-secondary rounded-lg px-3 py-2">
               <Smartphone size={12} className="text-muted-foreground flex-shrink-0" />
-              <p className="text-[11px] text-muted-foreground">
-                Підключіть MTProto-аккаунт у панелі адміна для прямої розсилки.
-              </p>
+              <p className="text-[11px] text-muted-foreground">Немає активних акаунтів. Підключіть MTProto-акаунт у налаштуваннях.</p>
             </div>
+          ) : (
+            <>
+              <div className="flex flex-col gap-1.5">
+                {accounts.map((a) => {
+                  const selected = form.selectedAccountIds.includes(a.id);
+                  const disabled = !selected && atAccountCap;
+                  return (
+                    <button key={a.id} onClick={() => toggleAccount(a.id)}
+                      disabled={disabled}
+                      className={cn(
+                        'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-all active:scale-95',
+                        selected ? 'border-primary/40 bg-primary/10' : 'border-border bg-secondary/30',
+                        disabled && 'opacity-40 cursor-not-allowed',
+                      )}>
+                      <div className={cn(
+                        'w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border',
+                        selected ? 'bg-primary border-primary' : 'border-muted-foreground',
+                      )}>
+                        {selected && <CheckCircle2 size={10} className="text-primary-foreground" />}
+                      </div>
+                      <Smartphone size={11} className="text-muted-foreground flex-shrink-0" />
+                      <span className="text-xs font-medium">{a.phoneNumber}</span>
+                    </button>
+                  );
+                })}
+              </div>
+              {atAccountCap && (
+                <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                  <AlertTriangle size={11} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+                  <p className="text-[11px] text-yellow-400">
+                    Досягнуто ліміт акаунтів для плану {plan} ({accountCap}). Для більшої кількості оновіть план.
+                  </p>
+                </div>
+              )}
+              <p className="text-[10px] text-muted-foreground">
+                Кампанія буде рівномірно розподілена між обраними акаунтами.
+              </p>
+            </>
           )}
         </div>
 
@@ -739,7 +916,7 @@ function CreateCampaignForm({ userId, onCreated }: {
             <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20">
               <Clock size={12} className="text-primary flex-shrink-0 mt-0.5" />
               <p className="text-[11px] text-muted-foreground leading-relaxed">
-                Кампанія буде запускатись щодня в рандомний час (08:00–22:00 Kyiv). Кожен акаунт отримує свій унікальний слот — це зменшує ризик блокувань.
+                Кампанія запускатиметься щодня в рандомний час (08:00–22:00 Kyiv). Кожен акаунт отримує унікальний слот.
               </p>
             </div>
           )}
@@ -775,7 +952,7 @@ function CreateCampaignForm({ userId, onCreated }: {
       <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <p className="text-xs font-semibold">
-            Вибрати канали ({form.selectedChannels.length}{activeChannels.length > 0 ? ` / ${activeChannels.length.toLocaleString('uk-UA')}` : ''})
+            Канали ({form.selectedChannels.length}{' / '}{channelCap === Infinity ? activeChannels.length.toLocaleString('uk-UA') : channelCap})
           </p>
           {form.selectedChannels.length > 0 && (
             <button onClick={() => setForm((f) => ({ ...f, selectedChannels: [] }))}
@@ -784,6 +961,17 @@ function CreateCampaignForm({ userId, onCreated }: {
             </button>
           )}
         </div>
+
+        {/* Plan channel limit badge */}
+        <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-secondary/60">
+          <span className="text-[10px] text-muted-foreground">
+            Ліміт плану <span className="font-semibold text-foreground">{plan}</span>:
+          </span>
+          <span className="text-[10px] font-semibold text-primary">
+            {channelCap === Infinity ? 'Необмежено' : `${channelCap.toLocaleString('uk-UA')} каналів`}
+          </span>
+        </div>
+
         {chLoading ? (
           <div className="flex items-center justify-center py-4">
             <RefreshCw size={14} className="animate-spin text-muted-foreground" />
@@ -801,24 +989,37 @@ function CreateCampaignForm({ userId, onCreated }: {
                 className="w-full bg-secondary rounded-lg pl-8 py-2 text-xs outline-none placeholder:text-muted-foreground"
               />
             </div>
-            <div className="flex gap-2 mb-1">
-              <button
-                onClick={() => setForm((f) => ({ ...f, selectedChannels: activeChannels.map((c) => c.id) }))}
-                className="text-[10px] text-primary font-medium"
-              >
-                Вибрати всі ({activeChannels.length.toLocaleString('uk-UA')})
+            <div className="flex items-center justify-between">
+              <button onClick={handleSelectAllChannels} className="text-[10px] text-primary font-medium">
+                Вибрати всі ({channelCap === Infinity ? activeChannels.length : Math.min(channelCap, activeChannels.length)})
               </button>
+              {atChannelCap && (
+                <span className="text-[10px] text-yellow-400 flex items-center gap-1">
+                  <AlertTriangle size={9} /> Ліміт досягнуто
+                </span>
+              )}
             </div>
+            {atChannelCap && (
+              <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
+                <AlertTriangle size={11} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+                <p className="text-[11px] text-yellow-400">
+                  Досягнуто ліміт {channelCap} каналів для плану {plan}. Оновіть підписку щоб розсилати в більше каналів.
+                </p>
+              </div>
+            )}
             <div className="flex flex-col gap-2 max-h-52 overflow-y-auto">
               {activeChannels
                 .filter((ch) => !chSearch || ch.title.toLowerCase().includes(chSearch.toLowerCase()) || (ch.usernameOrLink ?? '').toLowerCase().includes(chSearch.toLowerCase()))
                 .map((ch) => {
                   const selected = form.selectedChannels.includes(ch.id);
+                  const disabled = !selected && atChannelCap;
                   return (
                     <button key={ch.id} onClick={() => toggleChannel(ch.id)}
+                      disabled={disabled}
                       className={cn(
                         'flex items-center gap-2.5 p-2.5 rounded-xl border text-left transition-all active:scale-95',
                         selected ? 'border-primary/40 bg-primary/10' : 'border-border bg-secondary/30',
+                        disabled && 'opacity-40 cursor-not-allowed',
                       )}>
                       <div className={cn(
                         'w-4 h-4 rounded flex items-center justify-center flex-shrink-0 border',
