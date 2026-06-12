@@ -957,6 +957,7 @@ export async function createCampaign(c: Omit<Campaign, 'id' | 'createdAt' | 'upd
     const { data, error } = await db.from('campaigns').insert({
       user_id:            c.userId,
       account_id:         c.accountId ?? null,
+      account_ids:        c.accountIds && c.accountIds.length > 0 ? c.accountIds : null,
       title:              c.title,
       message_text:       c.messageText,
       media_url:          c.mediaUrl ?? null,
@@ -1057,6 +1058,7 @@ function mapCampaign(r: Record<string, unknown>): Campaign {
     id:               r.id as string,
     userId:           r.user_id as string,
     accountId:        r.account_id as string | undefined,
+    accountIds:       (r.account_ids as string[] | undefined) ?? undefined,
     title:            r.title as string,
     messageText:      r.message_text as string,
     mediaUrl:         r.media_url as string | undefined,

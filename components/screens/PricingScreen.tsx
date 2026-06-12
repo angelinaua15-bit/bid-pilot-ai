@@ -22,79 +22,89 @@ interface PlanDef {
   accentClass: string;
   borderClass: string;
   badgeClass: string;
+  ctaClass: string;
   recommended?: boolean;
-  features: PlanFeature[];
-}
-
-interface PlanFeature {
-  label: string;
-  value: string;
-  included: boolean;
+  benefits: string[];
+  limits: { label: string; value: string }[];
 }
 
 const PLANS: PlanDef[] = [
   {
-    id:           'pro',
-    label:        'Premium',
-    price:        '$20',
-    priceUsd:     20,
-    period:       '/міс',
-    description:  'Для фрілансерів-одинаків',
-    icon:         <Zap size={18} />,
-    accentClass:  'text-primary',
-    borderClass:  'border-primary/30',
-    badgeClass:   'bg-primary/15 text-primary',
-    features: [
-      { label: 'Telegram акаунти',        value: '3 акаунти',          included: true  },
-      { label: 'Telegram канали/групи',   value: '300 каналів',        included: true  },
-      { label: 'Заявки Freelancehunt',    value: '20/місяць',          included: true  },
-      { label: 'AI-генерація пропозицій', value: 'Включено',           included: true  },
-      { label: 'Щоденний авто-розклад',   value: 'Рандомізований',     included: true  },
-      { label: 'Пріоритетна підтримка',   value: 'Недоступно',         included: false },
-      { label: 'Необмежені ресурси',      value: 'Недоступно',         included: false },
+    id:          'pro',
+    label:       'Premium',
+    price:       '$20',
+    priceUsd:    20,
+    period:      '/month',
+    description: 'Best for solo freelancers and small outreach.',
+    icon:        <Zap size={18} />,
+    accentClass: 'text-primary',
+    borderClass: 'border-primary/40',
+    badgeClass:  'bg-primary/15 text-primary',
+    ctaClass:    'bg-primary text-primary-foreground',
+    benefits: [
+      'Telegram campaigns for small-scale outreach',
+      'Freelancehunt auto-bid for basic lead generation',
+      'Safe daily sending schedule',
+      'Basic campaign logs',
+      'Manual payment request',
+    ],
+    limits: [
+      { label: 'Telegram accounts', value: 'Up to 3' },
+      { label: 'Channels / groups', value: 'Up to 300' },
+      { label: 'Freelancehunt bids', value: '20 / month' },
     ],
   },
   {
-    id:           'agency',
-    label:        'Agency',
-    price:        '$30',
-    priceUsd:     30,
-    period:       '/міс',
-    description:  'Для команд та агенцій',
-    icon:         <Crown size={18} />,
-    accentClass:  'text-yellow-400',
-    borderClass:  'border-yellow-400/30',
-    badgeClass:   'bg-yellow-500/15 text-yellow-400',
-    recommended:  true,
-    features: [
-      { label: 'Telegram акаунти',        value: '10 акаунтів',        included: true  },
-      { label: 'Telegram канали/групи',   value: '1 000 каналів',      included: true  },
-      { label: 'Заявки Freelancehunt',    value: '100/місяць',         included: true  },
-      { label: 'AI-генерація пропозицій', value: 'Включено',           included: true  },
-      { label: 'Щоденний авто-розклад',   value: 'Рандомізований',     included: true  },
-      { label: 'Пріоритетна підтримка',   value: 'Включено',           included: true  },
-      { label: 'Необмежені ресурси',      value: 'Недоступно',         included: false },
+    id:          'agency',
+    label:       'Agency',
+    price:       '$30',
+    priceUsd:    30,
+    period:      '/month',
+    description: 'Best for agencies and teams who need more volume.',
+    icon:        <Crown size={18} />,
+    accentClass: 'text-yellow-400',
+    borderClass: 'border-yellow-400/40',
+    badgeClass:  'bg-yellow-500/15 text-yellow-400',
+    ctaClass:    'bg-yellow-400 text-black',
+    recommended: true,
+    benefits: [
+      'More Telegram sender accounts',
+      'Access to larger channel / group database',
+      'Higher Freelancehunt bid limit',
+      'Advanced campaign logs',
+      'Better account rotation',
+      'Priority review of payment requests',
+    ],
+    limits: [
+      { label: 'Telegram accounts', value: 'Up to 10' },
+      { label: 'Channels / groups', value: '1 000+' },
+      { label: 'Freelancehunt bids', value: '100 / month' },
     ],
   },
   {
-    id:           'enterprise',
-    label:        'Enterprise',
-    price:        '$50',
-    priceUsd:     50,
-    period:       '/міс',
-    description:  'Без обмежень',
-    icon:         <Building2 size={18} />,
-    accentClass:  'text-red-400',
-    borderClass:  'border-red-400/30',
-    badgeClass:   'bg-red-500/15 text-red-400',
-    features: [
-      { label: 'Telegram акаунти',        value: 'Необмежено',         included: true  },
-      { label: 'Telegram канали/групи',   value: 'Необмежено',         included: true  },
-      { label: 'Заявки Freelancehunt',    value: 'Необмежено',         included: true  },
-      { label: 'AI-генерація пропозицій', value: 'Включено',           included: true  },
-      { label: 'Щоденний авто-розклад',   value: 'Рандомізований',     included: true  },
-      { label: 'Пріоритетна підтримка',   value: 'Пріоритет',          included: true  },
-      { label: 'Необмежені ресурси',      value: 'Включено',           included: true  },
+    id:          'enterprise',
+    label:       'Enterprise',
+    price:       '$50',
+    priceUsd:    50,
+    period:      '/month',
+    description: 'Best for high-volume automation and full access.',
+    icon:        <Building2 size={18} />,
+    accentClass: 'text-red-400',
+    borderClass: 'border-red-400/40',
+    badgeClass:  'bg-red-500/15 text-red-400',
+    ctaClass:    'bg-red-500 text-white',
+    benefits: [
+      'Unlimited Telegram accounts',
+      'Unlimited channels / groups',
+      'Unlimited Freelancehunt bids',
+      'Full automation access',
+      'Priority support',
+      'Admin-level limits can be adjusted manually',
+    ],
+    limits: [
+      { label: 'Telegram accounts', value: 'Unlimited' },
+      { label: 'Channels / groups', value: 'Unlimited' },
+      { label: 'Freelancehunt bids', value: 'Unlimited' },
     ],
   },
 ];
@@ -102,12 +112,13 @@ const PLANS: PlanDef[] = [
 // ─── Comparison table rows ─────────────────────────────────────────────────────
 
 const COMPARE_ROWS = [
-  { label: 'Telegram акаунти',      free: '1',     premium: '3',    agency: '10',    enterprise: '∞'  },
-  { label: 'Канали/групи',          free: '—',     premium: '300',  agency: '1 000', enterprise: '∞'  },
-  { label: 'Заявки/місяць',         free: '5',     premium: '20',   agency: '100',   enterprise: '∞'  },
-  { label: 'AI-пропозиції',         free: 'Базові',premium: 'Повні',agency: 'Повні', enterprise: 'Повні' },
-  { label: 'Авто-розклад',          free: '—',     premium: '+',    agency: '+',     enterprise: '+'  },
-  { label: 'Пріоритетна підтримка', free: '—',     premium: '—',    agency: '+',     enterprise: '+'  },
+  { label: 'Telegram accounts', free: '1',   premium: '3',   agency: '10',  enterprise: '∞' },
+  { label: 'Channels / groups', free: '—',   premium: '300', agency: '1000+', enterprise: '∞' },
+  { label: 'Bids / month',      free: '—',   premium: '20',  agency: '100', enterprise: '∞' },
+  { label: 'AI proposals',      free: '—',   premium: '+',   agency: '+',   enterprise: '+' },
+  { label: 'Daily schedule',    free: '—',   premium: '+',   agency: '+',   enterprise: '+' },
+  { label: 'Advanced logs',     free: '—',   premium: '—',   agency: '+',   enterprise: '+' },
+  { label: 'Priority support',  free: '—',   premium: '—',   agency: '+',   enterprise: '+' },
 ];
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -196,11 +207,7 @@ export function PricingScreen({ user, onBack }: PricingScreenProps) {
           disabled={user?.subscriptionPlan === selectedPlan}
           className={cn(
             'w-full py-3.5 rounded-2xl font-semibold text-sm flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-40',
-            planDef.badgeClass.replace('bg-', 'bg-').includes('primary')
-              ? 'bg-primary text-primary-foreground'
-              : selectedPlan === 'agency'
-                ? 'bg-yellow-400 text-black'
-                : 'bg-red-500 text-white',
+            planDef.ctaClass,
           )}
         >
           <Sparkles size={15} />
@@ -282,22 +289,27 @@ function PlanCard({
       </div>
 
       {selected && (
-        <div className="mt-3 pt-3 border-t border-border flex flex-col gap-1.5">
-          {plan.features.map((f) => (
-            <div key={f.label} className="flex items-center justify-between gap-2">
-              <div className="flex items-center gap-1.5">
-                {f.included
-                  ? <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />
-                  : <XCircle      size={11} className="text-muted-foreground/40 flex-shrink-0" />}
-                <span className={cn('text-[11px]', f.included ? 'text-foreground' : 'text-muted-foreground/50')}>
-                  {f.label}
-                </span>
+        <div className="mt-3 pt-3 border-t border-border flex flex-col gap-3">
+          {/* Benefits */}
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Benefits</p>
+            {plan.benefits.map((b) => (
+              <div key={b} className="flex items-start gap-1.5">
+                <CheckCircle2 size={11} className="text-green-400 flex-shrink-0 mt-0.5" />
+                <span className="text-[11px] text-foreground leading-relaxed">{b}</span>
               </div>
-              <span className={cn('text-[11px] font-semibold', f.included ? plan.accentClass : 'text-muted-foreground/40')}>
-                {f.value}
-              </span>
-            </div>
-          ))}
+            ))}
+          </div>
+          {/* Limits */}
+          <div className="flex flex-col gap-1.5">
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Limits</p>
+            {plan.limits.map((l) => (
+              <div key={l.label} className="flex items-center justify-between gap-2">
+                <span className="text-[11px] text-muted-foreground">{l.label}</span>
+                <span className={cn('text-[11px] font-semibold', plan.accentClass)}>{l.value}</span>
+              </div>
+            ))}
+          </div>
         </div>
       )}
     </button>
@@ -309,19 +321,31 @@ function PlanCard({
 function CompareTable() {
   return (
     <div className="glass-card rounded-2xl overflow-hidden">
-      <div className="grid grid-cols-5 bg-secondary/50">
-        <div className="col-span-2 px-3 py-2 text-[10px] font-semibold text-muted-foreground">Функція</div>
-        <div className="px-1 py-2 text-[10px] font-semibold text-muted-foreground text-center">Free</div>
-        <div className="px-1 py-2 text-[10px] font-semibold text-primary text-center">Pro</div>
-        <div className="px-1 py-2 text-[10px] font-semibold text-yellow-400 text-center">Agency</div>
+      {/* Header */}
+      <div className="grid grid-cols-8 bg-secondary/60 border-b border-border">
+        <div className="col-span-2 px-3 py-2.5 text-[10px] font-semibold text-muted-foreground">Feature</div>
+        <div className="col-span-2 px-1 py-2.5 text-[10px] font-semibold text-muted-foreground text-center">Free</div>
+        <div className="col-span-2 px-1 py-2.5 text-[10px] font-semibold text-primary text-center">Premium</div>
+        <div className="col-span-1 px-1 py-2.5 text-[10px] font-semibold text-yellow-400 text-center">Agency</div>
+        <div className="col-span-1 px-1 py-2.5 text-[10px] font-semibold text-red-400 text-center">Ent.</div>
       </div>
+      {/* Price row */}
+      <div className="grid grid-cols-8 border-b border-border bg-secondary/20">
+        <div className="col-span-2 px-3 py-2 text-[10px] text-muted-foreground font-medium">Price / mo</div>
+        <div className="col-span-2 px-1 py-2 text-[10px] text-center text-muted-foreground">Free</div>
+        <div className="col-span-2 px-1 py-2 text-[10px] text-center font-bold text-primary">$20</div>
+        <div className="col-span-1 px-1 py-2 text-[10px] text-center font-bold text-yellow-400">$30</div>
+        <div className="col-span-1 px-1 py-2 text-[10px] text-center font-bold text-red-400">$50</div>
+      </div>
+      {/* Feature rows */}
       <div className="divide-y divide-border">
         {COMPARE_ROWS.map((row) => (
-          <div key={row.label} className="grid grid-cols-5">
+          <div key={row.label} className="grid grid-cols-8">
             <div className="col-span-2 px-3 py-2.5 text-[11px] text-muted-foreground">{row.label}</div>
-            <CompareCell value={row.free} />
-            <CompareCell value={row.premium} accent="text-primary" />
-            <CompareCell value={row.agency} accent="text-yellow-400" />
+            <CompareCell value={row.free}       cols={2} />
+            <CompareCell value={row.premium}    cols={2} accent="text-primary" />
+            <CompareCell value={row.agency}     cols={1} accent="text-yellow-400" />
+            <CompareCell value={row.enterprise} cols={1} accent="text-red-400" />
           </div>
         ))}
       </div>
@@ -329,11 +353,11 @@ function CompareTable() {
   );
 }
 
-function CompareCell({ value, accent }: { value: string; accent?: string }) {
+function CompareCell({ value, accent, cols }: { value: string; accent?: string; cols: number }) {
   const isTick  = value === '+';
   const isCross = value === '—';
   return (
-    <div className="px-1 py-2.5 flex items-center justify-center">
+    <div className={cn('px-1 py-2.5 flex items-center justify-center', `col-span-${cols}`)}>
       {isTick  ? <CheckCircle2 size={12} className={accent ?? 'text-green-400'} /> :
        isCross ? <span className="text-[11px] text-muted-foreground/40">—</span> :
                  <span className={cn('text-[11px] font-semibold', accent ?? 'text-foreground')}>{value}</span>}
