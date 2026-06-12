@@ -6,9 +6,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob } from '@/lib/db';
+import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob, getUserById } from '@/lib/db';
 import { randomUUID } from 'crypto';
 import type { AutoBidLog } from '@/types';
+import { PLAN_LIMITS } from '@/types';
 
 const FH_BASE = 'https://api.freelancehunt.com/v2';
 
@@ -23,6 +24,26 @@ export async function POST(req: NextRequest) {
         { ok: false, error: 'Freelancehunt account not connected. Please add your API token first.', setupRequired: true },
         { status: 401 },
       );
+    }
+
+    // Enforce subscription plan limits
+    const saasUser = await getUserById(userId).catch(() => null);
+    if (saasUser) {
+      const planLimits = PLAN_LIMITS[saasUser.subscriptionPlan] ?? PLAN_LIMITS.free;
+      const used = saasUser.applicationsThisMonth ?? 0;
+      if (used >= planLimits.applicationsPerMonth) {
+        return NextResponse.json(
+          {
+            ok:    false,
+            error: `Досягнуто місячний ліміт заявок (${planLimits.applicationsPerMonth}) для плану ${saasUser.subscriptionPlan}. Оновіть підписку.`,
+            limitReached: true,
+            plan:  saasUser.subscriptionPlan,
+            used,
+            limit: planLimits.applicationsPerMonth,
+          },
+          { status: 429 },
+        );
+      }
     }
 
     // Enable auto-bid flag in the filter
@@ -125,7 +146,7 @@ export async function POST(req: NextRequest) {
       const currency     = String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH');
 
       // Parse deadline (days) from filter or default to 14
-      const bidDays    = filter?.defaultDeadlineDays && Number(filter.defaultDeadlineDays) > 0 ? Number(filter.defaultDeadlineDays) : 14;
+      const bidDays    = 14; // default deadline in days — FreelanceFilter has no deadline field yet
       const bidAmount  = budget > 0 ? budget : (filter?.minBudgetUah ?? 500);
       const bidPayload = {
         days:      bidDays,

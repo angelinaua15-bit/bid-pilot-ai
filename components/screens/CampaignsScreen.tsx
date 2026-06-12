@@ -629,7 +629,7 @@ function CreateCampaignForm({ userId, onCreated }: {
     title:            '',
     messageText:      '',
     accountId:        '',
-    scheduleType:     'now' as 'now' | 'scheduled' | 'interval',
+    scheduleType:     'now' as 'now' | 'scheduled' | 'interval' | 'daily',
     scheduledAt:      '',
     delayMinSeconds:  3,
     delayMaxSeconds:  10,
@@ -731,9 +731,18 @@ function CreateCampaignForm({ userId, onCreated }: {
             onChange={(e) => setForm((f) => ({ ...f, scheduleType: e.target.value as typeof form.scheduleType }))}
             className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none">
             <option value="now">Відразу</option>
+            <option value="daily">Щодня (час рандомізується)</option>
             <option value="scheduled">За розкладом</option>
             <option value="interval">З інтервалом</option>
           </select>
+          {form.scheduleType === 'daily' && (
+            <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-primary/10 border border-primary/20">
+              <Clock size={12} className="text-primary flex-shrink-0 mt-0.5" />
+              <p className="text-[11px] text-muted-foreground leading-relaxed">
+                Кампанія буде запускатись щодня в рандомний час (08:00–22:00 Kyiv). Кожен акаунт отримує свій унікальний слот — це зменшує ризик блокувань.
+              </p>
+            </div>
+          )}
         </div>
 
         {form.scheduleType === 'scheduled' && (
