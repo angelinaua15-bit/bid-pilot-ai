@@ -19,7 +19,7 @@ import type { AutoBidSettings, AutoBidLog, Project } from '@/types';
 import type { StepLogFn } from './freelancehunt-parser.service';
 import { parseNewProjects } from './freelancehunt-parser.service';
 import { generateAutoBid } from './ai-bid.service';
-import { sendFreelancehuntBid } from './freelancehunt.service';
+import { submitBidViaBrowser } from './playwright-bid.service';
 import { sendTelegramMessage } from './telegram.service';
 import { shouldApply } from './project-filter.service';
 import { config } from '@/lib/config';
