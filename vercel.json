@@ -1,9 +1,8 @@
 {
   "buildCommand": "node .v0/inject-built-with-v0.mjs && next build",
   "crons": [
-    {
-      "path":     "/api/cron/telegram-daily",
-      "schedule": "*/15 * * * *"
-    }
+  {
+  "crons": [
+    { "path": "/api/cron/tick", "schedule": "0 6 * * *" }
   ]
 }
