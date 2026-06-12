@@ -111,7 +111,140 @@ function extractMessageId(result: unknown): number | undefined {
   return undefined
 }
 
-/** Dispatch a campaign by ID. Safe to call fire-and-forget from an API route. */
+/**
+ * Send one slice of channels using a single Telegram account.
+ * Returns per-slice counters.
+ */
+async function dispatchSlice(
+  campaignId: string,
+  channelIds: string[],
+  account: { id: string; phoneNumber: string; sessionString: string },
+  channelMap: Map<string, { id: string; title: string; usernameOrLink: string; status: string }>,
+  delayMinSeconds: number,
+  delayMaxSeconds: number,
+  messageText: string,
+): Promise<{ sent: number; failed: number; skipped: number; waitingApproval: number; invalidChannel: number }> {
+  let sent = 0, failed = 0, skipped = 0, waitingApproval = 0, invalidChannel = 0
+
+  let client: TelegramClient | null = null
+  try {
+    client = await makeClient(account.sessionString)
+  } catch (err) {
+    // Can't connect — mark all channels in this slice as failed
+    for (const channelId of channelIds) {
+      const channel = channelMap.get(channelId)
+      await saveCampaignMessage({
+        campaignId,
+        channelId,
+        channelTitle:      channel?.title,
+        telegramAccountId: account.id,
+        accountPhone:      account.phoneNumber,
+        status:            'failed',
+        errorReason:       `Account connect failed: ${err instanceof Error ? err.message : String(err)}`,
+      })
+      await incrementCampaignCounters(campaignId, 'failed_count')
+      failed++
+    }
+    return { sent, failed, skipped, waitingApproval, invalidChannel }
+  }
+
+  try {
+    for (const channelId of channelIds) {
+      const channel = channelMap.get(channelId)
+
+      if (!channel || channel.status !== 'active') {
+        await saveCampaignMessage({
+          campaignId,
+          channelId,
+          channelTitle:      channel?.title,
+          telegramAccountId: account.id,
+          accountPhone:      account.phoneNumber,
+          status:            'invalid_channel',
+          errorReason:       channel ? `Channel status: ${channel.status}` : 'Channel not found in DB',
+        })
+        invalidChannel++
+        await incrementCampaignCounters(campaignId, 'failed_count')
+        continue
+      }
+
+      const peer = channel.usernameOrLink.startsWith('@')
+        ? channel.usernameOrLink
+        : `@${channel.usernameOrLink}`
+
+      try {
+        let membership = await getMembershipStatus(client, peer).catch(() => 'not_member' as const)
+        if (membership === 'not_member') {
+          membership = await tryJoinChannel(client, peer)
+        }
+
+        if (membership === 'approval_pending') {
+          await saveCampaignMessage({
+            campaignId,
+            channelId,
+            channelTitle:      channel.title,
+            telegramAccountId: account.id,
+            accountPhone:      account.phoneNumber,
+            membershipStatus:  'approval_pending',
+            status:            'waiting_approval',
+            errorReason:       'Запит на вступ надіслано, очікується підтвердження адміна',
+          })
+          waitingApproval++
+          continue
+        }
+
+        const result = await client.invoke(new Api.messages.SendMessage({
+          peer,
+          message:   messageText,
+          noWebpage: true,
+        }))
+
+        const messageId = extractMessageId(result)
+
+        await saveCampaignMessage({
+          campaignId,
+          channelId,
+          channelTitle:      channel.title,
+          telegramAccountId: account.id,
+          accountPhone:      account.phoneNumber,
+          messageId,
+          membershipStatus:  'member',
+          status:            'sent',
+          sentAt:            new Date().toISOString(),
+        })
+        await incrementCampaignCounters(campaignId, 'sent_count')
+        sent++
+      } catch (err) {
+        const reason = err instanceof Error ? err.message : String(err)
+        const isInvalidChannel =
+          reason.includes('USERNAME_INVALID') ||
+          reason.includes('CHANNEL_INVALID') ||
+          reason.includes('PEER_ID_INVALID')
+
+        await saveCampaignMessage({
+          campaignId,
+          channelId,
+          channelTitle:      channel.title,
+          telegramAccountId: account.id,
+          accountPhone:      account.phoneNumber,
+          status:            isInvalidChannel ? 'invalid_channel' : 'failed',
+          errorReason:       reason,
+        })
+        await incrementCampaignCounters(campaignId, 'failed_count')
+        if (isInvalidChannel) invalidChannel++
+        else failed++
+      }
+
+      const delayMs = (delayMinSeconds + Math.random() * (delayMaxSeconds - delayMinSeconds)) * 1_000
+      await sleep(delayMs)
+    }
+  } finally {
+    try { await client.disconnect() } catch { /* ignore */ }
+  }
+
+  return { sent, failed, skipped, waitingApproval, invalidChannel }
+}
+
+/** Dispatch a campaign by ID. Rotates channels across all selected accounts. */
 export async function dispatchCampaign(campaignId: string): Promise<{
   sent: number
   failed: number
@@ -124,150 +257,75 @@ export async function dispatchCampaign(campaignId: string): Promise<{
 
   await updateCampaignStatus(campaignId, 'running')
 
-  let sent = 0, failed = 0, skipped = 0, waitingApproval = 0, invalidChannel = 0
+  // ── Resolve active sender accounts ────────────────────────────────────────
+  const allUserAccounts = await getTelegramAccounts(campaign.userId)
+  const activeAll       = allUserAccounts.filter((a) => a.status === 'active' && a.sessionString)
 
-  // Resolve which Telegram account to use
-  let account = campaign.accountId
-    ? await getTelegramAccountById(campaign.accountId)
-    : null
-
-  if (!account || account.status !== 'active' || !account.sessionString) {
-    const all = await getTelegramAccounts(campaign.userId)
-    account = all.find((a) => a.status === 'active' && a.sessionString) ?? null
+  // Use campaign.accountIds if set, otherwise fall back to campaign.accountId,
+  // otherwise use all active accounts for the user.
+  let activeAccounts = activeAll
+  if (campaign.accountIds && campaign.accountIds.length > 0) {
+    const idSet = new Set(campaign.accountIds)
+    activeAccounts = activeAll.filter((a) => idSet.has(a.id))
+    // If none of the selected accounts are active, fall back to all
+    if (activeAccounts.length === 0) activeAccounts = activeAll
+  } else if (campaign.accountId) {
+    const primary = activeAll.find((a) => a.id === campaign.accountId)
+    if (primary) activeAccounts = [primary]
   }
 
-  if (!account || !account.sessionString) {
+  if (activeAccounts.length === 0) {
     await updateCampaignStatus(campaignId, 'failed')
     throw new Error('Немає активного Telegram-акаунту для відправки')
   }
 
-  const accountId    = account.id
-  const accountPhone = account.phoneNumber
-  let client: TelegramClient | null = null
+  // ── Split channels evenly across accounts ─────────────────────────────────
+  const totalChannels = campaign.targetChannelIds.length
+  const numAccounts   = activeAccounts.length
+  const slices: string[][] = activeAccounts.map(() => [])
 
-  try {
-    client = await makeClient(account.sessionString)
-  } catch (err) {
-    await updateCampaignStatus(campaignId, 'failed')
-    throw err
-  }
+  campaign.targetChannelIds.forEach((id, i) => {
+    slices[i % numAccounts].push(id)
+  })
 
-  // Load channel map
+  // ── Load channel map ───────────────────────────────────────────────────────
   const channels   = await getTelegramChannels({ limit: 20_000 })
   const channelMap = new Map(channels.map((c) => [c.id, c]))
 
-  try {
-    for (const channelId of campaign.targetChannelIds) {
-      const channel = channelMap.get(channelId)
+  // ── Dispatch all slices in parallel ───────────────────────────────────────
+  const results = await Promise.all(
+    activeAccounts.map((account, i) =>
+      dispatchSlice(
+        campaignId,
+        slices[i],
+        account as { id: string; phoneNumber: string; sessionString: string },
+        channelMap as Map<string, { id: string; title: string; usernameOrLink: string; status: string }>,
+        campaign.delayMinSeconds,
+        campaign.delayMaxSeconds,
+        campaign.messageText,
+      ),
+    ),
+  )
 
-      // Channel not in our DB or not active
-      if (!channel || channel.status !== 'active') {
-        await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      channel?.title,
-          telegramAccountId: accountId,
-          accountPhone,
-          status:      'invalid_channel',
-          errorReason: channel ? `Channel status: ${channel.status}` : 'Channel not found in DB',
-        })
-        invalidChannel++
-        await incrementCampaignCounters(campaignId, 'failed_count')
-        continue
-      }
+  // ── Aggregate counters ─────────────────────────────────────────────────────
+  const totals = results.reduce(
+    (acc, r) => ({
+      sent:           acc.sent           + r.sent,
+      failed:         acc.failed         + r.failed,
+      skipped:        acc.skipped        + r.skipped,
+      waitingApproval:acc.waitingApproval + r.waitingApproval,
+      invalidChannel: acc.invalidChannel  + r.invalidChannel,
+    }),
+    { sent: 0, failed: 0, skipped: 0, waitingApproval: 0, invalidChannel: 0 },
+  )
 
-      const peer = channel.usernameOrLink.startsWith('@')
-        ? channel.usernameOrLink
-        : `@${channel.usernameOrLink}`
-
-      try {
-        // 1. Check membership
-        let membership = await getMembershipStatus(client, peer).catch(() => 'not_member' as const)
-
-        // 2. Try to join if not a member
-        if (membership === 'not_member') {
-          membership = await tryJoinChannel(client, peer)
-        }
-
-        // 3. If join result is approval_pending — can't send yet, record and move on
-        if (membership === 'approval_pending') {
-          await saveCampaignMessage({
-            campaignId,
-            channelId,
-            channelTitle:      channel.title,
-            telegramAccountId: accountId,
-            accountPhone,
-            membershipStatus:  'approval_pending',
-            status:            'waiting_approval',
-            errorReason:       'Запит на вступ надіслано, очікується підтвердження адміна',
-          })
-          waitingApproval++
-          continue
-        }
-
-        // 4. Send the message
-        const result = await client.invoke(new Api.messages.SendMessage({
-          peer,
-          message:   campaign.messageText,
-          noWebpage: true,
-        }))
-
-        const messageId = extractMessageId(result)
-
-        await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      channel.title,
-          telegramAccountId: accountId,
-          accountPhone,
-          messageId,
-          membershipStatus:  'member',
-          status:            'sent',
-          sentAt:            new Date().toISOString(),
-        })
-        await incrementCampaignCounters(campaignId, 'sent_count')
-        sent++
-      } catch (err) {
-        const reason = err instanceof Error ? err.message : String(err)
-
-        // Determine whether the error means the channel is inaccessible
-        const isInvalidChannel =
-          reason.includes('USERNAME_INVALID') ||
-          reason.includes('CHANNEL_INVALID') ||
-          reason.includes('PEER_ID_INVALID')
-
-        await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      channel.title,
-          telegramAccountId: accountId,
-          accountPhone,
-          status:      isInvalidChannel ? 'invalid_channel' : 'failed',
-          errorReason: reason,
-        })
-        await incrementCampaignCounters(campaignId, 'failed_count')
-        if (isInvalidChannel) invalidChannel++
-        else failed++
-      }
-
-      // Randomised delay between sends to stay under Telegram flood limits
-      const { delayMinSeconds, delayMaxSeconds } = campaign
-      const delayMs =
-        (delayMinSeconds + Math.random() * (delayMaxSeconds - delayMinSeconds)) * 1_000
-      await sleep(delayMs)
-    }
-  } finally {
-    try { await client.disconnect() } catch { /* ignore */ }
-  }
-
-  const totalProcessed = sent + failed + invalidChannel
   const finalStatus =
-    totalProcessed === 0 && waitingApproval > 0 ? 'paused'   // all pending approval
-    : failed === campaign.targetChannelIds.length ? 'failed'
-    : (sent > 0 || skipped > 0) ? 'completed'
+    totals.sent === 0 && totals.waitingApproval > 0 ? 'paused'
+    : totals.failed === totalChannels               ? 'failed'
+    : (totals.sent > 0 || totals.skipped > 0)       ? 'completed'
     : 'failed'
 
   await updateCampaignStatus(campaignId, finalStatus)
 
-  return { sent, failed, skipped, waitingApproval, invalidChannel }
+  return totals
 }
