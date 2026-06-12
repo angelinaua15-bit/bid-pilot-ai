@@ -4,7 +4,7 @@ import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   RefreshCw, Send, CheckCircle2, XCircle, Clock,
   ChevronRight, Trash2, Play, Pause, Radio, Search, Smartphone,
-  Users, AlertTriangle, BarChart2, Filter,
+  Users, AlertTriangle, BarChart2, Filter, Plus, X,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';

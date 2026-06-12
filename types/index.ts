@@ -433,8 +433,10 @@ export type ScheduleType = 'now' | 'scheduled' | 'interval' | 'daily';
 export interface Campaign {
   id: string;
   userId: string;
-  /** Telegram MTProto account used to send messages */
+  /** Primary Telegram MTProto account (first selected, kept for backward compat) */
   accountId?: string;
+  /** All selected sender accounts — worker rotates among them */
+  accountIds?: string[];
   title: string;
   messageText: string;
   mediaUrl?: string;
