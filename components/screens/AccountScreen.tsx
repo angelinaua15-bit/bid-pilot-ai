@@ -7,7 +7,7 @@ import {
 } from 'lucide-react';
 import { cn, isOwner, isAdminUser } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
-import { SubscriptionScreen } from '@/components/screens/SubscriptionScreen';
+import { PricingScreen } from '@/components/screens/PricingScreen';
 import type { SaaSUser, SubscriptionPlanSaaS } from '@/types';
 
 // Plan display names and colors
@@ -72,9 +72,9 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
   const isExpired = !userIsOwner && user.subscriptionStatus !== 'active';
   const isAdminOrOwner = isAdminUser(user);
 
-  // Show subscription/upgrade screen as overlay
+  // Show pricing/upgrade screen as overlay
   if (showUpgrade) {
-    return <SubscriptionScreen user={user} onBack={() => setShowUpgrade(false)} />;
+    return <PricingScreen user={user} onBack={() => setShowUpgrade(false)} />;
   }
 
   return (

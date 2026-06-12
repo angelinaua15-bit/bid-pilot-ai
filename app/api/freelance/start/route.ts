@@ -6,9 +6,10 @@
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob } from '@/lib/db';
+import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob, getUserById } from '@/lib/db';
 import { randomUUID } from 'crypto';
 import type { AutoBidLog } from '@/types';
+import { PLAN_LIMITS } from '@/types';
 
 const FH_BASE = 'https://api.freelancehunt.com/v2';
 
@@ -23,6 +24,26 @@ export async function POST(req: NextRequest) {
         { ok: false, error: 'Freelancehunt account not connected. Please add your API token first.', setupRequired: true },
         { status: 401 },
       );
+    }
+
+    // Enforce subscription plan limits
+    const saasUser = await getUserById(userId).catch(() => null);
+    if (saasUser) {
+      const planLimits = PLAN_LIMITS[saasUser.subscriptionPlan] ?? PLAN_LIMITS.free;
+      const used = saasUser.applicationsThisMonth ?? 0;
+      if (used >= planLimits.applicationsPerMonth) {
+        return NextResponse.json(
+          {
+            ok:    false,
+            error: `Досягнуто місячний ліміт заявок (${planLimits.applicationsPerMonth}) для плану ${saasUser.subscriptionPlan}. Оновіть підписку.`,
+            limitReached: true,
+            plan:  saasUser.subscriptionPlan,
+            used,
+            limit: planLimits.applicationsPerMonth,
+          },
+          { status: 429 },
+        );
+      }
     }
 
     // Enable auto-bid flag in the filter
@@ -124,17 +145,40 @@ export async function POST(req: NextRequest) {
       const budget       = Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0);
       const currency     = String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH');
 
+      // Parse deadline (days) from filter or default to 14
+      const bidDays    = 14; // default deadline in days — FreelanceFilter has no deadline field yet
+      const bidAmount  = budget > 0 ? budget : (filter?.minBudgetUah ?? 500);
+      const bidPayload = {
+        days:      bidDays,
+        safe_type: 'employer' as const,
+        budget:    { amount: bidAmount, currency },
+        comment:   proposal,
+        is_hidden: false,
+      };
+
       try {
         const bidRes = await fetch(`${FH_BASE}/projects/${project.id}/bids`, {
           method:  'POST',
           headers: { Authorization: `Bearer ${account.apiToken}`, 'Content-Type': 'application/json' },
-          body:    JSON.stringify({ data: { type: 'bid', attributes: { comment: proposal } } }),
+          body:    JSON.stringify(bidPayload),
           signal:  AbortSignal.timeout(15_000),
         });
 
+        // Always read the full body for logging — do not rely on bidRes.ok alone
+        const bidRawText = await bidRes.text().catch(() => '');
+        let bidJson: Record<string, unknown> = {};
+        try { bidJson = JSON.parse(bidRawText); } catch { /* leave empty */ }
+
+        console.log('[api/freelance/start] bid attempt', {
+          projectId:  project.id,
+          projectTitle: projectTitle.slice(0, 60),
+          status:     bidRes.status,
+          payload:    bidPayload,
+          rawResponse: bidRawText.slice(0, 500),
+        });
+
         if (bidRes.ok) {
-          const bidJson = await bidRes.json().catch(() => ({}));
-          const bidId   = String(bidJson?.data?.id ?? '');
+          const bidId = String((bidJson as { data?: { id?: unknown } })?.data?.id ?? '');
           submitted++;
           await incrementBidCount(userId).catch(() => {});
 
@@ -145,7 +189,7 @@ export async function POST(req: NextRequest) {
             projectId:          String(project.id),
             title:              projectTitle,
             url:                projectUrl,
-            budget,
+            budget:             bidAmount,
             currency,
             status:             'sent',
             createdAt:          now,
@@ -159,15 +203,19 @@ export async function POST(req: NextRequest) {
             id:           randomUUID(),
             userId,
             level:        'success' as AutoBidLog['level'],
-            message:      `Заявку надіслано: "${projectTitle}"`,
+            message:      `Заявку надіслано: "${projectTitle}" | bidId:${bidId || 'n/a'} | price:${bidAmount} ${currency} | days:${bidDays}`,
             projectId:    String(project.id),
             projectTitle,
             bidId:        bidId || undefined,
             timestamp:    new Date().toISOString(),
           }).catch(() => {});
         } else {
-          const e       = await bidRes.json().catch(() => ({}));
-          const errMsg  = e?.errors?.[0]?.detail ?? `bid failed for project ${project.id}`;
+          // Extract real error from API response — try multiple field paths
+          const apiErrors = (bidJson as { errors?: { detail?: string; title?: string }[] })?.errors;
+          const firstErr  = apiErrors?.[0];
+          const errMsg    = firstErr?.detail ?? firstErr?.title
+            ?? (bidJson as { message?: string })?.message
+            ?? `HTTP ${bidRes.status}: ${bidRawText.slice(0, 300)}`;
           errors.push(errMsg);
 
           await saveApplication({
@@ -188,7 +236,7 @@ export async function POST(req: NextRequest) {
             id:           randomUUID(),
             userId,
             level:        'error',
-            message:      `Помилка подачі заявки на "${projectTitle}": ${errMsg}`,
+            message:      `Помилка подачі заявки на "${projectTitle}" [HTTP ${bidRes.status}]: ${errMsg}`,
             projectId:    String(project.id),
             projectTitle,
             timestamp:    new Date().toISOString(),
@@ -196,6 +244,7 @@ export async function POST(req: NextRequest) {
         }
       } catch (e) {
         const errMsg = e instanceof Error ? e.message : `Error on project ${project.id}`;
+        console.error('[api/freelance/start] exception on bid', { projectId: project.id, error: errMsg });
         errors.push(errMsg);
 
         await saveApplication({

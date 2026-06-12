@@ -428,7 +428,7 @@ export interface TelegramBot {
 // ─── Campaign ─────────────────────────────────────────────────────────────────
 
 export type CampaignStatus = 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'failed';
-export type ScheduleType = 'now' | 'scheduled' | 'interval';
+export type ScheduleType = 'now' | 'scheduled' | 'interval' | 'daily';
 
 export interface Campaign {
   id: string;
