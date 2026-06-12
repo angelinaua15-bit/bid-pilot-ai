@@ -359,14 +359,18 @@ export async function runAutoBidCycle(
     );
 
     try {
+      // Submit via the AUTHENTICATED BROWSER session (storageState reused from
+      // playwright-browser.service.ts) — NOT the API. The v2 API has no
+      // create-bid endpoint; the old route returns 410.
       const result = await submitBidViaBrowser({
         projectId:  numericId,
-        projectUrl,                       // потрібен реальний URL сторінки проєкту
+        projectUrl,                                  // real project page URL is required
         comment:    bid.text ?? '',
         amount:     budgetAmount!,
         days,
         safeType:   'no_safe',
-        log: (level, message, meta) => stepLog(level, message, meta),
+        log: (level, message, meta) =>
+          stepLog(level as 'info' | 'success' | 'warning' | 'error', message, meta),
       });
 
       if (result.success) {
@@ -386,45 +390,63 @@ export async function runAutoBidCycle(
           freelancehuntBidId: result.bidId,
           sentAt,
         });
+
         await saveApplication({
-          id: `app_sent_${project.id}_${Date.now()}`,
-          userId: settings.userId, projectId: project.id,
-          freelancehuntId: project.freelancehuntId ?? undefined,
-          title: projectTitle, url: projectUrl,
-          budget: budgetAmount ?? project.budget, currency: project.currency ?? 'UAH',
-          deadline: bid.deadline, status: 'sent',
-          createdAt: bid.createdAt ?? sentAt, sentAt,
-          proposalText: bid.text, proposalPrice: bid.price,
+          id:                 `app_sent_${project.id}_${Date.now()}`,
+          userId:             settings.userId,
+          projectId:          project.id,
+          freelancehuntId:    project.freelancehuntId ?? undefined,
+          title:              projectTitle,
+          url:                projectUrl,
+          budget:             budgetAmount ?? project.budget,
+          currency:           project.currency ?? 'UAH',
+          deadline:           bid.deadline,
+          status:             'sent',
+          createdAt:          bid.createdAt ?? sentAt,
+          sentAt,
+          proposalText:       bid.text,
+          proposalPrice:      bid.price,
           freelancehuntBidId: result.bidId,
-          aiScore: filter.aiScore, matchedKeywords: filter.matchedKeywords,
+          aiScore:            filter.aiScore,
+          matchedKeywords:    filter.matchedKeywords,
         }).catch(() => {});
 
         log(logs, 'success',
           `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
-          { projectId: project.id, projectTitle, bidId: result.bidId,
-            meta: { price: budgetAmount, deadline: days, projectUrl, strategy: 'browser' } });
+          {
+            projectId: project.id, projectTitle, bidId: result.bidId,
+            meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'browser' },
+          }
+        );
 
+        // ── 6. Telegram notification ────────────────────────────────────────
         if (chatId) {
-          const msg = ['<b>Bid submitted!</b>', '',
+          const msg = [
+            '<b>Bid submitted!</b>',
+            '',
             `<b>Project:</b> ${projectTitle}`,
             `<b>Price:</b> ${bid.price ?? '?'} ${project.currency ?? 'UAH'}`,
             `<b>Deadline:</b> ${bid.deadline ?? '?'}`,
-            projectUrl ? `<a href="${projectUrl}">View project</a>` : ''
+            `<b>Match:</b> ${project.matchScore ?? '?'}%`,
+            projectUrl ? `<a href="${projectUrl}">View project</a>` : '',
           ].filter(Boolean).join('\n');
-          await sendTelegramMessage(chatId, msg, { parseMode: 'HTML', disableWebPagePreview: true });
+
+          await sendTelegramMessage(chatId, msg, {
+            parseMode: 'HTML',
+            disableWebPagePreview: true,
+          });
         }
       } else {
-        // Перетворюємо точний status браузерного сабміту на ваші коди помилок
-        const map: Record<string, string> = {
+        // Map the browser submit's exact status to your canonical error prefixes
+        // so the catch-block below classifies and persists the precise reason.
+        const statusToCode: Record<string, string> = {
           already_bid:    'ALREADY_BID',
           project_closed: 'PROJECT_CLOSED',
           login_required: 'INVALID_TOKEN',
+          failed:         'BROWSER_SUBMIT_FAILED',
         };
-        const prefix = map[result.status] ?? 'BROWSER_SUBMIT_FAILED';
+        const prefix = statusToCode[result.status] ?? 'BROWSER_SUBMIT_FAILED';
         throw new Error(`${prefix}: ${result.reason}`);
-      }
-    } catch (err) {
-      // …(твій наявний catch-блок лишається без змін — він уже логує точну причину)…
       }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err);
@@ -479,6 +501,16 @@ export async function runAutoBidCycle(
         'API_ERROR_422',
         'API_ERROR_500',
         'JSON_PARSE_ERROR',
+        // Browser-submit + deprecated-endpoint codes
+        'ENDPOINT_GONE_410',
+        'BID_API_UNSUPPORTED',
+        'BROWSER_SUBMIT_FAILED',
+        'LOGIN_REQUIRED',
+        'NO_SESSION',
+        'NO_BID_FORM',
+        'FORM_FIELD_MISSING',
+        'VALIDATION_ERROR',
+        'UNCONFIRMED',
       ];
       const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
 
@@ -494,7 +526,16 @@ export async function runAutoBidCycle(
         API_ERROR_422:    'Помилка валідації (422)',
         API_ERROR_500:    'Помилка сервера Freelancehunt (500)',
         JSON_PARSE_ERROR: 'Некоректна відповідь від API',
-        UNKNOWN_ERROR:    'Невідома помилка API',
+        ENDPOINT_GONE_410:     'Endpoint застарів (410) — використовуйте браузерний сабміт',
+        BID_API_UNSUPPORTED:   'API не підтримує подачу заявок — потрібен браузерний сабміт',
+        BROWSER_SUBMIT_FAILED: 'Не вдалося подати заявку через браузер',
+        LOGIN_REQUIRED:        'Сесію втрачено — потрібно повторно увійти у Freelancehunt',
+        NO_SESSION:            'Немає автентифікованої сесії браузера',
+        NO_BID_FORM:           'Форму заявки не знайдено (перевірте селектори / право подачі)',
+        FORM_FIELD_MISSING:    'Поле форми не знайдено (перевірте селектори)',
+        VALIDATION_ERROR:      'Форма повернула помилку валідації',
+        UNCONFIRMED:           'Сабміт не підтверджено — заявку не зараховано',
+        UNKNOWN_ERROR:    'Невідома помилка',
       };
       const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);
 
