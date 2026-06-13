@@ -58,17 +58,34 @@ export async function POST(req: NextRequest) {
   }
 
   if (action === 'save') {
-    const { sessionId } = await req.json().catch(() => ({}));
+    const body = await req.json().catch(() => ({})) as { sessionId?: string; userId?: string };
+    const { sessionId, userId } = body;
     if (!sessionId) {
       return NextResponse.json({ ok: false, error: 'sessionId is required' }, { status: 400 });
     }
 
     try {
       const res = await fetch(
-        `${config.worker.url}/connect/freelancehunt/save/${encodeURIComponent(sessionId)}`,
+        `${config.worker.url}/connect/freelancehunt/save/${encodeURIComponent(sessionId)}${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`,
         { method: 'POST', headers: workerHeaders(), signal: AbortSignal.timeout(15_000) }
       );
-      const data = await res.json();
+      const data = await res.json() as { ok?: boolean; username?: string; cookieCount?: number; sessionPath?: string; error?: string };
+
+      // After successful save, mark the account as connected in DB
+      if (data.ok && userId) {
+        try {
+          const { upsertFreelanceAccount } = await import('@/lib/db');
+          await upsertFreelanceAccount({
+            userId,
+            platform:    'freelancehunt',
+            accountName: data.username,
+            status:      'connected',
+            lastLoginAt: new Date().toISOString(),
+            lastCheckAt: new Date().toISOString(),
+          });
+        } catch { /* non-fatal */ }
+      }
+
       return NextResponse.json(data, { status: res.status });
     } catch (err) {
       return NextResponse.json(

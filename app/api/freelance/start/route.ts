@@ -1,132 +1,200 @@
 /**
  * POST /api/freelance/start
- * Enables auto-bid mode for the user and triggers one immediate cycle
- * using Freelancehunt REST API directly — no worker needed.
- * Body: { userId }
+ *
+ * Runs one auto-bid cycle for the user:
+ *   1. Parse projects from Freelancehunt feed via Playwright browser session
+ *   2. Filter by user preferences
+ *   3. Generate AI proposal
+ *   4. Submit bid through the browser (NO REST API — POST /v2/projects/{id}/bids
+ *      returns HTTP 410; only browser submit works)
+ *   5. Persist result to DB
+ *
+ * Session: uses the per-user storageState saved at
+ *   sessions/freelancehunt_<userId>.json
+ *
+ * If the session file is missing or expired → returns { setupRequired: true }
+ * so the client can route the user to the reconnect screen.
  */
 
 import { NextRequest, NextResponse } from 'next/server';
-import { getFreelanceAccount, getFreelanceFilter, upsertFreelanceFilter, upsertFreelanceAccount, incrementBidCount, saveApplication, appendLog, createAutomationJob, updateAutomationJob, getUserById } from '@/lib/db';
+import {
+  getFreelanceAccount,
+  getFreelanceFilter,
+  upsertFreelanceFilter,
+  upsertFreelanceAccount,
+  incrementBidCount,
+  saveApplication,
+  appendLog,
+  createAutomationJob,
+  updateAutomationJob,
+  getUserById,
+} from '@/lib/db';
 import { randomUUID } from 'crypto';
 import type { AutoBidLog } from '@/types';
 import { PLAN_LIMITS } from '@/types';
-
-const FH_BASE = 'https://api.freelancehunt.com/v2';
+import { parseNewProjects } from '@/services/freelancehunt-parser.service';
+import { submitBidViaBrowser } from '@/services/playwright-bid.service';
+import { generateAutoBid } from '@/services/ai-bid.service';
+import { shouldApply } from '@/services/project-filter.service';
+import { sessionExists, resolveSessionPath } from '@/services/playwright-browser.service';
 
 export async function POST(req: NextRequest) {
   try {
     const { userId } = await req.json();
-    if (!userId) return NextResponse.json({ ok: false, error: 'userId required' }, { status: 400 });
+    if (!userId) {
+      return NextResponse.json({ ok: false, error: 'userId required' }, { status: 400 });
+    }
 
-    const account = await getFreelanceAccount(userId);
-    if (!account?.apiToken) {
+    // ── Session check — must exist before starting ────────────────────────────
+    const sessionPath = resolveSessionPath(userId);
+    const hasSession  = sessionExists(userId);
+
+    if (!hasSession) {
       return NextResponse.json(
-        { ok: false, error: 'Freelancehunt account not connected. Please add your API token first.', setupRequired: true },
+        {
+          ok:            false,
+          error:         'Freelancehunt browser session not found. Please reconnect your account.',
+          setupRequired: true,
+          sessionPath,
+        },
         { status: 401 },
       );
     }
 
-    // Enforce subscription plan limits
+    // Inject the per-user session path so playwright-browser.service uses it
+    const prevSession = process.env.FREELANCEHUNT_SESSION_PATH;
+    process.env.FREELANCEHUNT_SESSION_PATH = sessionPath;
+
+    // ── Enforce subscription plan limits ──────────────────────────────────────
     const saasUser = await getUserById(userId).catch(() => null);
     if (saasUser) {
       const planLimits = PLAN_LIMITS[saasUser.subscriptionPlan] ?? PLAN_LIMITS.free;
       const used = saasUser.applicationsThisMonth ?? 0;
       if (used >= planLimits.applicationsPerMonth) {
+        if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
+        else delete process.env.FREELANCEHUNT_SESSION_PATH;
         return NextResponse.json(
           {
-            ok:    false,
-            error: `Досягнуто місячний ліміт заявок (${planLimits.applicationsPerMonth}) для плану ${saasUser.subscriptionPlan}. Оновіть підписку.`,
+            ok:           false,
+            error:        `Досягнуто місячний ліміт заявок (${planLimits.applicationsPerMonth}) для плану ${saasUser.subscriptionPlan}. Оновіть підписку.`,
             limitReached: true,
-            plan:  saasUser.subscriptionPlan,
+            plan:         saasUser.subscriptionPlan,
             used,
-            limit: planLimits.applicationsPerMonth,
+            limit:        planLimits.applicationsPerMonth,
           },
           { status: 429 },
         );
       }
     }
 
-    // Enable auto-bid flag in the filter
+    // ── Enable auto-bid flag and create job record ────────────────────────────
     const existing = await getFreelanceFilter(userId);
     const filter   = await upsertFreelanceFilter({ ...(existing ?? {}), userId, isEnabled: true });
+    const account  = await getFreelanceAccount(userId);
     await upsertFreelanceAccount({ userId, status: 'connected', lastCheckAt: new Date().toISOString() });
+    const job = await createAutomationJob(userId, account?.id ?? userId);
 
-    // Create a tracked automation job record
-    const job = await createAutomationJob(userId, account.id);
-
-    // Fetch latest open projects
-    const qs = new URLSearchParams({ 'page[size]': '20', 'page[number]': '1' });
-    if (filter?.minBudgetUah) qs.set('filter[budget_from]', String(filter.minBudgetUah));
-
-    const projRes = await fetch(`${FH_BASE}/projects?${qs}`, {
-      headers: { Authorization: `Bearer ${account.apiToken}` },
-      signal: AbortSignal.timeout(20_000),
-    });
-
-    if (!projRes.ok) {
-      const errJson = await projRes.json().catch(() => ({}));
-      return NextResponse.json(
-        { ok: false, error: errJson?.errors?.[0]?.detail ?? `Freelancehunt API error ${projRes.status}` },
-        { status: projRes.status },
-      );
-    }
-
-    const projJson   = await projRes.json();
-    const projects: Record<string, unknown>[] = projJson?.data ?? [];
-
-    // Keyword filtering with match tracking
-    const allowed  = filter?.allowedKeywords ?? [];
-    const blocked  = filter?.blockedKeywords ?? [];
-    type FilteredProject = {
-      raw: Record<string, unknown>;
-      matchedKeywords: string[];
-      blockedKeywords: string[];
-      skipReason?: string;
-      filterStage?: string;
-    };
-    const allFiltered: FilteredProject[] = projects.map((p) => {
-      const attr = (p.attributes as Record<string, unknown>) ?? {};
-      const text = `${attr.name ?? ''} ${attr.description ?? ''}`.toLowerCase();
-      const hitBlocked = blocked.filter((kw) => text.includes(kw.toLowerCase()));
-      const hitAllowed = allowed.filter((kw) => text.includes(kw.toLowerCase()));
-      if (hitBlocked.length > 0) {
-        return { raw: p, matchedKeywords: [], blockedKeywords: hitBlocked, skipReason: `Заблоковане слово: ${hitBlocked.join(', ')}`, filterStage: 'keyword_block' };
-      }
-      if (allowed.length > 0 && hitAllowed.length === 0) {
-        return { raw: p, matchedKeywords: [], blockedKeywords: [], skipReason: 'Не відповідає ключовим словам', filterStage: 'keyword_allow' };
-      }
-      return { raw: p, matchedKeywords: hitAllowed, blockedKeywords: [] };
-    });
-    const matching = allFiltered.filter((f) => !f.skipReason);
-
-    const dailyLimit = filter?.dailyLimit ?? 5;
-    const toProcess  = matching.slice(0, dailyLimit);
-    let submitted    = 0;
-    const errors: string[] = [];
     const now = new Date().toISOString();
 
-    // Log scan start
     await appendLog({
       id:        randomUUID(),
       userId,
       level:     'info',
-      message:   `Скан запущено — знайдено ${projects.length} проектів, ${matching.length} відповідають фільтрам, ліміт: ${dailyLimit}`,
+      message:   `Скан запущено — парсинг через Playwright браузер (сесія: ${sessionPath})`,
       timestamp: now,
     }).catch(() => {});
 
-    // Record skipped projects (filtered out)
+    // ── 1. Parse projects from feed via browser session ───────────────────────
+    let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
+    try {
+      console.log('[api/freelance/start] Parsing projects via browser session', { userId, sessionPath });
+      parseResult = await parseNewProjects('', {}, (level, message) => {
+        appendLog({ id: randomUUID(), userId, level, message, timestamp: new Date().toISOString() }).catch(() => {});
+      });
+
+      console.log('[api/freelance/start] Parsed projects', {
+        total: parseResult.totalFetched,
+        source: parseResult.source,
+      });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[api/freelance/start] parse error:', msg);
+
+      // Session expired during parsing
+      const isSessionError =
+        msg.includes('LOGIN_REQUIRED') ||
+        msg.includes('AUTH_STATE_MISSING') ||
+        msg.includes('session expired');
+
+      if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
+      else delete process.env.FREELANCEHUNT_SESSION_PATH;
+
+      if (isSessionError) {
+        await upsertFreelanceAccount({ userId, status: 'session_expired' });
+        return NextResponse.json(
+          { ok: false, error: 'Сесія Freelancehunt протухла. Перепідключіть акаунт.', sessionExpired: true },
+          { status: 401 },
+        );
+      }
+
+      return NextResponse.json({ ok: false, error: `Помилка парсингу: ${msg}` }, { status: 500 });
+    }
+
+    const projects = parseResult.newProjects;
+
+    // ── 2. Filter projects ────────────────────────────────────────────────────
+    const allowed  = filter?.allowedKeywords ?? [];
+    const blocked  = filter?.blockedKeywords ?? [];
+
+    type Filtered = {
+      project: (typeof projects)[0];
+      skipReason?: string;
+      filterStage?: string;
+      blockedKeywords: string[];
+      matchedKeywords: string[];
+    };
+
+    const allFiltered: Filtered[] = projects.map((p) => {
+      const text = `${p.title} ${p.description ?? ''}`.toLowerCase();
+      const hitBlocked = blocked.filter((kw) => text.includes(kw.toLowerCase()));
+      const hitAllowed = allowed.filter((kw) => text.includes(kw.toLowerCase()));
+
+      if (hitBlocked.length > 0) {
+        return { project: p, skipReason: `Заблоковане слово: ${hitBlocked.join(', ')}`, filterStage: 'keyword_block', blockedKeywords: hitBlocked, matchedKeywords: [] };
+      }
+      if (allowed.length > 0 && hitAllowed.length === 0) {
+        return { project: p, skipReason: 'Не відповідає ключовим словам', filterStage: 'keyword_allow', blockedKeywords: [], matchedKeywords: [] };
+      }
+      return { project: p, blockedKeywords: [], matchedKeywords: hitAllowed };
+    });
+
+    const matching   = allFiltered.filter((f) => !f.skipReason);
+    const dailyLimit = filter?.dailyLimit ?? 5;
+    const toProcess  = matching.slice(0, dailyLimit);
+
+    let submitted   = 0;
+    let bidsSkipped = 0;
+    const errors: string[] = [];
+
+    await appendLog({
+      id:        randomUUID(),
+      userId,
+      level:     'info',
+      message:   `Знайдено ${projects.length} проектів, ${matching.length} відповідають фільтрам, ліміт: ${dailyLimit}`,
+      timestamp: new Date().toISOString(),
+    }).catch(() => {});
+
+    // Persist skipped projects
     for (const fp of allFiltered) {
-      if (!fp.skipReason) continue; // will be processed below
-      const project = fp.raw;
-      const attr    = (project.attributes as Record<string, unknown>) ?? {};
+      if (!fp.skipReason) continue;
       await saveApplication({
         id:              randomUUID(),
         userId,
-        projectId:       String(project.id),
-        title:           String(attr.name ?? `Project ${project.id}`),
-        url:             String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`),
-        budget:          Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0),
-        currency:        String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH'),
+        projectId:       fp.project.id,
+        title:           fp.project.title,
+        url:             fp.project.projectUrl ?? '',
+        budget:          fp.project.budget,
+        currency:        fp.project.currency ?? 'UAH',
         status:          'skipped',
         createdAt:       now,
         skippedReason:   fp.skipReason,
@@ -135,156 +203,200 @@ export async function POST(req: NextRequest) {
       }).catch(() => {});
     }
 
+    // ── 3. Process each project ───────────────────────────────────────────────
     for (const fp of toProcess) {
-      const project  = fp.raw;
-      const attr     = (project.attributes as Record<string, unknown>) ?? {};
-      const proposal = `Доброго дня! Зацікавив ваш проект "${attr.name}". Маю досвід у подібних задачах, готовий виконати якісно та в строк. Напишіть — обговоримо деталі!`;
-      const appId    = randomUUID();
-      const projectTitle = String(attr.name ?? `Project ${project.id}`);
-      const projectUrl   = String((attr as Record<string, unknown>).safe_url ?? `https://freelancehunt.com/project/${project.id}`);
-      const budget       = Number(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.amount ?? 0);
-      const currency     = String(((attr as Record<string, unknown>).budget as Record<string, unknown>)?.currency ?? 'UAH');
+      const project      = fp.project;
+      const projectTitle = project.title ?? project.projectUrl ?? `project-${project.id}`;
+      const projectUrl   = project.projectUrl ?? '';
+      const numericId    = project.freelancehuntId ?? project.id.replace('fh_', '');
 
-      // Parse deadline (days) from filter or default to 14
-      const bidDays    = 14; // default deadline in days — FreelanceFilter has no deadline field yet
-      const bidAmount  = budget > 0 ? budget : (filter?.minBudgetUah ?? 500);
-      const bidPayload = {
-        days:      bidDays,
-        safe_type: 'employer' as const,
-        budget:    { amount: bidAmount, currency },
-        comment:   proposal,
-        is_hidden: false,
-      };
+      if (!projectUrl) {
+        errors.push(`No URL for project ${project.id}`);
+        continue;
+      }
+
+      // Deep filter via shouldApply (budget + AI score)
+      const deepFilter = await shouldApply(project, Boolean(process.env.OPENAI_API_KEY));
+      if (!deepFilter.allowed) {
+        await saveApplication({
+          id:              randomUUID(),
+          userId,
+          projectId:       project.id,
+          title:           projectTitle,
+          url:             projectUrl,
+          budget:          deepFilter.budget,
+          currency:        deepFilter.currency,
+          status:          'skipped',
+          createdAt:       new Date().toISOString(),
+          aiScore:         deepFilter.aiScore,
+          matchedKeywords: deepFilter.matchedKeywords,
+          blockedKeywords: deepFilter.blockedKeywords,
+          skippedReason:   deepFilter.reason,
+          filterStage:     deepFilter.stage,
+        }).catch(() => {});
+        bidsSkipped++;
+        continue;
+      }
+
+      // Generate AI proposal
+      const bid = await generateAutoBid(project);
+
+      const daysRaw    = parseInt(String(bid.deadline ?? '14'), 10);
+      const days       = isNaN(daysRaw) || daysRaw <= 0 ? 14 : daysRaw;
+      const budgetAmt  = (bid.price ?? 0) > 0 ? bid.price! : project.budget > 0 ? project.budget : 500;
+
+      console.log('[api/freelance/start] Submitting bid via browser', {
+        projectId:   project.id,
+        projectUrl,
+        budgetAmt,
+        days,
+        sessionPath,
+      });
+
+      await appendLog({
+        id:        randomUUID(),
+        userId,
+        level:     'info',
+        message:   `Подача заявки: "${projectTitle}" | url:${projectUrl} | price:${budgetAmt} | days:${days}`,
+        timestamp: new Date().toISOString(),
+      }).catch(() => {});
 
       try {
-        const bidRes = await fetch(`${FH_BASE}/projects/${project.id}/bids`, {
-          method:  'POST',
-          headers: { Authorization: `Bearer ${account.apiToken}`, 'Content-Type': 'application/json' },
-          body:    JSON.stringify(bidPayload),
-          signal:  AbortSignal.timeout(15_000),
+        const result = await submitBidViaBrowser({
+          projectId:  numericId,
+          projectUrl,
+          comment:    bid.text ?? '',
+          amount:     budgetAmt,
+          days,
+          safeType:   'no_safe',
+          log: (level, message) => {
+            appendLog({ id: randomUUID(), userId, level, message, timestamp: new Date().toISOString() }).catch(() => {});
+          },
         });
 
-        // Always read the full body for logging — do not rely on bidRes.ok alone
-        const bidRawText = await bidRes.text().catch(() => '');
-        let bidJson: Record<string, unknown> = {};
-        try { bidJson = JSON.parse(bidRawText); } catch { /* leave empty */ }
+        console.log('[api/freelance/start] bid result', { projectId: project.id, result });
 
-        console.log('[api/freelance/start] bid attempt', {
-          projectId:  project.id,
-          projectTitle: projectTitle.slice(0, 60),
-          status:     bidRes.status,
-          payload:    bidPayload,
-          rawResponse: bidRawText.slice(0, 500),
-        });
-
-        if (bidRes.ok) {
-          const bidId = String((bidJson as { data?: { id?: unknown } })?.data?.id ?? '');
+        if (result.success) {
           submitted++;
           await incrementBidCount(userId).catch(() => {});
+          const sentAt = new Date().toISOString();
 
-          // Save application record
           await saveApplication({
-            id:                 appId,
+            id:                 randomUUID(),
             userId,
-            projectId:          String(project.id),
+            projectId:          project.id,
+            freelancehuntId:    project.freelancehuntId ?? undefined,
             title:              projectTitle,
             url:                projectUrl,
-            budget:             bidAmount,
-            currency,
+            budget:             budgetAmt,
+            currency:           project.currency ?? 'UAH',
+            deadline:           bid.deadline,
             status:             'sent',
-            createdAt:          now,
-            sentAt:             new Date().toISOString(),
-            proposalText:       proposal,
-            freelancehuntBidId: bidId || undefined,
-            matchedKeywords:    fp.matchedKeywords.length > 0 ? fp.matchedKeywords : undefined,
+            createdAt:          bid.createdAt ?? sentAt,
+            sentAt,
+            proposalText:       bid.text,
+            proposalPrice:      bid.price,
+            freelancehuntBidId: result.bidId,
+            aiScore:            deepFilter.aiScore,
+            matchedKeywords:    deepFilter.matchedKeywords,
           }).catch(() => {});
 
           await appendLog({
-            id:           randomUUID(),
+            id:        randomUUID(),
             userId,
-            level:        'success' as AutoBidLog['level'],
-            message:      `Заявку надіслано: "${projectTitle}" | bidId:${bidId || 'n/a'} | price:${bidAmount} ${currency} | days:${bidDays}`,
-            projectId:    String(project.id),
-            projectTitle,
-            bidId:        bidId || undefined,
-            timestamp:    new Date().toISOString(),
+            level:     'success' as AutoBidLog['level'],
+            message:   `Заявку НАДІСЛАНО: "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmt} | days:${days}`,
+            timestamp: new Date().toISOString(),
           }).catch(() => {});
         } else {
-          // Extract real error from API response — try multiple field paths
-          const apiErrors = (bidJson as { errors?: { detail?: string; title?: string }[] })?.errors;
-          const firstErr  = apiErrors?.[0];
-          const errMsg    = firstErr?.detail ?? firstErr?.title
-            ?? (bidJson as { message?: string })?.message
-            ?? `HTTP ${bidRes.status}: ${bidRawText.slice(0, 300)}`;
-          errors.push(errMsg);
+          // Map browser status to skip or error
+          const isSkip = result.status === 'already_bid' || result.status === 'project_closed';
 
-          await saveApplication({
-            id:           appId,
-            userId,
-            projectId:    String(project.id),
-            title:        projectTitle,
-            url:          projectUrl,
-            budget,
-            currency,
-            status:       'failed',
-            createdAt:    now,
-            errorReason:  errMsg,
-            filterStage:  'bid_submit',
-          }).catch(() => {});
-
-          await appendLog({
-            id:           randomUUID(),
-            userId,
-            level:        'error',
-            message:      `Помилка подачі заявки на "${projectTitle}" [HTTP ${bidRes.status}]: ${errMsg}`,
-            projectId:    String(project.id),
-            projectTitle,
-            timestamp:    new Date().toISOString(),
-          }).catch(() => {});
+          if (isSkip) {
+            bidsSkipped++;
+            await saveApplication({
+              id:           randomUUID(),
+              userId,
+              projectId:    project.id,
+              title:        projectTitle,
+              url:          projectUrl,
+              budget:       project.budget,
+              currency:     project.currency ?? 'UAH',
+              status:       'skipped',
+              createdAt:    new Date().toISOString(),
+              skippedReason: result.reason,
+            }).catch(() => {});
+          } else if (result.status === 'login_required') {
+            // Session expired mid-cycle
+            await upsertFreelanceAccount({ userId, status: 'session_expired' }).catch(() => {});
+            errors.push(`СЕСІЯ ПРОТУХЛА: ${result.reason}`);
+            await appendLog({
+              id:        randomUUID(),
+              userId,
+              level:     'error',
+              message:   `Сесія протухла під час подачі заявки на "${projectTitle}". Перепідключіть акаунт.`,
+              timestamp: new Date().toISOString(),
+            }).catch(() => {});
+            break; // stop processing — session is dead
+          } else {
+            errors.push(result.reason);
+            await saveApplication({
+              id:          randomUUID(),
+              userId,
+              projectId:   project.id,
+              title:       projectTitle,
+              url:         projectUrl,
+              budget:      project.budget,
+              currency:    project.currency ?? 'UAH',
+              status:      'failed',
+              createdAt:   new Date().toISOString(),
+              errorReason: result.reason,
+              filterStage: 'bid_submit',
+            }).catch(() => {});
+            await appendLog({
+              id:        randomUUID(),
+              userId,
+              level:     'error',
+              message:   `Помилка подачі на "${projectTitle}": ${result.reason}`,
+              timestamp: new Date().toISOString(),
+            }).catch(() => {});
+          }
         }
       } catch (e) {
-        const errMsg = e instanceof Error ? e.message : `Error on project ${project.id}`;
-        console.error('[api/freelance/start] exception on bid', { projectId: project.id, error: errMsg });
+        const errMsg = e instanceof Error ? e.message : String(e);
+        console.error('[api/freelance/start] exception on bid submit', { projectId: project.id, error: errMsg });
         errors.push(errMsg);
 
         await saveApplication({
-          id:           appId,
+          id:          randomUUID(),
           userId,
-          projectId:    String(project.id),
-          title:        projectTitle,
-          url:          projectUrl,
-          budget,
-          currency,
-          status:       'failed',
-          createdAt:    now,
-          errorReason:  errMsg,
-          filterStage:  'bid_submit',
-        }).catch(() => {});
-
-        await appendLog({
-          id:           randomUUID(),
-          userId,
-          level:        'error',
-          message:      `Виняток при заявці на "${projectTitle}": ${errMsg}`,
-          projectId:    String(project.id),
-          projectTitle,
-          timestamp:    new Date().toISOString(),
+          projectId:   project.id,
+          title:       projectTitle,
+          url:         projectUrl,
+          budget:      project.budget,
+          currency:    project.currency ?? 'UAH',
+          status:      'failed',
+          createdAt:   new Date().toISOString(),
+          errorReason: errMsg,
+          filterStage: 'bid_submit',
         }).catch(() => {});
       }
     }
 
+    // ── Restore env and finalize ──────────────────────────────────────────────
+    if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
+    else delete process.env.FREELANCEHUNT_SESSION_PATH;
+
     const cycleNow = new Date().toISOString();
 
-    // Log scan complete
     await appendLog({
       id:        randomUUID(),
       userId,
-      level:     'info',
-      message:   `Скан завершено — надіслано ${submitted} заявок${errors.length ? `, помилок: ${errors.length}` : ''}`,
+      level:     submitted > 0 ? 'success' : 'info',
+      message:   `Скан завершено — надіслано ${submitted} заявок, пропущено ${bidsSkipped}${errors.length ? `, помилок: ${errors.length}` : ''}`,
       timestamp: cycleNow,
     }).catch(() => {});
 
-    // Update job with cycle results and mark stopped (one-shot cycle)
     if (job) {
       await updateAutomationJob(job.id, {
         status:          'stopped',
@@ -293,23 +405,23 @@ export async function POST(req: NextRequest) {
         lastCycleError:  errors.length > 0 ? errors[0] : null,
         cyclesCompleted: 1,
         bidsSubmitted:   submitted,
-        bidsSkipped:     allFiltered.filter((f) => f.skipReason).length,
+        bidsSkipped:     bidsSkipped + allFiltered.filter((f) => f.skipReason).length,
         bidsFailed:      errors.length,
       }).catch(() => {});
     }
 
-    // Disable filter after one-shot cycle
     await upsertFreelanceFilter({ ...(filter ?? {}), userId, isEnabled: false }).catch(() => {});
 
     return NextResponse.json({
-      ok: true,
+      ok:              true,
       isWorkerRunning: false,
-      jobId: job?.id,
-      found: matching.length,
-      skipped: allFiltered.filter((f) => f.skipReason).length,
+      jobId:           job?.id,
+      found:           matching.length,
+      skipped:         bidsSkipped + allFiltered.filter((f) => f.skipReason).length,
       submitted,
-      errors: errors.length > 0 ? errors : undefined,
+      errors:          errors.length > 0 ? errors : undefined,
       filter,
+      strategy:        'browser',
     });
   } catch (err) {
     console.error('[api/freelance/start] error:', err);

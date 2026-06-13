@@ -18,13 +18,41 @@ import fs from 'node:fs';
 // ─── Session configuration ────────────────────────────────────────────────────
 
 /**
+ * Resolve the session file path.
+ * Priority (highest to lowest):
+ *   1. per-user:  sessions/freelancehunt_<userId>.json
+ *   2. env var:   FH_STORAGE_STATE or FREELANCEHUNT_SESSION_PATH
+ *   3. legacy:    storageState.json at project root
+ */
+export function resolveSessionPath(userId?: string): string {
+  if (userId) {
+    const sessionsDir = path.resolve(process.cwd(), 'sessions');
+    if (!fs.existsSync(sessionsDir)) {
+      try { fs.mkdirSync(sessionsDir, { recursive: true }); } catch { /* ignore */ }
+    }
+    return path.join(sessionsDir, `freelancehunt_${userId}.json`);
+  }
+  return (
+    process.env.FH_STORAGE_STATE ??
+    process.env.FREELANCEHUNT_SESSION_PATH ??
+    path.resolve(process.cwd(), 'storageState.json')
+  );
+}
+
+/** Returns true when the session file for the given userId (or global) exists. */
+export function sessionExists(userId?: string): boolean {
+  return fs.existsSync(resolveSessionPath(userId));
+}
+
+/**
  * Path to the saved storageState (cookies + localStorage of the logged-in
  * Freelancehunt account). Set FH_STORAGE_STATE in the environment to override.
  * This must be the file written when the account is connected.
  */
 const STORAGE_STATE_PATH =
   process.env.FH_STORAGE_STATE ??
-  path.resolve(process.cwd(), 'storage/freelancehunt-state.json');
+  process.env.FREELANCEHUNT_SESSION_PATH ??
+  path.resolve(process.cwd(), 'storageState.json');
 
 const LAUNCH_ARGS = [
   '--no-sandbox',
@@ -99,6 +127,54 @@ export async function getAuthenticatedContext(): Promise<BrowserContext> {
 export async function getAuthenticatedPage(): Promise<Page> {
   const context = await getAuthenticatedContext();
   return context.newPage();
+}
+
+/**
+ * Create a one-shot BrowserContext for a specific user's saved session.
+ * Unlike the global singleton, this context is NOT shared or cached —
+ * the caller must close it after use.
+ *
+ * Throws AUTH_STATE_MISSING when the per-user session file does not exist.
+ */
+export async function getAuthenticatedContextForUser(
+  userId: string
+): Promise<{ context: import('playwright').BrowserContext; browser: import('playwright').Browser }> {
+  const sessionPath = resolveSessionPath(userId);
+
+  if (!fs.existsSync(sessionPath)) {
+    throw new Error(
+      `AUTH_STATE_MISSING: no saved session for user ${userId} at ${sessionPath}. Reconnect the Freelancehunt account.`
+    );
+  }
+
+  const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+  const context = await browser.newContext({
+    ...CONTEXT_OPTS,
+    storageState: sessionPath,
+  });
+
+  return { context, browser };
+}
+
+/**
+ * Save a Playwright storageState for a specific user.
+ * Used by the connect-save API after the user completes in-browser login.
+ */
+export async function saveSessionForUser(
+  userId: string,
+  state: unknown
+): Promise<{ sessionPath: string; cookieCount: number }> {
+  const sessionPath = resolveSessionPath(userId);
+  const json = typeof state === 'string' ? state : JSON.stringify(state);
+  fs.writeFileSync(sessionPath, json, 'utf-8');
+
+  let cookieCount = 0;
+  try {
+    const parsed = JSON.parse(json) as { cookies?: unknown[] };
+    cookieCount = parsed.cookies?.length ?? 0;
+  } catch { /* ignore */ }
+
+  return { sessionPath, cookieCount };
 }
 
 /** Release the shared browser (call on graceful shutdown). */

@@ -1,24 +1,26 @@
 /**
- * GET /api/freelancehunt/status
+ * GET /api/freelancehunt/status[?userId=<id>]
  *
  * Returns the current Freelancehunt session status.
  *
  * Priority:
- *   1. Worker mode (AUTOMATION_WORKER_URL or LOCAL_WORKER_URL set)
- *      → delegates to worker's GET /status endpoint
- *   2. Local storageState.json exists
- *      → checks file presence only (fast) — returns connected: true
- *   3. FREELANCEHUNT_TOKEN in env
- *      → validates token via API
- *   4. None configured → connected: false
+ *   1. Worker mode  → delegates to worker's GET /status
+ *   2. Per-user session file (sessions/freelancehunt_<userId>.json)
+ *   3. Global storageState.json exists
+ *   4. DB account status (set after browser login completes)
+ *   5. FREELANCEHUNT_TOKEN env var validation
+ *   6. Nothing configured → connected: false
  *
- * POST ?action=logout — proxies to worker logout or deletes storageState locally.
+ * POST ?action=logout — proxies to worker logout or clears local session file.
  */
 
-import { NextResponse } from 'next/server';
+import { NextRequest, NextResponse } from 'next/server';
 import { config } from '@/lib/config';
 
-export async function GET() {
+export async function GET(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const userId = searchParams.get('userId') ?? undefined;
+
   // ── 1. Worker mode ────────────────────────────────────────────────────────
   if (config.worker.enabled) {
     try {
@@ -27,7 +29,7 @@ export async function GET() {
         headers: { Authorization: `Bearer ${config.worker.secret}` },
         signal: AbortSignal.timeout(8_000),
       });
-      const data = await res.json();
+      const data = await res.json() as Record<string, unknown>;
 
       if (!res.ok) {
         return NextResponse.json({
@@ -35,12 +37,12 @@ export async function GET() {
           data: {
             connected: false,
             workerMode: config.worker.mode,
-            error: data.error ?? `Worker returned ${res.status}`,
+            error: (data.error as string) ?? `Worker returned ${res.status}`,
           },
         });
       }
 
-      const fh = data.freelancehunt ?? {};
+      const fh = (data.freelancehunt ?? {}) as Record<string, unknown>;
 
       return NextResponse.json({
         ok: true,
@@ -50,24 +52,36 @@ export async function GET() {
           username:     fh.username,
           cookieCount:  fh.cookieCount,
           sessionPath:  fh.sessionPath,
-          error:        fh.connected ? undefined : (fh.error ?? 'Not connected'),
+          error:        fh.connected ? undefined : ((fh.error as string) ?? 'Not connected'),
           autoLoop:     data.autoLoop ?? null,
           counters:     data.counters ?? null,
         },
       });
     } catch (err) {
-      return NextResponse.json({
-        ok: true,
-        data: {
-          connected: false,
-          workerMode: config.worker.mode,
-          error: `Worker unreachable: ${err instanceof Error ? err.message : String(err)}`,
-        },
-      });
+      // Worker unreachable — fall through to local checks
+      console.warn('[fh/status] Worker unreachable:', err instanceof Error ? err.message : String(err));
     }
   }
 
-  // ── 2. Local mode: check storageState.json ────────────────────────────────
+  // ── 2. Per-user session file ──────────────────────────────────────────────
+  if (userId) {
+    try {
+      const { sessionExists, resolveSessionPath } = await import('@/services/playwright-browser.service');
+      const exists = sessionExists(userId);
+      const sessionPath = resolveSessionPath(userId);
+
+      if (exists) {
+        return NextResponse.json({
+          ok: true,
+          data: { connected: true, workerMode: 'none', sessionPath },
+        });
+      }
+    } catch {
+      // playwright not available in this runtime — continue
+    }
+  }
+
+  // ── 3. Global storageState.json ───────────────────────────────────────────
   try {
     const { sessionExists, resolveSessionPath } = await import('@/services/playwright-browser.service');
     const exists = sessionExists();
@@ -76,20 +90,44 @@ export async function GET() {
     if (exists) {
       return NextResponse.json({
         ok: true,
-        data: {
-          connected: true,
-          workerMode: 'none',
-          sessionPath,
-          // Username and deep session verify happen in the worker.
-          // Here we confirm the file exists which is sufficient for UI Connected state.
-        },
+        data: { connected: true, workerMode: 'none', sessionPath },
       });
     }
   } catch {
-    // playwright not available in this runtime — continue to token check
+    // playwright not available in this runtime — continue
   }
 
-  // ── 3. Fallback: FREELANCEHUNT_TOKEN ─────────────────────────────────────
+  // ── 4. DB account status ──────────────────────────────────────────────────
+  if (userId) {
+    try {
+      const { getFreelanceAccount } = await import('@/lib/db');
+      const account = await getFreelanceAccount(userId);
+      if (account?.status === 'connected') {
+        return NextResponse.json({
+          ok: true,
+          data: {
+            connected:   true,
+            workerMode:  config.worker.enabled ? config.worker.mode : 'none',
+            username:    account.accountName,
+            lastLoginAt: account.lastLoginAt,
+          },
+        });
+      }
+      if (account?.status === 'session_expired') {
+        return NextResponse.json({
+          ok: true,
+          data: {
+            connected:  false,
+            workerMode: 'none',
+            error:      'Сесія протухла. Перепідключіть акаунт Freelancehunt.',
+            expired:    true,
+          },
+        });
+      }
+    } catch { /* non-fatal */ }
+  }
+
+  // ── 5. Fallback: FREELANCEHUNT_TOKEN env var ──────────────────────────────
   const token = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (token) {
     try {
@@ -98,40 +136,34 @@ export async function GET() {
       return NextResponse.json({
         ok: true,
         data: {
-          connected: result.valid,
+          connected:  result.valid,
           workerMode: 'none',
-          username: result.username,
-          error: result.valid ? undefined : 'Token invalid or expired',
+          username:   result.username,
+          error:      result.valid ? undefined : 'Token invalid or expired',
         },
       });
-    } catch (err) {
-      return NextResponse.json({
-        ok: true,
-        data: {
-          connected: false,
-          workerMode: 'none',
-          error: err instanceof Error ? err.message : 'Token validation failed',
-        },
-      });
-    }
+    } catch { /* continue */ }
   }
 
-  // ── 4. Nothing configured ────────────────────────────────────────────────
+  // ── 6. Nothing configured ─────────────────────────────────────────────────
   return NextResponse.json({
     ok: true,
     data: {
-      connected: false,
+      connected:  false,
       workerMode: 'none',
-      error: 'No session found. Run: npm run login:freelancehunt to save your Freelancehunt session.',
+      error:      'Сесія Freelancehunt не знайдена. Натисніть "Підключити" і увійдіть через браузер.',
     },
   });
 }
 
 /**
- * POST /api/freelancehunt/status?action=logout
- * Proxies to worker's logout endpoint or clears local session file.
+ * POST /api/freelancehunt/status?action=logout[&userId=<id>]
+ * Proxies to worker logout or clears local session file.
  */
-export async function POST() {
+export async function POST(req: NextRequest) {
+  const { searchParams } = new URL(req.url);
+  const userId = searchParams.get('userId') ?? undefined;
+
   if (config.worker.enabled) {
     try {
       const res = await fetch(`${config.worker.url}/connect/freelancehunt/logout`, {
@@ -149,23 +181,24 @@ export async function POST() {
     }
   }
 
-  // Local mode: delete storageState.json
+  // Local mode: delete per-user or global session file + update DB
   try {
     const { resolveSessionPath } = await import('@/services/playwright-browser.service');
     const fs = await import('fs');
-    const p = resolveSessionPath();
-    if (fs.existsSync(p)) fs.unlinkSync(p);
+    const sessionPath = resolveSessionPath(userId);
+    if (fs.existsSync(sessionPath)) fs.unlinkSync(sessionPath);
 
-    return NextResponse.json({
-      ok: true,
-      message: 'Session cleared',
-    });
+    if (userId) {
+      try {
+        const { upsertFreelanceAccount } = await import('@/lib/db');
+        await upsertFreelanceAccount({ userId, status: 'disconnected' });
+      } catch { /* non-fatal */ }
+    }
+
+    return NextResponse.json({ ok: true, message: 'Session cleared' });
   } catch (err) {
     return NextResponse.json(
-      {
-        ok: false,
-        error: err instanceof Error ? err.message : 'Failed to clear session',
-      },
+      { ok: false, error: err instanceof Error ? err.message : 'Failed to clear session' },
       { status: 500 }
     );
   }
