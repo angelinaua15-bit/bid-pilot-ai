@@ -1,284 +1,190 @@
 /**
- * services/freelancehunt.service.ts
- * Freelancehunt REST API v2 integration.
+ * services/freelancehunt-session.service.ts
  *
- * Authentication: Bearer token via FREELANCEHUNT_TOKEN env var.
- * No browser automation. No session files. No Playwright.
+ * Per-user Freelancehunt session storage in Supabase — the single source of
+ * truth for "is this user connected?". Durable across Railway redeploys (unlike
+ * local session files) and readable from Vercel (unlike the worker's disk).
  *
- * Project listing:  GET  /v2/projects   (read-only)
- * Token validation: GET  /v2/my/profile
- * Bid submission:   NOT SUPPORTED by the API — use submitBidViaBrowser()
- *                   (the v2 API has no create-bid endpoint; the old public
- *                    route returns HTTP 410).
+ * NO Playwright import here — this module is safe to bundle in a Vercel route.
+ * The actual browser context is built in playwright-browser.service.ts, which
+ * reads the storageState via getStorageState() below.
  *
- * Full request + response logging on every call.
- * No silent failures — every error surface with exact reason.
+ * Table (create once in Supabase SQL editor):
+ *
+ *   create table if not exists freelancehunt_sessions (
+ *     user_id      text primary key,
+ *     storage_state jsonb not null,
+ *     username     text,
+ *     cookie_count integer not null default 0,
+ *     status       text not null default 'connected',
+ *     updated_at   timestamptz not null default now()
+ *   );
  */
 
-import type { Project } from '@/types';
+import { createClient, type SupabaseClient } from '@supabase/supabase-js';
 
-const BASE_URL = 'https://api.freelancehunt.com/v2';
+const TABLE = 'freelancehunt_sessions';
+const MAX_AGE_DAYS = Number(process.env.FH_SESSION_MAX_AGE_DAYS ?? 25);
 
-type LogFn = (level: string, message: string) => void;
-const noop: LogFn = () => {};
+// ─── Types ────────────────────────────────────────────────────────────────────
 
-// ─── HTTP helper ──────────────────────────────────────────────────────────────
-
-/**
- * Core fetch wrapper.
- * On non-2xx: reads the full response body, tries to parse structured errors,
- * and always throws with a descriptive message.
- * Never swallows errors silently.
- */
-async function fhFetch<T = unknown>(
-  endpoint: string,
-  token: string,
-  options: RequestInit = {},
-  log: LogFn = noop
-): Promise<T> {
-  const url = `${BASE_URL}${endpoint}`;
-
-  log('info', `[HTTP] ${options.method ?? 'GET'} ${url}`);
-
-  const res = await fetch(url, {
-    ...options,
-    headers: {
-      Authorization: `Bearer ${token}`,
-      'Content-Type': 'application/json',
-      Accept: 'application/json',
-      ...(options.headers ?? {}),
-    },
-  });
-
-  log('info', `[HTTP] Response status: ${res.status} ${res.statusText}`);
-
-  // Always read body so we can log it
-  const bodyText = await res.text().catch(() => '');
-
-  if (!res.ok) {
-    log('error', `[HTTP] Error body: ${bodyText}`);
-
-    // Try to extract a structured error from Freelancehunt JSON shape:
-    // { errors: [{ title, detail }] }  OR  { message: string }
-    let reason = bodyText || `HTTP ${res.status}`;
-    let errorCode = `API_ERROR_${res.status}`;
-
-    try {
-      const parsed = JSON.parse(bodyText) as {
-        errors?: Array<{ title?: string; detail?: string; code?: string }>;
-        message?: string;
-      };
-
-      if (Array.isArray(parsed.errors) && parsed.errors.length > 0) {
-        reason = parsed.errors
-          .map((e) => [e.title, e.detail].filter(Boolean).join(': '))
-          .join('; ');
-
-        // Check for specific known codes
-        const firstCode = parsed.errors[0]?.code ?? '';
-        if (firstCode) errorCode = firstCode.toUpperCase();
-      } else if (parsed.message) {
-        reason = parsed.message;
-      }
-    } catch {
-      // JSON parse failed — use raw body as reason
-    }
-
-    const lowerReason = reason.toLowerCase();
-
-    // Classify skippable API responses
-    if (
-      res.status === 401 ||
-      lowerReason.includes('invalid token') ||
-      lowerReason.includes('unauthorized')
-    ) {
-      throw new Error(`INVALID_TOKEN: ${reason}`);
-    }
-    if (res.status === 403) {
-      throw new Error(`FORBIDDEN: ${reason}`);
-    }
-    if (res.status === 404) {
-      throw new Error(`NOT_FOUND: ${reason}`);
-    }
-    // 410 Gone — a retired/deprecated public endpoint. This is exactly what the
-    // old POST /v2/projects/{id}/bids route returns. Surface it explicitly so it
-    // is never reported as a generic/unknown error.
-    if (res.status === 410) {
-      throw new Error(`ENDPOINT_GONE_410: ${reason}`);
-    }
-    if (res.status === 429) {
-      throw new Error(`RATE_LIMITED: ${reason}`);
-    }
-    if (
-      lowerReason.includes('already') ||
-      lowerReason.includes('вже') ||
-      lowerReason.includes('duplicate') ||
-      lowerReason.includes('bid exists')
-    ) {
-      throw new Error(`ALREADY_BID: ${reason}`);
-    }
-    if (
-      lowerReason.includes('closed') ||
-      lowerReason.includes('закрит') ||
-      lowerReason.includes('not open')
-    ) {
-      throw new Error(`PROJECT_CLOSED: ${reason}`);
-    }
-
-    // Generic error with full details
-    throw new Error(`${errorCode}: ${reason}`);
-  }
-
-  // Success — parse JSON
-  try {
-    return JSON.parse(bodyText) as T;
-  } catch {
-    log('error', `[HTTP] Failed to parse success response as JSON: ${bodyText.slice(0, 200)}`);
-    throw new Error(`JSON_PARSE_ERROR: Could not parse API response: ${bodyText.slice(0, 200)}`);
-  }
+export interface PlaywrightCookie {
+  name: string;
+  value: string;
+  domain: string;
+  path: string;
+  expires: number; // unix seconds, -1 for session cookies
+  httpOnly?: boolean;
+  secure?: boolean;
+  sameSite?: 'Strict' | 'Lax' | 'None';
 }
 
-// ─── Response mappers ─────────────────────────────────────────────────────────
+export interface PlaywrightStorageState {
+  cookies: PlaywrightCookie[];
+  origins: Array<{ origin: string; localStorage: Array<{ name: string; value: string }> }>;
+}
 
-interface FHProject {
-  id: number;
-  attributes: {
-    name: string;
-    description: string;
-    budget: { amount: number; currency: string } | null;
-    budget_max?: { amount: number; currency: string } | null;
-    status: { id: number; name: string };
-    skills: { name: string }[];
-    employer: { login: string; feedback: { positive: number; total: number } | null };
-    bid_count: number;
-    published_at: string;
-    safe_type: string;
-    tags: string[];
+export interface FreelancehuntSessionStatus {
+  userId: string;
+  connected: boolean;
+  status: 'connected' | 'reconnect';
+  username?: string;
+  cookieCount: number;
+  updatedAt?: string;
+  reason?: string;
+}
+
+// ─── Supabase client (lazy, server-only) ──────────────────────────────────────
+
+let _client: SupabaseClient | null = null;
+
+function getClient(): SupabaseClient | null {
+  if (_client) return _client;
+  const url = process.env.SUPABASE_URL ?? process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key =
+    process.env.SUPABASE_SERVICE_ROLE_KEY ??
+    process.env.SUPABASE_SERVICE_KEY;
+  if (!url || !key) return null;
+  _client = createClient(url, key, { auth: { persistSession: false } });
+  return _client;
+}
+
+interface SessionRow {
+  user_id: string;
+  storage_state: PlaywrightStorageState;
+  username: string | null;
+  cookie_count: number;
+  status: string;
+  updated_at: string;
+}
+
+// ─── Validity ─────────────────────────────────────────────────────────────────
+
+function isStillValid(row: SessionRow): { valid: boolean; reason?: string } {
+  if (row.status === 'expired') return { valid: false, reason: 'marked expired' };
+  const cookies = row.storage_state?.cookies ?? [];
+  if (cookies.length === 0) return { valid: false, reason: 'no cookies' };
+
+  const now = Date.now() / 1000;
+  const hasLiveCookie = cookies.some((c) => c.expires === -1 || c.expires > now);
+  if (!hasLiveCookie) return { valid: false, reason: 'all cookies expired' };
+
+  const ageMs = Date.now() - new Date(row.updated_at).getTime();
+  if (ageMs > MAX_AGE_DAYS * 24 * 60 * 60 * 1000) {
+    return { valid: false, reason: `older than ${MAX_AGE_DAYS} days` };
+  }
+  return { valid: true };
+}
+
+// ─── Public API ───────────────────────────────────────────────────────────────
+
+/** Status for the UI / status route. Never throws — returns 'reconnect' on any problem. */
+export async function getSessionStatus(userId: string): Promise<FreelancehuntSessionStatus> {
+  const base: FreelancehuntSessionStatus = {
+    userId, connected: false, status: 'reconnect', cookieCount: 0,
   };
-  links: { self: { web: string } };
-}
+  if (!userId) return { ...base, reason: 'no userId' };
 
-function mapProject(raw: FHProject): Project {
-  const attr = raw.attributes;
-  const budget = attr.budget?.amount ?? 0;
-  const budgetMax = attr.budget_max?.amount;
-  const currency = attr.budget?.currency ?? 'UAH';
-  const skills = (attr.skills ?? []).map((s) => s.name);
-  const rating = attr.employer?.feedback
-    ? Math.round((attr.employer.feedback.positive / Math.max(attr.employer.feedback.total, 1)) * 50) / 10
-    : undefined;
+  const client = getClient();
+  if (!client) return { ...base, reason: 'supabase not configured' };
+
+  const { data, error } = await client
+    .from(TABLE)
+    .select('user_id, storage_state, username, cookie_count, status, updated_at')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error) return { ...base, reason: `db error: ${error.message}` };
+  if (!data) return { ...base, reason: 'no session row' };
+
+  const row = data as SessionRow;
+  const { valid, reason } = isStillValid(row);
 
   return {
-    id: `fh_${raw.id}`,
-    freelancehuntId: String(raw.id),
-    title: attr.name ?? '',
-    description: attr.description ?? '',
-    budget,
-    budgetMax,
-    currency,
-    category: attr.tags?.[0] ?? 'Інше',
-    skills,
-    clientName: attr.employer?.login ?? '',
-    clientRating: rating,
-    projectUrl: raw.links?.self?.web ?? '',
-    publishedAt: attr.published_at ?? new Date().toISOString(),
-    bidsCount: attr.bid_count ?? 0,
-    isNew: false,
+    userId,
+    connected: valid,
+    status: valid ? 'connected' : 'reconnect',
+    username: row.username ?? undefined,
+    cookieCount: row.cookie_count ?? (row.storage_state?.cookies?.length ?? 0),
+    updatedAt: row.updated_at,
+    reason: valid ? undefined : reason,
   };
 }
 
-// ─── Validate token ───────────────────────────────────────────────────────────
+/** Raw storageState for building a Playwright context. null if missing/unconfigured. */
+export async function getStorageState(userId: string): Promise<PlaywrightStorageState | null> {
+  if (!userId) return null;
+  const client = getClient();
+  if (!client) return null;
 
-export async function validateFreelancehuntToken(
-  token: string
-): Promise<{ valid: boolean; username?: string }> {
-  if (!token) return { valid: false };
-  try {
-    const data = await fhFetch<{ data: { attributes: { login: string } } }>('/my/profile', token);
-    return { valid: true, username: data.data?.attributes?.login };
-  } catch {
-    return { valid: false };
-  }
+  const { data, error } = await client
+    .from(TABLE)
+    .select('storage_state, status')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (error || !data) return null;
+  if ((data as { status: string }).status === 'expired') return null;
+  return (data as { storage_state: PlaywrightStorageState }).storage_state ?? null;
 }
 
-// ─── Project listing ──────────────────────────────────────────────────────────
+/** Upsert a user's session. Called by the worker after a successful login-save. */
+export async function saveSession(
+  userId: string,
+  storageState: PlaywrightStorageState,
+  username?: string | null
+): Promise<{ ok: boolean; reason?: string }> {
+  if (!userId) return { ok: false, reason: 'no userId' };
+  const client = getClient();
+  if (!client) return { ok: false, reason: 'supabase not configured' };
 
-export async function getProjects(
-  token: string,
-  filters?: { skills?: string[]; budgetMin?: number; page?: number }
-): Promise<Project[]> {
-  return fetchFreelancehuntProjects(token, filters);
-}
-
-export async function fetchFreelancehuntProjects(
-  token: string,
-  filters?: { skills?: string[]; budgetMin?: number; page?: number }
-): Promise<Project[]> {
-  const params = new URLSearchParams({ 'filter[status]': 'open' });
-  if (filters?.page) params.set('page[number]', String(filters.page));
-  if (filters?.skills?.length) params.set('filter[skill]', filters.skills.join(','));
-
-  const data = await fhFetch<{ data: FHProject[] }>(`/projects?${params}`, token);
-  let projects = (data.data ?? []).map(mapProject);
-
-  if (filters?.budgetMin) {
-    projects = projects.filter((p) => p.budget >= (filters.budgetMin ?? 0));
-  }
-
-  return projects;
-}
-
-export async function getProject(token: string, id: string): Promise<Project | null> {
-  return fetchFreelancehuntProject(token, id);
-}
-
-export async function fetchFreelancehuntProject(
-  token: string,
-  projectId: string
-): Promise<Project | null> {
-  const numericId = projectId.startsWith('fh_') ? projectId.slice(3) : projectId;
-  try {
-    const data = await fhFetch<{ data: FHProject }>(`/projects/${numericId}`, token);
-    return mapProject(data.data);
-  } catch {
-    return null;
-  }
-}
-
-// ─── Bid submission — DISABLED ────────────────────────────────────────────────
-
-/**
- * @deprecated DO NOT USE. Freelancehunt API v2 has NO create-bid endpoint.
- *
- * The old public route `POST /v2/projects/{id}/bids` was retired and now
- * returns HTTP 410 ("This public endpoint is no longer available due to API v2
- * deprecation"). There is NO API replacement — the v2 Bids API only supports
- * reading bids and employer/owner actions (choose, reject, revoke, restore),
- * never creating one.
- *
- * Bids must be placed through the authenticated browser session instead:
- *   import { submitBidViaBrowser } from './playwright-bid.service';
- *
- * This function is kept only so any lingering caller fails loudly and clearly
- * rather than silently hitting the dead endpoint. The signature is preserved
- * for type-compatibility with old call sites.
- */
-export async function sendFreelancehuntBid(
-  _token: string,
-  _projectIdOrUrl: string,
-  bid: {
-    text: string;
-    budget: number;
-    days: number;
-    currency?: string;
-    logFn?: (level: string, message: string, meta?: Record<string, unknown>) => void;
-  }
-): Promise<{ success: boolean; bidId?: string; strategy?: string }> {
-  bid.logFn?.(
-    'error',
-    '[FH] sendFreelancehuntBid is disabled — Freelancehunt API v2 cannot create bids (POST /v2/projects/{id}/bids returns 410). Use submitBidViaBrowser().'
+  const { error } = await client.from(TABLE).upsert(
+    {
+      user_id: userId,
+      storage_state: storageState,
+      username: username ?? null,
+      cookie_count: storageState?.cookies?.length ?? 0,
+      status: 'connected',
+      updated_at: new Date().toISOString(),
+    },
+    { onConflict: 'user_id' }
   );
-  throw new Error(
-    'BID_API_UNSUPPORTED: Freelancehunt API v2 has no create-bid endpoint (old route returns 410). Use submitBidViaBrowser() from playwright-bid.service.ts.'
-  );
+
+  return error ? { ok: false, reason: error.message } : { ok: true };
+}
+
+/** Mark a user's session expired (e.g. worker detected a login wall). */
+export async function markExpired(userId: string): Promise<void> {
+  if (!userId) return;
+  const client = getClient();
+  if (!client) return;
+  await client.from(TABLE).update({ status: 'expired' }).eq('user_id', userId);
+}
+
+/** Remove a user's session entirely (disconnect). */
+export async function deleteSession(userId: string): Promise<void> {
+  if (!userId) return;
+  const client = getClient();
+  if (!client) return;
+  await client.from(TABLE).delete().eq('user_id', userId);
 }
