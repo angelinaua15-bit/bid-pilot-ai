@@ -363,6 +363,7 @@ export async function runAutoBidCycle(
       // playwright-browser.service.ts) — NOT the API. The v2 API has no
       // create-bid endpoint; the old route returns 410.
       const result = await submitBidViaBrowser({
+        userId:     settings.userId,
         projectId:  numericId,
         projectUrl,                                  // real project page URL is required
         comment:    bid.text ?? '',
