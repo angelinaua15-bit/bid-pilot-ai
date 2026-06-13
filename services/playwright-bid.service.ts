@@ -28,6 +28,7 @@ export type BidLogFn = (
 ) => void;
 
 export interface BrowserBidInput {
+  userId: string;             // whose authenticated session to use
   projectId: string;          // numeric id, e.g. "299170"
   projectUrl: string;         // full project page URL
   comment: string;            // proposal text
@@ -181,12 +182,12 @@ export async function submitBidViaBrowser(input: BrowserBidInput): Promise<Brows
 
   let page: Page;
   try {
-    const context = await getAuthenticatedContext();
+    const context = await getAuthenticatedContext(input.userId);
     page = await context.newPage();
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err);
-    log('error', `[FH-Browser] No authenticated session — ${reason}`, { projectId });
-    // AUTH_STATE_MISSING from the shared context surfaces here
+    log('error', `[FH-Browser] No authenticated session for user ${input.userId} — ${reason}`, { projectId });
+    // AUTH_STATE_MISSING / USER_ID_REQUIRED surface here
     return { success: false, status: 'login_required', reason: `NO_SESSION: ${reason}` };
   }
 
