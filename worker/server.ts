@@ -448,28 +448,27 @@ async function handleConnectSave(sessionId: string, res: http.ServerResponse, us
     const state = JSON.parse(fs.readFileSync(savePath, 'utf-8'))
     const cookieCount = (state.cookies ?? []).length
 
+    // Mirror the session into Supabase so the Vercel status route (and the
+    // per-user bid context) can read it. Source of truth = DB, durable across
+    // Railway redeploys. Non-fatal if the DB write fails.
+    if (userId) {
+      try {
+        const { saveSession } = await import('../services/freelancehunt-session.service')
+        const result = await saveSession(userId, state, session.username)
+        if (result.ok) {
+          addLog({ level: 'success', message: `[Connect] Session mirrored to DB for user ${userId} (${cookieCount} cookies)` })
+        } else {
+          addLog({ level: 'warning', message: `[Connect] DB mirror skipped for user ${userId}: ${result.reason}` })
+        }
+      } catch (dbErr) {
+        addLog({ level: 'warning', message: `[Connect] DB mirror failed: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}` })
+      }
+    }
+
     session.status      = 'saved'
     session.cookieCount = cookieCount
 
     await browser.close().catch(() => {})
-
-    // Persist connected status to DB so the Next.js app can check it
-    if (userId) {
-      try {
-        const { upsertFreelanceAccount } = await import('../lib/db')
-        await upsertFreelanceAccount({
-          userId,
-          platform:    'freelancehunt',
-          accountName: session.username || undefined,
-          status:      'connected',
-          lastLoginAt: new Date().toISOString(),
-          lastCheckAt: new Date().toISOString(),
-        })
-        addLog({ level: 'info', message: `[Connect] DB updated — user ${userId} connected as ${session.username ?? 'unknown'}` })
-      } catch (dbErr) {
-        addLog({ level: 'warning', message: `[Connect] DB update failed (non-fatal): ${dbErr instanceof Error ? dbErr.message : String(dbErr)}` })
-      }
-    }
 
     return json(res, 200, {
       ok: true,
