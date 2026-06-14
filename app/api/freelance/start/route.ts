@@ -36,7 +36,7 @@ import { parseNewProjects } from '@/services/freelancehunt-parser.service';
 import { submitBidViaBrowser } from '@/services/playwright-bid.service';
 import { generateAutoBid } from '@/services/ai-bid.service';
 import { shouldApply } from '@/services/project-filter.service';
-import { sessionExists, resolveSessionPath } from '@/services/playwright-browser.service';
+import { getSessionStatus } from '@/services/freelancehunt-session.service';
 
 export async function POST(req: NextRequest) {
   try {
@@ -45,25 +45,20 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'userId required' }, { status: 400 });
     }
 
-    // ── Session check — must exist before starting ────────────────────────────
-    const sessionPath = resolveSessionPath(userId);
-    const hasSession  = sessionExists(userId);
+    // ── Session check — verify Supabase-backed browser session ───────────────
+    const sessionStatus = await getSessionStatus(userId);
 
-    if (!hasSession) {
+    if (!sessionStatus.connected) {
       return NextResponse.json(
         {
           ok:            false,
-          error:         'Freelancehunt browser session not found. Please reconnect your account.',
+          error:         `NO_SESSION: Freelancehunt browser session not found or expired (${sessionStatus.reason ?? 'no session'}). Reconnect your account.`,
           setupRequired: true,
-          sessionPath,
+          sessionReason: sessionStatus.reason,
         },
         { status: 401 },
       );
     }
-
-    // Inject the per-user session path so playwright-browser.service uses it
-    const prevSession = process.env.FREELANCEHUNT_SESSION_PATH;
-    process.env.FREELANCEHUNT_SESSION_PATH = sessionPath;
 
     // ── Enforce subscription plan limits ──────────────────────────────────────
     const saasUser = await getUserById(userId).catch(() => null);
@@ -71,8 +66,6 @@ export async function POST(req: NextRequest) {
       const planLimits = PLAN_LIMITS[saasUser.subscriptionPlan] ?? PLAN_LIMITS.free;
       const used = saasUser.applicationsThisMonth ?? 0;
       if (used >= planLimits.applicationsPerMonth) {
-        if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
-        else delete process.env.FREELANCEHUNT_SESSION_PATH;
         return NextResponse.json(
           {
             ok:           false,
@@ -100,14 +93,14 @@ export async function POST(req: NextRequest) {
       id:        randomUUID(),
       userId,
       level:     'info',
-      message:   `Скан запущено — парсинг через Playwright браузер (сесія: ${sessionPath})`,
+      message:   `SESSION_FOUND — підключено як ${sessionStatus.username ?? 'unknown'} (${sessionStatus.cookieCount} cookies). Запуск скану через Playwright.`,
       timestamp: now,
     }).catch(() => {});
 
     // ── 1. Parse projects from feed via browser session ───────────────────────
     let parseResult: Awaited<ReturnType<typeof parseNewProjects>>;
     try {
-      console.log('[api/freelance/start] Parsing projects via browser session', { userId, sessionPath });
+      console.log('[api/freelance/start] Parsing projects via browser session', { userId });
       parseResult = await parseNewProjects('', {}, (level, message) => {
         appendLog({ id: randomUUID(), userId, level, message, timestamp: new Date().toISOString() }).catch(() => {});
       });
@@ -125,9 +118,6 @@ export async function POST(req: NextRequest) {
         msg.includes('LOGIN_REQUIRED') ||
         msg.includes('AUTH_STATE_MISSING') ||
         msg.includes('session expired');
-
-      if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
-      else delete process.env.FREELANCEHUNT_SESSION_PATH;
 
       if (isSessionError) {
         await upsertFreelanceAccount({ userId, status: 'session_expired' });
@@ -245,24 +235,17 @@ export async function POST(req: NextRequest) {
       const days       = isNaN(daysRaw) || daysRaw <= 0 ? 14 : daysRaw;
       const budgetAmt  = (bid.price ?? 0) > 0 ? bid.price! : project.budget > 0 ? project.budget : 500;
 
-      console.log('[api/freelance/start] Submitting bid via browser', {
-        projectId:   project.id,
-        projectUrl,
-        budgetAmt,
-        days,
-        sessionPath,
-      });
-
       await appendLog({
         id:        randomUUID(),
         userId,
         level:     'info',
-        message:   `Подача заявки: "${projectTitle}" | url:${projectUrl} | price:${budgetAmt} | days:${days}`,
+        message:   `BROWSER_SUBMIT_STARTED — "${projectTitle}" | url:${projectUrl} | price:${budgetAmt} | days:${days}`,
         timestamp: new Date().toISOString(),
       }).catch(() => {});
 
       try {
         const result = await submitBidViaBrowser({
+          userId,
           projectId:  numericId,
           projectUrl,
           comment:    bid.text ?? '',
@@ -305,7 +288,7 @@ export async function POST(req: NextRequest) {
             id:        randomUUID(),
             userId,
             level:     'success' as AutoBidLog['level'],
-            message:   `Заявку НАДІСЛАНО: "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmt} | days:${days}`,
+            message:   `BID_CONFIRMED — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmt} | days:${days}`,
             timestamp: new Date().toISOString(),
           }).catch(() => {});
         } else {
@@ -383,7 +366,7 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Restore env and finalize ──────────────────────────────────────────────
+    // ── Restore env and finalize ─────────────────────────────────────────────���
     if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
     else delete process.env.FREELANCEHUNT_SESSION_PATH;
 
