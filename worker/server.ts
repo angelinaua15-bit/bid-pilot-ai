@@ -528,19 +528,39 @@ async function handleConnectLogin(req: http.IncomingMessage, res: http.ServerRes
     })
     const page = await context.newPage()
 
-    await page.goto('https://freelancehunt.com/login', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+    const LOGIN_URL = 'https://freelancehunt.com/profile/login'
+    await page.goto(LOGIN_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 })
 
     // Robust selectors with fallbacks for the login form.
-    const emailSel = 'input[name="login"], input[name="email"], input[type="email"], #login, #email'
+    const emailSel = 'input[name="login"], input[name="email"], input[name="email_or_login"], input[type="email"], #login, #email'
     const passSel  = 'input[name="password"], input[type="password"], #password'
-    await page.waitForSelector(emailSel, { timeout: 15_000 })
+
+    // If the login field never appears, report what the worker actually saw —
+    // distinguishes a wrong selector/redirect from a bot block.
+    try {
+      await page.waitForSelector(emailSel, { timeout: 15_000 })
+    } catch {
+      const diagUrl   = page.url()
+      const diagTitle = await page.title().catch(() => '')
+      const diagHtml  = await page.content().catch(() => '')
+      const blocked   = /captcha|recaptcha|hcaptcha|cf-challenge|grecaptcha|cloudflare|attention required|just a moment/i.test(diagHtml)
+      addLog({ level: 'error', message: `[Connect] Login form not found. url=${diagUrl} title="${diagTitle}" blocked=${blocked}` })
+      return json(res, 200, {
+        ok: false,
+        code: blocked ? 'CAPTCHA_REQUIRED' : 'FORM_NOT_FOUND',
+        message: blocked
+          ? 'Freelancehunt заблокував автоматичний вхід (захист від ботів). Доведеться підключати через розширення.'
+          : `Не знайшов форму входу на сторінці Freelancehunt (${diagTitle || diagUrl}). Можливо, змінилась верстка.`,
+      })
+    }
+
     await page.fill(emailSel, email)
     await page.fill(passSel, password)
 
     await Promise.allSettled([
       page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
       (async () => {
-        const btn = page.locator('button[type="submit"], input[type="submit"]').first()
+        const btn = page.locator('button[type="submit"], input[type="submit"], button:has-text("Увійти"), button:has-text("Вход"), button:has-text("Sign in"), button:has-text("Log in")').first()
         if (await btn.count()) await btn.click().catch(() => {})
         else await page.keyboard.press('Enter')
       })(),
@@ -551,20 +571,23 @@ async function handleConnectLogin(req: http.IncomingMessage, res: http.ServerRes
     const html = await page.content().catch(() => '')
 
     // Captcha / challenge → cannot auto-login.
-    if (/captcha|recaptcha|hcaptcha|cf-challenge|grecaptcha/i.test(html)) {
+    if (/captcha|recaptcha|hcaptcha|cf-challenge|grecaptcha|cloudflare|attention required/i.test(html)) {
       return json(res, 200, {
         ok: false,
         code: 'CAPTCHA_REQUIRED',
-        message: 'Freelancehunt показав капчу — автоматичний вхід неможливий. Спробуйте пізніше.',
+        message: 'Freelancehunt показав капчу — автоматичний вхід неможливий.',
       })
     }
 
+    // Success = navigated away from the login page into an authenticated area.
+    const stillOnLogin = /\/login/i.test(url)
     const loggedIn =
-      !url.includes('/login') &&
-      (/\/my\b|\/freelancer|\/employer|\/profile/i.test(url) || /logout|вийти|log\s*out/i.test(html))
+      !stillOnLogin &&
+      (/\/my\b|\/my\/|\/freelancer|\/employer|\/dashboard/i.test(url) || /logout|вийти|выход|log\s*out/i.test(html))
 
     if (!loggedIn) {
-      return json(res, 200, { ok: false, code: 'INVALID_CREDENTIALS', message: 'Невірний email або пароль Freelancehunt.' })
+      addLog({ level: 'warning', message: `[Connect] Login not confirmed. url=${url}` })
+      return json(res, 200, { ok: false, code: 'INVALID_CREDENTIALS', message: 'Невірний email/пароль або потрібне підтвердження входу. Перевірте дані.' })
     }
 
     const username =
