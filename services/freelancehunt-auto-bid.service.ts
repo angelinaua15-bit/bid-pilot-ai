@@ -156,33 +156,17 @@ export async function runAutoBidCycle(
     meta: { dailyUsed, dailyLimit: settings.dailyLimit, userId: settings.userId },
   });
 
-  // ── Pre-flight — verify browser session mode ──────────────────────────────
+  // ── Pre-flight — validate API token ─────────────────────────────────────────
+  const apiToken = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (isMockMode) {
     log(logs, 'warning', '[Pre-flight] MOCK mode (FREELANCEHUNT_MOCK=1) — bids will not be submitted to Freelancehunt');
   } else {
-    // Check that we have a userId and a Supabase-backed session
-    const userId = settings.userId;
-    if (!userId) {
-      log(logs, 'error', '[Pre-flight] FAILED: settings.userId is missing — cannot load per-user browser session. NO_SESSION');
+    if (!apiToken) {
+      log(logs, 'error', '[Pre-flight] FAILED: FREELANCEHUNT_TOKEN is not set. Add it to environment variables.');
       errors++;
       return { logs, bidsSubmitted, bidsSkipped, errors };
     }
-    // Check session existence via Supabase (non-fatal here — bid loop will surface LOGIN_REQUIRED)
-    try {
-      const { getSessionStatus } = await import('./freelancehunt-session.service');
-      const sess = await getSessionStatus(userId);
-      if (sess.connected) {
-        log(logs, 'success', `[Pre-flight] SESSION_FOUND — user ${userId}, username: ${sess.username ?? 'unknown'}, cookies: ${sess.cookieCount}`);
-      } else {
-        log(logs, 'error', `[Pre-flight] NO_SESSION — ${sess.reason ?? 'no session in DB'}. User must reconnect Freelancehunt account.`);
-        errors++;
-        return { logs, bidsSubmitted, bidsSkipped, errors };
-      }
-    } catch (sessErr) {
-      // If Supabase isn't configured, warn but continue — the bid service will error per-project
-      log(logs, 'warning', `[Pre-flight] Could not verify session from DB: ${sessErr instanceof Error ? sessErr.message : String(sessErr)}. Proceeding anyway.`);
-    }
-    log(logs, 'success', '[Pre-flight] Browser-session mode — bids submitted via Playwright (no deprecated API)');
+    log(logs, 'success', `[Pre-flight] FREELANCEHUNT_TOKEN is set (${apiToken.length} chars) — submitting bids via REST API POST /v2/projects/{id}/bids`);
   }
 
   // ── Step logger — pipes parser/submission logs into this cycle's log[] ──────
@@ -345,8 +329,8 @@ export async function runAutoBidCycle(
       );
     }
 
-    // ── 5. Submit bid via browser session (Playwright) ───────────────────────
-    // API POST /v2/projects/{id}/bids returns HTTP 410 — browser submit only.
+    // ── 5. Submit bid via Freelancehunt REST API ──────────────────────────────
+    // POST /v2/projects/{id}/bids — official documented endpoint
     // Parse days from deadline string: "14 днів" → 14, "21 день" → 21
     const daysRaw = parseInt(String(bid.deadline ?? '14'), 10);
     const days    = isNaN(daysRaw) || daysRaw <= 0 ? 14 : daysRaw;
@@ -370,15 +354,24 @@ export async function runAutoBidCycle(
     }
 
     log(logs, 'info',
-      `BROWSER_SUBMIT_STARTED — "${projectTitle}" | id:${projectIdentifier} | budget:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | user:${settings.userId}`,
+      `[${i + 1}/${filtered.length}] Submitting via browser session — "${projectTitle}" | id:${projectIdentifier} | budget:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days}`,
       { projectId: project.id, projectTitle }
     );
 
     try {
+      // Browser submit needs the real project page URL to open the bid form.
+      // Without it, do not call the browser — surface the exact reason.
+      if (!projectUrl) {
+        throw new Error('MISSING_PROJECT_URL: project has no URL to open the bid page');
+      }
+
+      // Submit via the AUTHENTICATED BROWSER session (storageState reused from
+      // playwright-browser.service.ts) — NOT the API. The v2 API has no
+      // create-bid endpoint; the old route returns 410.
       const result = await submitBidViaBrowser({
         userId:     settings.userId,
         projectId:  numericId,
-        projectUrl,                                  // real project page URL is required
+        projectUrl,                                  // narrowed to string by the guard above
         comment:    bid.text ?? '',
         amount:     budgetAmount!,
         days,
@@ -426,7 +419,7 @@ export async function runAutoBidCycle(
         }).catch(() => {});
 
         log(logs, 'success',
-          `BID_CONFIRMED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
+          `SUBMITTED [${i + 1}/${filtered.length}] — "${projectTitle}" | bidId:${result.bidId ?? 'n/a'} | price:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days} | url:${projectUrl}`,
           {
             projectId: project.id, projectTitle, bidId: result.bidId,
             meta: { price: budgetAmount, deadline: days, matchScore: project.matchScore, projectUrl, strategy: 'browser' },
@@ -456,7 +449,7 @@ export async function runAutoBidCycle(
         const statusToCode: Record<string, string> = {
           already_bid:    'ALREADY_BID',
           project_closed: 'PROJECT_CLOSED',
-          login_required: 'LOGIN_REQUIRED',
+          login_required: 'INVALID_TOKEN',
           failed:         'BROWSER_SUBMIT_FAILED',
         };
         const prefix = statusToCode[result.status] ?? 'BROWSER_SUBMIT_FAILED';
@@ -525,11 +518,12 @@ export async function runAutoBidCycle(
         'FORM_FIELD_MISSING',
         'VALIDATION_ERROR',
         'UNCONFIRMED',
+        'MISSING_PROJECT_URL',
       ];
       const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
 
       const ERROR_LABELS: Record<string, string> = {
-        INVALID_TOKEN:    'Невірна або відсутня сесія браузера',
+        INVALID_TOKEN:    'Невірний або відсутній FREELANCEHUNT_TOKEN',
         FORBIDDEN:        'Доступ заборонено — акаунт може бути обмежений',
         NOT_FOUND:        'Проєкт не знайдено (404)',
         RATE_LIMITED:     'Перевищено ліміт запитів — зачекайте',
@@ -549,6 +543,7 @@ export async function runAutoBidCycle(
         FORM_FIELD_MISSING:    'Поле форми не знайдено (перевірте селектори)',
         VALIDATION_ERROR:      'Форма повернула помилку валідації',
         UNCONFIRMED:           'Сабміт не підтверджено — заявку не зараховано',
+        MISSING_PROJECT_URL:   'Немає URL проєкту — неможливо відкрити форму заявки',
         UNKNOWN_ERROR:    'Невідома помилка',
       };
       const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);
