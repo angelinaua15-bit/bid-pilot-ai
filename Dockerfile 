@@ -1,33 +1,13 @@
-# ── BidPilot Worker (Railway) ────────────────────────────────────────────────
-# Single-stage image so the Chromium binary AND its system libraries live in the
-# SAME image that runs at runtime (this is what fixes "libglib-2.0.so.0: cannot
-# open shared object file" — Railpack installed those libs only at build time).
-#
-# Base node:22-bookworm-slim is always available (no version-specific image tag
-# to get wrong), and `playwright install --with-deps chromium` apt-installs every
-# required library on Debian bookworm.
-FROM node:22-bookworm-slim
+FROM mcr.microsoft.com/playwright:v1.60.0-jammy
 
 WORKDIR /app
 
-# Keep the browser next to the playwright package. This MATCHES the
-# PLAYWRIGHT_BROWSERS_PATH=0 you already set on Railway, and makes build+runtime
-# agree regardless of whether Railway injects that var during the image build.
-ENV PLAYWRIGHT_BROWSERS_PATH=0
+COPY package.json pnpm-lock.yaml* package-lock.json* ./
 
-# Install ALL dependencies. tsx is a devDependency the worker needs to run, so do
-# NOT prune dev deps here.
-COPY package.json package-lock.json* pnpm-lock.yaml* yarn.lock* ./
 RUN npm install --legacy-peer-deps
 
-# Copy the whole project (worker imports ../services, ../lib, ../types).
 COPY . .
 
-# Chromium + ALL its system libraries into THIS image (apt runs as root here).
-RUN npx playwright install --with-deps chromium
+RUN npm run build
 
-ENV NODE_ENV=production
-
-# Railway injects PORT; the server listens on 0.0.0.0:$PORT.
-# index.ts also starts the multi-user auto-loop. (server.ts = HTTP only.)
-CMD ["npx", "tsx", "worker/index.ts"]
+CMD ["npm", "run", "worker:start"]
