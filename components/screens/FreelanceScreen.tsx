@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Wifi, WifiOff, RefreshCw, Settings2, Trash2,
-  CheckCircle2, XCircle, ChevronDown, ChevronUp,
+  CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp,
   Play, Square, Monitor, Loader2, Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -125,60 +125,50 @@ type ConnectStep = 'idle' | 'connecting' | 'waiting' | 'saving' | 'connected' | 
 function ConnectPanel({ userId, account, onRefresh }: {
   userId?: string; account: FreelanceAccount | null; onRefresh: () => void;
 }) {
-  const [token, setToken]         = useState<string | null>(null);
-  const [gettingToken, setGetting] = useState(false);
-  const [copied, setCopied]       = useState(false);
+  const [step, setStep]           = useState<ConnectStep>('idle');
+  const [email, setEmail]         = useState('');
+  const [password, setPassword]   = useState('');
+  const [username, setUsername]   = useState<string | null>(null);
   const [error, setError]         = useState<string | null>(null);
   const [workerBusy, setWorkerBusy] = useState(false);
   const [runResult, setRunResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [jobStats, setJobStats]   = useState<{ found: number; submitted: number; skipped: number; failed: number } | null>(null);
 
-  const isConnected = account?.status === 'connected';
+  // Connected when the saved session status is 'connected', or right after a successful login.
+  const isConnected = account?.status === 'connected' || step === 'connected';
+  const busy = step === 'connecting';
 
-  // While a code is active and not yet connected, poll status so the panel
-  // flips to "Підключено" automatically once the extension uploads the session.
-  useEffect(() => {
-    if (!token || isConnected) return;
-    const t = setInterval(() => onRefresh(), 4000);
-    return () => clearInterval(t);
-  }, [token, isConnected, onRefresh]);
-
-  // Once connected, hide the code UI.
-  useEffect(() => { if (isConnected) setToken(null); }, [isConnected]);
-
-  // ── Get a one-time connect code ──────────────────────────────────────────
-  const getToken = async () => {
-    if (!userId) { setError('Не вдалося визначити користувача'); return; }
+  // ── Credential login (Variant 1): worker logs in headlessly & saves session ──
+  const handleConnect = async () => {
+    if (!userId) { setError('Не вдалося визначити користувача'); setStep('error'); return; }
+    if (!email || !password) { setError('Введіть email і пароль Freelancehunt'); setStep('error'); return; }
     haptic.medium();
-    setGetting(true);
+    setStep('connecting');
     setError(null);
     try {
-      const res = await fetch('/api/freelancehunt/connect-token', {
+      const res = await fetch('/api/freelancehunt/connect', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
-      }).then((r) => r.json()).catch(() => ({ ok: false }));
+        body: JSON.stringify({ userId, email, password }),
+      }).then((r) => r.json()).catch(() => ({ ok: false, message: 'Помилка мережі' }));
 
-      if (res.ok && res.token) {
-        setToken(res.token);
+      if (res.ok) {
+        setUsername(res.username ?? null);
+        setPassword('');
+        setStep('connected');
         haptic.success();
+        onRefresh();
+        setTimeout(() => onRefresh(), 2000); // second refresh after DB propagation
       } else {
-        setError('Не вдалося отримати код. Спробуйте ще раз.');
+        setError(res.message ?? 'Не вдалося підключитися. Спробуйте ще раз.');
+        setStep('error');
         haptic.error();
       }
     } catch (err) {
-      setError(err instanceof Error ? err.message : 'Помилка');
+      setError(err instanceof Error ? err.message : 'Помилка підключення');
+      setStep('error');
       haptic.error();
-    } finally { setGetting(false); }
-  };
-
-  const copyToken = async () => {
-    if (!token) return;
-    try {
-      await navigator.clipboard.writeText(token);
-      setCopied(true);
-      setTimeout(() => setCopied(false), 2000);
-    } catch { /* clipboard may be blocked — user can select manually */ }
+    }
   };
 
   // ── Disconnect ────────────────────────────────────────────────────────────
@@ -189,7 +179,8 @@ function ConnectPanel({ userId, account, onRefresh }: {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId }),
     }).catch(() => {});
-    setToken(null);
+    setStep('idle');
+    setUsername(null);
     setError(null);
     onRefresh();
   };
@@ -225,7 +216,7 @@ function ConnectPanel({ userId, account, onRefresh }: {
           msg.includes('NO_SESSION') || msg.includes('LOGIN_REQUIRED') || msg.includes('Reconnect');
         setRunResult({ ok: false, msg: isSessionGone ? 'Потрібно перепідключити акаунт' : msg });
         haptic.error();
-        if (isSessionGone) onRefresh();
+        if (isSessionGone) { setStep('expired'); onRefresh(); }
       }
       onRefresh();
     } finally { setWorkerBusy(false); }
@@ -234,15 +225,16 @@ function ConnectPanel({ userId, account, onRefresh }: {
   const statusMap = {
     connected:    { icon: Wifi,    cls: 'text-green-400',         bg: 'bg-green-500/10 border-green-500/20',   label: 'Підключено' },
     disconnected: { icon: WifiOff, cls: 'text-muted-foreground',  bg: 'bg-secondary border-border',            label: 'Не підключено' },
+    expired:      { icon: Clock,   cls: 'text-yellow-400',        bg: 'bg-yellow-500/10 border-yellow-500/20', label: 'Сесія закінчилась' },
     error:        { icon: XCircle, cls: 'text-red-400',           bg: 'bg-red-500/10 border-red-500/20',       label: 'Помилка' },
   } as const;
 
   const effectiveStatus = isConnected ? 'connected'
-    : error ? 'error'
-    : (account?.status === 'connected' ? 'connected' : 'disconnected') as keyof typeof statusMap;
+    : step === 'expired' ? 'expired'
+    : step === 'error' ? 'error'
+    : (account?.status ?? 'disconnected') as keyof typeof statusMap;
   const s    = statusMap[effectiveStatus] ?? statusMap.disconnected;
   const Icon = s.icon;
-  const waiting = !!token && !isConnected;
 
   return (
     <div className="flex flex-col gap-4">
@@ -253,38 +245,46 @@ function ConnectPanel({ userId, account, onRefresh }: {
           'w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0',
           isConnected ? 'bg-green-500/20' : 'bg-secondary',
         )}>
-          {waiting
+          {busy
             ? <Loader2 size={16} className="text-primary animate-spin" />
             : <Icon size={16} className={s.cls} />
           }
         </div>
         <div className="flex-1 min-w-0">
           <p className="text-sm font-semibold">
-            {isConnected ? `Підключено${account?.accountName ? ` — @${account.accountName}` : ''}`
-              : waiting   ? 'Очікуємо підключення…'
-              : s.label}
+            {busy                 && 'Входимо у Freelancehunt...'}
+            {step === 'connected' && `Підключено${username ? ` — ${username}` : ''}`}
+            {step === 'error'     && 'Помилка'}
+            {step === 'expired'   && 'Потрібно перепідключити'}
+            {step === 'idle'      && s.label}
           </p>
           <p className="text-[11px] text-muted-foreground truncate mt-0.5">
-            {isConnected ? (account?.lastCheckAt
-                ? `Оновлено: ${new Date(account.lastCheckAt).toLocaleString('uk-UA')}`
-                : 'Сесія активна')
-              : waiting ? 'Завершіть кроки в розширенні Chrome'
-              : 'Підключіть акаунт через розширення для подачі заявок'}
+            {busy                 && 'Worker входить у ваш акаунт…'}
+            {step === 'connected' && (account?.lastCheckAt
+              ? `Оновлено: ${new Date(account.lastCheckAt).toLocaleString('uk-UA')}`
+              : 'Сесія активна')}
+            {step === 'error'     && (error ?? 'Помилка з\'єднання')}
+            {step === 'expired'   && 'Сесія закінчилась. Підключіться знову.'}
+            {step === 'idle'      && (isConnected
+              ? (account?.accountName ? `@${account.accountName}` : 'Сесія активна')
+              : 'Увійдіть акаунтом Freelancehunt для автоматичної подачі заявок')}
           </p>
         </div>
-        {isConnected && <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />}
+        {isConnected && !busy && (
+          <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
+        )}
       </div>
 
       {/* Error */}
-      {error && !isConnected && (
+      {(step === 'error' || step === 'expired') && error && (
         <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-3 flex items-start gap-2">
           <XCircle size={13} className="text-red-400 flex-shrink-0 mt-0.5" />
           <p className="text-[11px] text-red-400 leading-relaxed">{error}</p>
         </div>
       )}
 
-      {/* Auto-bid trigger — only when connected */}
-      {isConnected && (
+      {/* Auto-bid trigger — only when session connected */}
+      {isConnected && !busy && (
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
             <button
@@ -326,70 +326,64 @@ function ConnectPanel({ userId, account, onRefresh }: {
         </div>
       )}
 
-      {/* Connect via extension — when not connected */}
-      {!isConnected && (
+      {/* Credential login form — when not connected */}
+      {!isConnected && !busy && (
         <div className="rounded-2xl border border-border bg-card p-4 flex flex-col gap-3">
-          <div className="flex items-center gap-2">
-            <Monitor size={14} className="text-primary flex-shrink-0" />
-            <p className="text-xs font-semibold">Підключити через розширення</p>
+          <p className="text-xs font-semibold">Підключити акаунт Freelancehunt</p>
+
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Email або логін</label>
+            <input
+              type="text"
+              inputMode="email"
+              autoComplete="username"
+              value={email}
+              onChange={(e) => setEmail(e.target.value)}
+              placeholder="you@example.com"
+              className="w-full px-3 py-2.5 rounded-xl bg-secondary border border-border text-sm outline-none focus:border-primary"
+            />
           </div>
 
-          {!token ? (
-            <>
-              <p className="text-[11px] text-muted-foreground leading-relaxed">
-                Вхід виконується у вашому браузері, тож Freelancehunt не блокує його.
-                Натисніть «Отримати код», далі завершіть підключення в розширенні BidPilot у Chrome.
-              </p>
-              <div className="flex items-start gap-2 rounded-xl bg-secondary/60 border border-border p-3">
-                <Shield size={12} className="text-primary flex-shrink-0 mt-0.5" />
-                <p className="text-[11px] text-muted-foreground leading-relaxed">
-                  Пароль ми не бачимо — зберігаються лише cookies сесії з вашого браузера.
-                </p>
-              </div>
-              <button
-                onClick={getToken}
-                disabled={!userId || gettingToken}
-                className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-              >
-                {gettingToken ? <Loader2 size={13} className="animate-spin" /> : <Monitor size={13} />}
-                {gettingToken ? 'Готуємо код…' : 'Отримати код підключення'}
-              </button>
-            </>
-          ) : (
-            <>
-              <p className="text-[11px] text-muted-foreground leading-relaxed">Ваш код підключення (дійсний 15 хв):</p>
-              <button
-                onClick={copyToken}
-                className="w-full rounded-xl bg-secondary border border-border px-3 py-2.5 flex items-center justify-between gap-2 active:scale-[0.99] transition-all"
-              >
-                <span className="text-[11px] font-mono text-foreground truncate">{token}</span>
-                <span className={cn('text-[10px] font-semibold flex-shrink-0', copied ? 'text-green-400' : 'text-primary')}>
-                  {copied ? 'Скопійовано' : 'Копіювати'}
-                </span>
-              </button>
+          <div className="flex flex-col gap-1">
+            <label className="text-[11px] font-medium text-muted-foreground">Пароль</label>
+            <input
+              type="password"
+              autoComplete="current-password"
+              value={password}
+              onChange={(e) => setPassword(e.target.value)}
+              placeholder="••••••••"
+              className="w-full px-3 py-2.5 rounded-xl bg-secondary border border-border text-sm outline-none focus:border-primary"
+            />
+          </div>
 
-              <ol className="flex flex-col gap-1.5 mt-1 text-[11px] text-muted-foreground leading-relaxed list-decimal list-inside">
-                <li>Встанови розширення <b>BidPilot</b> у Chrome (один раз).</li>
-                <li>Увійди на <b>freelancehunt.com</b> у тому самому Chrome.</li>
-                <li>Відкрий розширення, встав цей код і натисни <b>«Підключити»</b>.</li>
-              </ol>
+          <div className="flex items-start gap-2 rounded-xl bg-secondary/60 border border-border p-3">
+            <Shield size={12} className="text-primary flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Пароль використовується один раз для входу і не зберігається — зберігаються лише cookies сесії.
+            </p>
+          </div>
 
-              <div className="flex items-center justify-center gap-2 py-1 text-[11px] text-muted-foreground">
-                <Loader2 size={12} className="animate-spin" /> Очікуємо підключення з розширення…
-              </div>
-              <button
-                onClick={() => { setToken(null); setError(null); }}
-                className="text-[11px] text-muted-foreground hover:text-foreground transition-colors self-center"
-              >
-                Скасувати
-              </button>
-            </>
-          )}
+          <button
+            onClick={handleConnect}
+            disabled={!userId || !email || !password}
+            className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
+          >
+            <Monitor size={13} />
+            Підключити
+          </button>
         </div>
       )}
 
-      {/* Disconnect — when connected */}
-      {isConnected && (
+      {/* Connecting spinner */}
+      {busy && (
+        <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+          <Loader2 size={13} className="animate-spin" />
+          Входимо у Freelancehunt… (10–20 секунд)
+        </div>
+      )}
+
+      {/* Disconnect — when connected or expired */}
+      {(isConnected || step === 'expired') && !busy && (
         <div className="flex items-center gap-3">
           <button
             onClick={handleDisconnect}
