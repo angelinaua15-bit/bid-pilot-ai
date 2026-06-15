@@ -22,6 +22,7 @@ import { randomUUID } from 'crypto';
 import { PLAN_LIMITS } from '@/types';
 import { config } from '@/lib/config';
 import { getSessionStatus } from '@/services/freelancehunt-session.service';
+import { toStructuredError, userMessageForCode } from '@/lib/playwright-errors';
 
 export async function POST(req: NextRequest) {
   try {
@@ -122,11 +123,15 @@ export async function POST(req: NextRequest) {
       submitted,
       skipped,
       errors: errCount > 0 ? errCount : undefined,
+      // Structured failure code/message (e.g. WORKER_REQUIRED / PLAYWRIGHT_NOT_INSTALLED)
+      code: result.ok ? undefined : (result.code ?? 'UNKNOWN'),
+      message: result.ok ? undefined : (result.message ?? userMessageForCode(result.code)),
       strategy: 'browser',
       workerMode: true,
     });
   } catch (err) {
     console.error('[api/freelance/start] error:', err);
-    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });
+    const e = toStructuredError(err);
+    return NextResponse.json({ ok: false, code: e.code, message: e.message }, { status: 200 });
   }
 }
