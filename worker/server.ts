@@ -51,6 +51,7 @@ interface ConnectSession {
   username?: string
   cookieCount?: number
   error?: string
+  code?: string
   createdAt: string
   // eslint-disable-next-line @typescript-eslint/no-explicit-any
   page?: any    // Playwright Page reference — closed after save
@@ -332,6 +333,17 @@ async function handleConnectStart(res: http.ServerResponse) {
   // Launch browser async — do not await here so we return the sessionId immediately
   ;(async () => {
     try {
+      // Pre-flight: never launch a missing browser — return a structured error.
+      const { isChromiumInstalled } = await import('../services/playwright-browser.service')
+      const { toStructuredError, PlaywrightNotInstalledError } = await import('../lib/playwright-errors')
+      if (!isChromiumInstalled()) {
+        const e = toStructuredError(new PlaywrightNotInstalledError())
+        session.status = 'error'
+        session.error  = e.message
+        session.code   = e.code
+        addLog({ level: 'error', message: `[Connect] ${e.code}: ${e.message}` })
+        return
+      }
       const { chromium } = await import('playwright')
       const browser = await chromium.launch({
         headless: true, // must be headless in Railway/production (no display server)
@@ -403,9 +415,12 @@ async function handleConnectStart(res: http.ServerResponse) {
       }, 2_000)
 
     } catch (err) {
+      const { toStructuredError } = await import('../lib/playwright-errors')
+      const e = toStructuredError(err)
       session.status = 'error'
-      session.error  = err instanceof Error ? err.message : String(err)
-      addLog({ level: 'error', message: `[Connect] Browser launch error: ${session.error}` })
+      session.error  = e.message
+      session.code   = e.code
+      addLog({ level: 'error', message: `[Connect] ${e.code}: ${e.message}` })
     }
   })()
 
@@ -422,6 +437,7 @@ function handleConnectStatus(sessionId: string, res: http.ServerResponse) {
     status:    session.status,
     username:  session.username,
     error:     session.error,
+    code:      session.code,
     createdAt: session.createdAt,
   })
 }
@@ -611,13 +627,15 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
       if (m) state.counters.parsed = Number(m[1])
     }
 
+    // Remember the previous session-env BEFORE try so `finally` can restore it.
+    const prevSessionEnv = process.env.FREELANCEHUNT_SESSION_PATH
+
     try {
       const { getFreelanceFilter, getFreelanceAccount, getSettings } = await import('../lib/db')
       const { runAutoBidCycle } = await import('../services/freelancehunt-auto-bid.service')
 
       // Resolve per-user session path and inject it for this cycle
       const sessionPath = resolveUserSessionPath(userId)
-      const prevSessionEnv = process.env.FREELANCEHUNT_SESSION_PATH
       process.env.FREELANCEHUNT_SESSION_PATH = sessionPath
 
       // Fetch user-specific settings
@@ -668,10 +686,6 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
       const summary = `[Worker:${userId}] Cycle done — submitted: ${state.counters.submitted} | skipped: ${state.counters.skipped} | failed: ${state.counters.failed}`
       addLog({ level: state.counters.submitted > 0 ? 'success' : 'info', message: summary })
 
-      // Restore session env
-      if (prevSessionEnv !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSessionEnv
-      else delete process.env.FREELANCEHUNT_SESSION_PATH
-
       return json(res, 200, {
         ok:           true,
         userId,
@@ -682,11 +696,16 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
         logs:          result.logs ?? cycleLogs,
       })
     } catch (err) {
-      const message = err instanceof Error ? err.message : String(err)
-      state.lastError = message
-      stepLog('error', `[Worker:${userId}] Cycle failed: ${message}`)
-      return json(res, 500, { ok: false, userId, error: message, logs: cycleLogs })
+      const { toStructuredError } = await import('../lib/playwright-errors')
+      const se = toStructuredError(err)
+      state.lastError = se.message
+      stepLog('error', `[Worker:${userId}] Cycle failed: ${se.code} — ${se.message}`)
+      return json(res, 200, { ok: false, success: false, userId, code: se.code, message: se.message, logs: cycleLogs })
     } finally {
+      // Always restore the session env — prevents leaking one user's session
+      // path to the next cycle when an error is thrown mid-run.
+      if (prevSessionEnv !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSessionEnv
+      else delete process.env.FREELANCEHUNT_SESSION_PATH
       state.cycleRunning  = false
       state.stopRequested = false
     }
@@ -749,9 +768,10 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
       logs:          result.logs ?? cycleLogs,
     })
   } catch (err) {
-    const message = err instanceof Error ? err.message : String(err)
-    stepLog('error', `Cycle failed: ${message}`)
-    return json(res, 500, { ok: false, error: message, logs: cycleLogs })
+    const { toStructuredError } = await import('../lib/playwright-errors')
+    const se = toStructuredError(err)
+    stepLog('error', `Cycle failed: ${se.code} — ${se.message}`)
+    return json(res, 200, { ok: false, success: false, code: se.code, message: se.message, logs: cycleLogs })
   } finally {
     cycleRunning  = false
     stopRequested = false
@@ -849,6 +869,19 @@ const server = http.createServer(async (req, res) => {
 
   // ── /health/playwright — launches real Chromium, verifies browser works ──────
   if (method === 'GET' && (pathname === '/health/playwright' || pathname === '/api/health/playwright')) {
+    // Pre-flight presence check — structured, never a raw stack trace.
+    {
+      const { isChromiumInstalled } = await import('../services/playwright-browser.service')
+      if (!isChromiumInstalled()) {
+        return json(res, 200, {
+          ok: false,
+          service: 'worker',
+          browser: 'missing',
+          code: 'PLAYWRIGHT_NOT_INSTALLED',
+          message: 'Chromium не встановлений на worker',
+        })
+      }
+    }
     try {
       const { chromium } = await import('playwright')
       const b = await chromium.launch({
@@ -871,18 +904,15 @@ const server = http.createServer(async (req, res) => {
         chromiumVersion: version,
       })
     } catch (e) {
-      const msg = e instanceof Error ? e.message : String(e)
-      const isDepsMissing = msg.includes('libglib') || msg.includes('cannot open shared object') || msg.includes('error while loading')
-      console.error(`[health/playwright] Chromium launch FAILED: ${msg}`)
-      return json(res, 500, {
+      const { toStructuredError } = await import('../lib/playwright-errors')
+      const se = toStructuredError(e)
+      console.error(`[health/playwright] Chromium launch FAILED: ${se.code}`)
+      return json(res, 200, {
         ok: false,
         service: 'worker',
         browser: 'error',
-        code: isDepsMissing ? 'MISSING_SYSTEM_DEPS' : 'CHROMIUM_LAUNCH_FAILED',
-        error: msg,
-        hint: isDepsMissing
-          ? 'System libraries missing. Ensure Dockerfile uses mcr.microsoft.com/playwright image and runs "npx playwright install --with-deps chromium" after npm install.'
-          : 'Chromium binary not found or failed to start. Run "npx playwright install chromium" inside the container.',
+        code: se.code,
+        message: se.message,
       })
     }
   }
