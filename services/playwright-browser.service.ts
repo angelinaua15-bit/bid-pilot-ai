@@ -24,6 +24,12 @@ import {
   markExpired,
   type PlaywrightStorageState,
 } from './freelancehunt-session.service';
+import {
+  PlaywrightNotInstalledError,
+  WorkerRequiredError,
+  isVercelRuntime,
+  isMissingBrowserError,
+} from '../lib/playwright-errors';
 
 // ─── Configuration ────────────────────────────────────────────────────────────
 
@@ -83,41 +89,43 @@ let _browser: Browser | null = null;
 let _browserLaunching: Promise<Browser> | null = null;
 const _userContexts = new Map<string, BrowserContext>();
 
-let _chromiumInstalled = false;
-
-/** True when the launch error means the Chromium binary is simply not installed. */
-function looksLikeMissingBrowser(err: unknown): boolean {
-  const m = String(err instanceof Error ? err.message : err);
-  return m.includes("Executable doesn't exist") || m.includes('playwright install');
+/** Public Chromium-presence check (used by ensureBrowser and health endpoints). */
+export function isChromiumInstalled(): boolean {
+  try {
+    const execPath = chromium.executablePath();
+    return Boolean(execPath) && fs.existsSync(execPath);
+  } catch {
+    return false;
+  }
 }
 
 /**
- * Self-heal: download Chromium into Playwright's cache at runtime. Needed when
- * the worker host was NOT built with `npx playwright install` (e.g. Railway
- * nixpacks fallback). Runs once; requires network + writable FS (Railway has both).
+ * Launch (or reuse) the shared headless Chromium. Never auto-installs and never
+ * leaks a raw Playwright stack trace:
+ *   - on Vercel              → WorkerRequiredError       (Playwright runs on the worker only)
+ *   - Chromium binary missing → PlaywrightNotInstalledError
+ *   - launch crash            → original error (mapped to BROWSER_LAUNCH_FAILED upstream)
+ * Every caller wraps this; the worker server converts the typed errors into
+ * structured { success, code, message } responses.
  */
-async function installChromiumOnce(): Promise<void> {
-  if (_chromiumInstalled) return;
-  const { execSync } = await import('node:child_process');
-  console.log('[playwright] Chromium missing — running `npx playwright install chromium`…');
-  execSync('npx playwright install chromium', { stdio: 'inherit' });
-  _chromiumInstalled = true;
-  console.log('[playwright] Chromium installed.');
-}
-
 async function ensureBrowser(): Promise<Browser> {
   if (_browser) return _browser;
   if (_browserLaunching) return _browserLaunching;
+
+  // Hard guard: Playwright must NEVER launch on Vercel.
+  if (isVercelRuntime()) throw new WorkerRequiredError();
+
+  // Pre-flight: structured error instead of a raw "Executable doesn't exist".
+  if (!isChromiumInstalled()) throw new PlaywrightNotInstalledError();
 
   _browserLaunching = (async (): Promise<Browser> => {
     let b: Browser;
     try {
       b = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
     } catch (err) {
-      if (!looksLikeMissingBrowser(err)) throw err;
-      // Chromium binary is missing — download it once, then retry the launch.
-      await installChromiumOnce();
-      b = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+      _browserLaunching = null;
+      if (isMissingBrowserError(err)) throw new PlaywrightNotInstalledError();
+      throw err; // launch crash (missing libs) → BROWSER_LAUNCH_FAILED upstream
     }
     b.on('disconnected', () => {
       _browser = null;

@@ -49,6 +49,8 @@ export interface WorkerRunResult {
   errors: number;
   logs?: WorkerLog[];
   error?: string;
+  code?: string;
+  message?: string;
 }
 
 export interface WorkerLog {
@@ -146,10 +148,23 @@ export async function getWorkerStatus(): Promise<WorkerStatus> {
 export async function startWorkerAutoBid(
   payload?: Record<string, unknown>,
 ): Promise<WorkerRunResult> {
-  return workerFetch<WorkerRunResult>('/auto-bid/start', {
-    method: 'POST',
-    body: JSON.stringify(payload ?? {}),
-  }, 120_000); // 2-min timeout — cycle can take a while
+  const base: WorkerRunResult = { ok: false, bidsSubmitted: 0, bidsSkipped: 0, errors: 0 };
+
+  // Worker not configured → Playwright cannot run on Vercel → WORKER_REQUIRED.
+  if (!config.worker.url) {
+    return { ...base, code: 'WORKER_REQUIRED', message: 'Worker не налаштований. Chromium не встановлено на Railway.' };
+  }
+
+  try {
+    return await workerFetch<WorkerRunResult>('/auto-bid/start', {
+      method: 'POST',
+      body: JSON.stringify(payload ?? {}),
+    }, 120_000); // 2-min timeout — cycle can take a while
+  } catch (err) {
+    // Never leak a raw stack to the caller — return a structured result.
+    const msg = err instanceof Error ? err.message : String(err);
+    return { ...base, code: 'WORKER_REQUIRED', message: 'Worker недоступний.', error: msg.slice(0, 200) };
+  }
 }
 
 /** POST /auto-bid/stop — sends emergency stop to the worker. */
