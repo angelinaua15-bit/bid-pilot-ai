@@ -226,6 +226,21 @@ function readBody(req: http.IncomingMessage): Promise<Record<string, unknown>> {
   })
 }
 
+/** Self-contained Playwright error classifier (no external deps). */
+function classifyPwError(err: unknown): { code: string; message: string } {
+  const m = String(err instanceof Error ? err.message : err)
+  if (m.includes("Executable doesn't exist") || m.includes('playwright install') || m.includes('ms-playwright')) {
+    return { code: 'PLAYWRIGHT_NOT_INSTALLED', message: 'Chromium не встановлено на worker.' }
+  }
+  if (m.includes('libglib') || m.includes('shared libraries') || m.includes('shared object')) {
+    return { code: 'BROWSER_LAUNCH_FAILED', message: 'Не вдалося запустити браузер на worker (бракує системних бібліотек).' }
+  }
+  if (/timeout/i.test(m)) {
+    return { code: 'TIMEOUT', message: 'Операція не завершилась вчасно. Спробуйте ще раз.' }
+  }
+  return { code: 'UNKNOWN', message: 'Сталася помилка автоматизації.' }
+}
+
 // ─── Auto-loop ────────────────────────────────────────────────────────────────
 
 async function runAutoLoop() {
@@ -333,17 +348,6 @@ async function handleConnectStart(res: http.ServerResponse) {
   // Launch browser async — do not await here so we return the sessionId immediately
   ;(async () => {
     try {
-      // Pre-flight: never launch a missing browser — return a structured error.
-      const { isChromiumInstalled } = await import('../services/playwright-browser.service')
-      const { toStructuredError, PlaywrightNotInstalledError } = await import('../lib/playwright-errors')
-      if (!isChromiumInstalled()) {
-        const e = toStructuredError(new PlaywrightNotInstalledError())
-        session.status = 'error'
-        session.error  = e.message
-        session.code   = e.code
-        addLog({ level: 'error', message: `[Connect] ${e.code}: ${e.message}` })
-        return
-      }
       const { chromium } = await import('playwright')
       const browser = await chromium.launch({
         headless: true, // must be headless in Railway/production (no display server)
@@ -415,8 +419,7 @@ async function handleConnectStart(res: http.ServerResponse) {
       }, 2_000)
 
     } catch (err) {
-      const { toStructuredError } = await import('../lib/playwright-errors')
-      const e = toStructuredError(err)
+      const e = classifyPwError(err)
       session.status = 'error'
       session.error  = e.message
       session.code   = e.code
@@ -497,6 +500,116 @@ async function handleConnectSave(sessionId: string, res: http.ServerResponse, us
     session.status = 'error'
     session.error  = message
     return json(res, 500, { ok: false, error: message })
+  }
+}
+
+async function handleConnectLogin(req: http.IncomingMessage, res: http.ServerResponse) {
+  const body = await readBody(req)
+  const userId   = typeof body.userId === 'string' ? body.userId : undefined
+  const email    = typeof body.email === 'string' ? body.email.trim() : ''
+  const password = typeof body.password === 'string' ? body.password : ''
+
+  if (!email || !password) {
+    return json(res, 400, { ok: false, code: 'MISSING_CREDENTIALS', message: 'Вкажіть email і пароль Freelancehunt' })
+  }
+
+  const { chromium } = await import('playwright')
+  let browser: import('playwright').Browser | undefined
+  try {
+    addLog({ level: 'info', message: `[Connect] Credential login${userId ? ` for user ${userId}` : ''} (password is never stored)` })
+    browser = await chromium.launch({
+      headless: true,
+      args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'],
+    })
+    const context = await browser.newContext({
+      userAgent: 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+      locale: 'uk-UA',
+      viewport: { width: 1280, height: 900 },
+    })
+    const page = await context.newPage()
+
+    await page.goto('https://freelancehunt.com/login', { waitUntil: 'domcontentloaded', timeout: 30_000 })
+
+    // Robust selectors with fallbacks for the login form.
+    const emailSel = 'input[name="login"], input[name="email"], input[type="email"], #login, #email'
+    const passSel  = 'input[name="password"], input[type="password"], #password'
+    await page.waitForSelector(emailSel, { timeout: 15_000 })
+    await page.fill(emailSel, email)
+    await page.fill(passSel, password)
+
+    await Promise.allSettled([
+      page.waitForNavigation({ waitUntil: 'domcontentloaded', timeout: 20_000 }).catch(() => {}),
+      (async () => {
+        const btn = page.locator('button[type="submit"], input[type="submit"]').first()
+        if (await btn.count()) await btn.click().catch(() => {})
+        else await page.keyboard.press('Enter')
+      })(),
+    ])
+    await page.waitForTimeout(2500)
+
+    const url  = page.url()
+    const html = await page.content().catch(() => '')
+
+    // Captcha / challenge → cannot auto-login.
+    if (/captcha|recaptcha|hcaptcha|cf-challenge|grecaptcha/i.test(html)) {
+      return json(res, 200, {
+        ok: false,
+        code: 'CAPTCHA_REQUIRED',
+        message: 'Freelancehunt показав капчу — автоматичний вхід неможливий. Спробуйте пізніше.',
+      })
+    }
+
+    const loggedIn =
+      !url.includes('/login') &&
+      (/\/my\b|\/freelancer|\/employer|\/profile/i.test(url) || /logout|вийти|log\s*out/i.test(html))
+
+    if (!loggedIn) {
+      return json(res, 200, { ok: false, code: 'INVALID_CREDENTIALS', message: 'Невірний email або пароль Freelancehunt.' })
+    }
+
+    const username =
+      (await page.evaluate(() => {
+        const el =
+          document.querySelector('.header-user-name') ??
+          document.querySelector('[class*="username"]') ??
+          document.querySelector('[class*="user-name"]')
+        return el?.textContent?.trim() ?? ''
+      }).catch(() => '')) || 'authenticated'
+
+    const state = await context.storageState()
+    const cookieCount = (state.cookies ?? []).length
+
+    // Persist: per-user file (legacy parser) + Supabase (durable, per-user).
+    if (userId) {
+      try {
+        fs.writeFileSync(resolveUserSessionPath(userId), JSON.stringify(state))
+      } catch { /* non-fatal */ }
+      try {
+        const { saveSession } = await import('../services/freelancehunt-session.service')
+        await saveSession(userId, state, username)
+      } catch (e) {
+        addLog({ level: 'warning', message: `[Connect] DB mirror failed: ${e instanceof Error ? e.message : String(e)}` })
+      }
+    }
+
+    addLog({ level: 'success', message: `[Connect] Logged in as ${username} (${cookieCount} cookies)${userId ? ` for ${userId}` : ''}` })
+    return json(res, 200, { ok: true, status: 'connected', username, cookieCount })
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    // Inline classification — no external deps, never leak a raw stack.
+    let code = 'LOGIN_FAILED'
+    let message = 'Не вдалося увійти. Спробуйте ще раз.'
+    if (msg.includes("Executable doesn't exist") || msg.includes('playwright install') || msg.includes('ms-playwright')) {
+      code = 'PLAYWRIGHT_NOT_INSTALLED'; message = 'Chromium не встановлено на worker.'
+    } else if (msg.includes('libglib') || msg.includes('shared libraries') || msg.includes('shared object')) {
+      code = 'BROWSER_LAUNCH_FAILED'; message = 'Не вдалося запустити браузер на worker (бракує системних бібліотек).'
+    } else if (msg.includes('Timeout') || msg.includes('timeout')) {
+      code = 'TIMEOUT'; message = 'Freelancehunt не відповів вчасно. Спробуйте ще раз.'
+    }
+    addLog({ level: 'error', message: `[Connect] Login error: ${code}` })
+    return json(res, 200, { ok: false, code, message })
+  } finally {
+    if (browser) await browser.close().catch(() => {})
   }
 }
 
@@ -696,8 +809,7 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
         logs:          result.logs ?? cycleLogs,
       })
     } catch (err) {
-      const { toStructuredError } = await import('../lib/playwright-errors')
-      const se = toStructuredError(err)
+      const se = classifyPwError(err)
       state.lastError = se.message
       stepLog('error', `[Worker:${userId}] Cycle failed: ${se.code} — ${se.message}`)
       return json(res, 200, { ok: false, success: false, userId, code: se.code, message: se.message, logs: cycleLogs })
@@ -768,8 +880,7 @@ async function handleAutoBidStart(req: http.IncomingMessage, res: http.ServerRes
       logs:          result.logs ?? cycleLogs,
     })
   } catch (err) {
-    const { toStructuredError } = await import('../lib/playwright-errors')
-    const se = toStructuredError(err)
+    const se = classifyPwError(err)
     stepLog('error', `Cycle failed: ${se.code} — ${se.message}`)
     return json(res, 200, { ok: false, success: false, code: se.code, message: se.message, logs: cycleLogs })
   } finally {
@@ -869,19 +980,6 @@ const server = http.createServer(async (req, res) => {
 
   // ── /health/playwright — launches real Chromium, verifies browser works ──────
   if (method === 'GET' && (pathname === '/health/playwright' || pathname === '/api/health/playwright')) {
-    // Pre-flight presence check — structured, never a raw stack trace.
-    {
-      const { isChromiumInstalled } = await import('../services/playwright-browser.service')
-      if (!isChromiumInstalled()) {
-        return json(res, 200, {
-          ok: false,
-          service: 'worker',
-          browser: 'missing',
-          code: 'PLAYWRIGHT_NOT_INSTALLED',
-          message: 'Chromium не встановлений на worker',
-        })
-      }
-    }
     try {
       const { chromium } = await import('playwright')
       const b = await chromium.launch({
@@ -904,8 +1002,7 @@ const server = http.createServer(async (req, res) => {
         chromiumVersion: version,
       })
     } catch (e) {
-      const { toStructuredError } = await import('../lib/playwright-errors')
-      const se = toStructuredError(e)
+      const se = classifyPwError(e)
       console.error(`[health/playwright] Chromium launch FAILED: ${se.code}`)
       return json(res, 200, {
         ok: false,
@@ -1111,6 +1208,10 @@ const server = http.createServer(async (req, res) => {
     }
 
     // ── Freelancehunt connect (browser login) ─────────────────────────────────
+    if (method === 'POST' && pathname === '/connect/freelancehunt/login') {
+      return await handleConnectLogin(req, res)
+    }
+
     if (method === 'POST' && pathname === '/connect/freelancehunt/start') {
       return await handleConnectStart(res)
     }
