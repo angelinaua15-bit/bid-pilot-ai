@@ -7,7 +7,6 @@
   "build": "next build",
   "start": "next start",
   "lint": "eslint .",
-  "postinstall": "npx playwright install chromium",
   "login:freelancehunt": "tsx scripts/login-freelancehunt.ts",
   "worker": "tsx worker/index.ts",
   "worker:start": "tsx worker/server.ts"
