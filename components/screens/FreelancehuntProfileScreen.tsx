@@ -9,6 +9,7 @@ import {
 } from 'lucide-react';
 import { haptic, openExternalLink } from '@/lib/telegram';
 import { useTelegram } from '@/hooks/useTelegram';
+import { userMessageForCode } from '@/lib/playwright-errors';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
@@ -35,6 +36,19 @@ interface SessionStatus {
     lastCheckedAt: string | null;
     lastError: string | null;
   };
+}
+
+
+/** Turn any API error payload into a user-facing message — never a raw stack. */
+function friendlyError(data: { code?: string; message?: string; error?: string } | null | undefined): string {
+  if (!data) return 'Сталася помилка. Спробуйте пізніше.';
+  if (data.message) return data.message;
+  if (data.code) return userMessageForCode(data.code);
+  const raw = data.error ?? '';
+  if (/Executable doesn't exist|playwright install|ms-playwright|browserType\.launch/i.test(raw)) {
+    return 'Worker не налаштований. Chromium не встановлено на Railway.';
+  }
+  return raw || 'Сталася помилка. Спробуйте пізніше.';
 }
 
 export function FreelancehuntProfileScreen() {
@@ -86,7 +100,7 @@ export function FreelancehuntProfileScreen() {
 
         if (!data.ok) {
           stopPolling();
-          setErrorMsg(data.error ?? 'Worker returned error');
+          setErrorMsg(friendlyError(data));
           setStep('error');
           haptic.error();
           return;
@@ -99,7 +113,7 @@ export function FreelancehuntProfileScreen() {
           haptic.success();
         } else if (data.status === 'error') {
           stopPolling();
-          setErrorMsg(data.error ?? 'Unknown error');
+          setErrorMsg(friendlyError(data));
           setStep('error');
           haptic.error();
         }
@@ -129,7 +143,7 @@ export function FreelancehuntProfileScreen() {
       const data = await res.json();
 
       if (!data.ok || !data.sessionId) {
-        setErrorMsg(data.error ?? 'Could not start browser');
+        setErrorMsg(friendlyError(data));
         setStep('error');
         haptic.error();
         return;
@@ -158,7 +172,7 @@ export function FreelancehuntProfileScreen() {
       const data = await res.json();
 
       if (!data.ok) {
-        setErrorMsg(data.error ?? 'Could not save session');
+        setErrorMsg(friendlyError(data));
         setStep('error');
         haptic.error();
         return;
