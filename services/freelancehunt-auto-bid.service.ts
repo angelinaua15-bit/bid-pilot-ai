@@ -354,17 +354,24 @@ export async function runAutoBidCycle(
     }
 
     log(logs, 'info',
-      `[${i + 1}/${filtered.length}] Submitting via REST API — "${projectTitle}" | id:${projectIdentifier} | budget:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days}`,
+      `[${i + 1}/${filtered.length}] Submitting via browser session — "${projectTitle}" | id:${projectIdentifier} | budget:${budgetAmount} ${project.currency ?? 'UAH'} | days:${days}`,
       { projectId: project.id, projectTitle }
     );
 
     try {
+      // Browser submit needs the real project page URL to open the bid form.
+      // Without it, do not call the browser — surface the exact reason.
+      if (!projectUrl) {
+        throw new Error('MISSING_PROJECT_URL: project has no URL to open the bid page');
+      }
+
       // Submit via the AUTHENTICATED BROWSER session (storageState reused from
       // playwright-browser.service.ts) — NOT the API. The v2 API has no
       // create-bid endpoint; the old route returns 410.
       const result = await submitBidViaBrowser({
+        userId:     settings.userId,
         projectId:  numericId,
-        projectUrl,                                  // real project page URL is required
+        projectUrl,                                  // narrowed to string by the guard above
         comment:    bid.text ?? '',
         amount:     budgetAmount!,
         days,
@@ -511,6 +518,7 @@ export async function runAutoBidCycle(
         'FORM_FIELD_MISSING',
         'VALIDATION_ERROR',
         'UNCONFIRMED',
+        'MISSING_PROJECT_URL',
       ];
       const detectedCode = ERROR_CODES.find((code) => msg.includes(code)) ?? 'UNKNOWN_ERROR';
 
@@ -535,6 +543,7 @@ export async function runAutoBidCycle(
         FORM_FIELD_MISSING:    'Поле форми не знайдено (перевірте селектори)',
         VALIDATION_ERROR:      'Форма повернула помилку валідації',
         UNCONFIRMED:           'Сабміт не підтверджено — заявку не зараховано',
+        MISSING_PROJECT_URL:   'Немає URL проєкту — неможливо відкрити форму заявки',
         UNKNOWN_ERROR:    'Невідома помилка',
       };
       const humanLabel = ERROR_LABELS[detectedCode] ?? msg.slice(0, 200);

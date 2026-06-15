@@ -448,6 +448,23 @@ async function handleConnectSave(sessionId: string, res: http.ServerResponse, us
     const state = JSON.parse(fs.readFileSync(savePath, 'utf-8'))
     const cookieCount = (state.cookies ?? []).length
 
+    // Mirror the session into Supabase so the Vercel status route (and the
+    // per-user bid context) can read it. Source of truth = DB, durable across
+    // Railway redeploys. Non-fatal if the DB write fails.
+    if (userId) {
+      try {
+        const { saveSession } = await import('../services/freelancehunt-session.service')
+        const result = await saveSession(userId, state, session.username)
+        if (result.ok) {
+          addLog({ level: 'success', message: `[Connect] Session mirrored to DB for user ${userId} (${cookieCount} cookies)` })
+        } else {
+          addLog({ level: 'warning', message: `[Connect] DB mirror skipped for user ${userId}: ${result.reason}` })
+        }
+      } catch (dbErr) {
+        addLog({ level: 'warning', message: `[Connect] DB mirror failed: ${dbErr instanceof Error ? dbErr.message : String(dbErr)}` })
+      }
+    }
+
     session.status      = 'saved'
     session.cookieCount = cookieCount
 

@@ -1,30 +1,31 @@
 /**
  * services/playwright-browser.service.ts
  *
- * One authenticated Freelancehunt browser session for the whole worker.
+ * Worker-side Playwright access for Freelancehunt.
  *
- * A single Chromium browser + BrowserContext is launched lazily from the saved
- * storageState and reused by EVERY consumer:
- *   - parseProjectsFromFeed()   — reads the projects feed
- *   - submitBidViaBrowser()     — places bids (services/playwright-bid.service.ts)
+ *  - resolveSessionPath() / sessionExists() — legacy global session file helpers
+ *    (kept for server.ts compatibility).
+ *  - resolveUserSessionPath(userId)         — per-user session file path.
+ *  - parseProjectsFromFeed(log)             — scrape the open projects feed.
+ *  - getAuthenticatedContext(userId)        — per-user logged-in context built
+ *    from the Supabase session (durable). Used by playwright-bid.service.ts.
  *
- * Both run on the same logged-in context. No second login, no throwaway browser.
+ * The bid path is PER-USER: each user's storageState is loaded from Supabase
+ * (see freelancehunt-session.service.ts). A legacy on-disk session file, if
+ * present, is migrated into Supabase on first use.
  */
 
 import { chromium, type Browser, type BrowserContext, type Page } from 'playwright';
 import path from 'node:path';
 import fs from 'node:fs';
+import {
+  getStorageState,
+  saveSession,
+  markExpired,
+  type PlaywrightStorageState,
+} from './freelancehunt-session.service';
 
-// ─── Session configuration ────────────────────────────────────────────────────
-
-/**
- * Path to the saved storageState (cookies + localStorage of the logged-in
- * Freelancehunt account). Set FH_STORAGE_STATE in the environment to override.
- * This must be the file written when the account is connected.
- */
-const STORAGE_STATE_PATH =
-  process.env.FH_STORAGE_STATE ??
-  path.resolve(process.cwd(), 'storage/freelancehunt-state.json');
+// ─── Configuration ────────────────────────────────────────────────────────────
 
 const LAUNCH_ARGS = [
   '--no-sandbox',
@@ -47,75 +48,129 @@ export type BrowserLogFn = (
   level: 'info' | 'success' | 'warning' | 'error',
   message: string
 ) => void;
-
 const noop: BrowserLogFn = () => {};
 
-// ─── Shared authenticated context (singleton) ─────────────────────────────────
+// ─── Session file helpers (legacy / compatibility) ────────────────────────────
 
-let _browser: Browser | null = null;
-let _context: BrowserContext | null = null;
-let _launching: Promise<BrowserContext> | null = null;
-
-/**
- * Returns the one shared authenticated BrowserContext, launching it once from
- * storageState. Concurrent callers await the same launch. Throws
- * AUTH_STATE_MISSING when no saved session exists — surface that to the user as
- * "reconnect your Freelancehunt account", never as a silent failure.
- */
-export async function getAuthenticatedContext(): Promise<BrowserContext> {
-  if (_context) return _context;
-  if (_launching) return _launching;
-
-  _launching = (async () => {
-    if (!fs.existsSync(STORAGE_STATE_PATH)) {
-      _launching = null;
-      throw new Error(
-        `AUTH_STATE_MISSING: no saved Freelancehunt session at ${STORAGE_STATE_PATH}. Reconnect the account.`
-      );
-    }
-
-    const browser = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
-    const context = await browser.newContext({
-      ...CONTEXT_OPTS,
-      storageState: STORAGE_STATE_PATH,
-    });
-
-    browser.on('disconnected', () => {
-      _browser = null;
-      _context = null;
-      _launching = null;
-    });
-
-    _browser = browser;
-    _context = context;
-    _launching = null;
-    return context;
-  })();
-
-  return _launching;
+/** Global session file path (legacy single-account mode). */
+export function resolveSessionPath(): string {
+  return (
+    process.env.FREELANCEHUNT_SESSION_PATH ??
+    path.resolve(process.cwd(), 'storageState.json')
+  );
 }
 
-/** A fresh Page on the shared authenticated context. Caller must close it. */
-export async function getAuthenticatedPage(): Promise<Page> {
-  const context = await getAuthenticatedContext();
+/** Per-user session file path: sessions/freelancehunt_<userId>.json */
+export function resolveUserSessionPath(userId?: string): string {
+  if (!userId) return resolveSessionPath();
+  const dir = path.resolve(process.cwd(), 'sessions');
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  return path.join(dir, `freelancehunt_${userId}.json`);
+}
+
+/** Whether the legacy global session file exists. */
+export function sessionExists(): boolean {
+  try {
+    return fs.existsSync(resolveSessionPath());
+  } catch {
+    return false;
+  }
+}
+
+// ─── Shared browser + per-user contexts ───────────────────────────────────────
+
+let _browser: Browser | null = null;
+let _browserLaunching: Promise<Browser> | null = null;
+const _userContexts = new Map<string, BrowserContext>();
+
+async function ensureBrowser(): Promise<Browser> {
+  if (_browser) return _browser;
+  if (_browserLaunching) return _browserLaunching;
+  _browserLaunching = chromium.launch({ headless: true, args: LAUNCH_ARGS }).then((b: Browser) => {
+    b.on('disconnected', () => {
+      _browser = null;
+      _browserLaunching = null;
+      _userContexts.clear();
+    });
+    _browser = b;
+    _browserLaunching = null;
+    return b;
+  });
+  return _browserLaunching;
+}
+
+/**
+ * Load a user's storageState: Supabase first, then any legacy on-disk file
+ * (which is migrated into Supabase). Returns null if neither exists.
+ */
+async function loadStorageState(userId: string): Promise<PlaywrightStorageState | null> {
+  const fromDb = await getStorageState(userId);
+  if (fromDb) return fromDb;
+
+  // Self-heal: migrate a legacy per-user file into Supabase.
+  const filePath = resolveUserSessionPath(userId);
+  if (fs.existsSync(filePath)) {
+    try {
+      const state = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as PlaywrightStorageState;
+      await saveSession(userId, state);
+      return state;
+    } catch {
+      return null;
+    }
+  }
+  return null;
+}
+
+/**
+ * Per-user authenticated BrowserContext, built from the user's stored
+ * storageState. Throws AUTH_STATE_MISSING when the user has no usable session.
+ */
+export async function getAuthenticatedContext(userId: string): Promise<BrowserContext> {
+  if (!userId) throw new Error('USER_ID_REQUIRED: getAuthenticatedContext needs a userId');
+
+  const cached = _userContexts.get(userId);
+  if (cached) return cached;
+
+  const storageState = await loadStorageState(userId);
+  if (!storageState) {
+    throw new Error(`AUTH_STATE_MISSING: no Freelancehunt session for user ${userId}. Reconnect required.`);
+  }
+
+  const browser = await ensureBrowser();
+  const context = await browser.newContext({ ...CONTEXT_OPTS, storageState });
+  context.on('close', () => _userContexts.delete(userId));
+  _userContexts.set(userId, context);
+  return context;
+}
+
+/** A fresh Page on the user's authenticated context. Caller must close it. */
+export async function getAuthenticatedPage(userId: string): Promise<Page> {
+  const context = await getAuthenticatedContext(userId);
   return context.newPage();
 }
 
-/** Release the shared browser (call on graceful shutdown). */
+/** Drop a user's cached context (e.g. after detecting an expired session). */
+export async function closeUserContext(userId: string): Promise<void> {
+  const ctx = _userContexts.get(userId);
+  _userContexts.delete(userId);
+  await ctx?.close().catch(() => {});
+}
+
+/** Mark a user's session expired and drop its context. */
+export async function invalidateUserSession(userId: string): Promise<void> {
+  await markExpired(userId);
+  await closeUserContext(userId);
+}
+
+/** Release the shared browser (graceful shutdown). */
 export async function closeAuthenticatedBrowser(): Promise<void> {
-  try {
-    await _context?.close();
-  } catch {
-    /* ignore */
+  for (const ctx of _userContexts.values()) {
+    await ctx.close().catch(() => {});
   }
-  try {
-    await _browser?.close();
-  } catch {
-    /* ignore */
-  }
-  _context = null;
+  _userContexts.clear();
+  await _browser?.close().catch(() => {});
   _browser = null;
-  _launching = null;
+  _browserLaunching = null;
 }
 
 // ─── Feed parsing ─────────────────────────────────────────────────────────────
@@ -132,37 +187,23 @@ export interface FeedProject {
 }
 
 /**
- * Parse the open projects feed using the shared authenticated session.
- * The scraping core is isolated in `extractFeedRows`, which runs inside the
- * logged-in page and returns plain rows.
+ * Parse the open projects feed. Uses the global session file when present
+ * (logged-in view), otherwise an anonymous context.
  */
 export async function parseProjectsFromFeed(log: BrowserLogFn = noop): Promise<FeedProject[]> {
-  const context = await getAuthenticatedContext();
+  const browser = await ensureBrowser();
+  const globalState = sessionExists() ? resolveSessionPath() : undefined;
+  const context = await browser.newContext({
+    ...CONTEXT_OPTS,
+    ...(globalState ? { storageState: globalState } : {}),
+  });
   const page = await context.newPage();
 
   try {
     log('info', `[Feed] GET ${FEED_URL}`);
     await page.goto(FEED_URL, { waitUntil: 'domcontentloaded', timeout: 30_000 });
 
-    // Detect lost session early
-    const loggedOut = await page
-      .locator('a[href*="/login"]')
-      .first()
-      .isVisible({ timeout: 1_500 })
-      .catch(() => false);
-    const hasProjects = await page
-      .locator('a[href*="/project/"]')
-      .first()
-      .isVisible({ timeout: 4_000 })
-      .catch(() => false);
-
-    if (loggedOut && !hasProjects) {
-      log('error', '[Feed] Login wall — storageState session expired. Reconnect the account.');
-      throw new Error('LOGIN_REQUIRED: Freelancehunt session expired (feed)');
-    }
-
     const rows = await extractFeedRows(page);
-
     const projects: FeedProject[] = rows
       .filter((r) => r.id && r.projectUrl)
       .map((r) => ({
@@ -179,53 +220,31 @@ export async function parseProjectsFromFeed(log: BrowserLogFn = noop): Promise<F
     log('success', `[Feed] Parsed ${projects.length} project(s) from feed`);
     return projects;
   } finally {
-    await page.close().catch(() => {});
+    await context.close().catch(() => {});
   }
 }
 
-/**
- * In-page extraction of project rows from the feed. Returns plain objects.
- * Resilient: matches any /project/.../<id>.html anchor and reads the surrounding
- * row for title, budget and currency.
- */
 async function extractFeedRows(page: Page): Promise<
   Array<{
-    id: string;
-    title: string;
-    description: string;
-    budget: number;
-    currency: string;
-    skills: string[];
-    projectUrl: string;
-    publishedAt: string;
+    id: string; title: string; description: string; budget: number;
+    currency: string; skills: string[]; projectUrl: string; publishedAt: string;
   }>
 > {
   return page.evaluate(() => {
     const out: Array<{
-      id: string;
-      title: string;
-      description: string;
-      budget: number;
-      currency: string;
-      skills: string[];
-      projectUrl: string;
-      publishedAt: string;
+      id: string; title: string; description: string; budget: number;
+      currency: string; skills: string[]; projectUrl: string; publishedAt: string;
     }> = [];
-
     const seen = new Set<string>();
     const anchors = Array.from(
       document.querySelectorAll<HTMLAnchorElement>('a[href*="/project/"]')
     );
 
     const idFromHref = (href: string): string => {
-      const m =
-        href.match(/\/project\/[^/]+\/(\d+)\.html/) ??
-        href.match(/\/project\/(\d+)/);
+      const m = href.match(/\/project\/[^/]+\/(\d+)\.html/) ?? href.match(/\/project\/(\d+)/);
       return m ? m[1] : '';
     };
-
     const parseMoney = (text: string): { amount: number; currency: string } => {
-      // e.g. "5 000 грн", "1200 UAH", "300 $"
       const cur =
         /грн|UAH/i.test(text) ? 'UAH' :
         /\$|USD/i.test(text) ? 'USD' :
@@ -239,41 +258,25 @@ async function extractFeedRows(page: Page): Promise<
       const href = a.href;
       const id = idFromHref(href);
       if (!id || seen.has(id)) continue;
-
       const title = (a.textContent ?? '').trim();
-      if (!title) continue; // skip non-title anchors (icons, etc.)
+      if (!title) continue;
       seen.add(id);
 
-      // The row container holding this project (best-effort climb)
-      const row =
-        a.closest('tr, li, article, .project, [class*="project"]') ?? a.parentElement;
+      const row = a.closest('tr, li, article, .project, [class*="project"]') ?? a.parentElement;
       const rowText = row?.textContent ?? '';
-
       const money = parseMoney(rowText);
-
       const skills = Array.from(
         row?.querySelectorAll('a[href*="/projects/skill/"], .skill, [class*="skill"]') ?? []
-      )
-        .map((s) => (s.textContent ?? '').trim())
-        .filter(Boolean)
-        .slice(0, 12);
-
+      ).map((s) => (s.textContent ?? '').trim()).filter(Boolean).slice(0, 12);
       const timeEl = row?.querySelector('time');
-      const publishedAt =
-        timeEl?.getAttribute('datetime') ?? new Date().toISOString();
+      const publishedAt = timeEl?.getAttribute('datetime') ?? new Date().toISOString();
 
       out.push({
-        id,
-        title,
-        description: '',
-        budget: money.amount,
-        currency: money.currency,
-        skills,
-        projectUrl: href.split('?')[0],
-        publishedAt,
+        id, title, description: '',
+        budget: money.amount, currency: money.currency,
+        skills, projectUrl: href.split('?')[0], publishedAt,
       });
     }
-
     return out;
   });
 }

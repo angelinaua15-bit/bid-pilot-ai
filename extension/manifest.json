@@ -1,0 +1,15 @@
+{
+  "manifest_version": 3,
+  "name": "BidPilot — Freelancehunt Connect",
+  "version": "1.0.0",
+  "description": "Securely connect your Freelancehunt account to BidPilot by capturing your logged-in browser session.",
+  "permissions": ["cookies"],
+  "host_permissions": [
+    "*://*.freelancehunt.com/*",
+    "https://YOUR-APP.vercel.app/*"
+  ],
+  "action": {
+    "default_popup": "popup.html",
+    "default_title": "Connect Freelancehunt"
+  }
+}

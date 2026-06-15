@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Wifi, WifiOff, RefreshCw, Plus, Settings2, Trash2,
+  Wifi, WifiOff, RefreshCw, Settings2, Trash2,
   CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp,
-  Play, Square, KeyRound,
+  Play, Square, Monitor, Loader2, ArrowRight, Shield,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -108,52 +108,143 @@ export function FreelanceScreen({ user }: Props) {
 }
 
 // ── Connect panel ─────────────────────────────────────────────────────────────
+/**
+ * ConnectPanel — browser session flow (no deprecated API token).
+ *
+ * States:
+ *   idle        — not yet checked
+ *   connecting  — worker opening browser for user login
+ *   waiting     — waiting for user to log in (polling every 3 s)
+ *   saving      — extracting & saving session to Supabase
+ *   connected   — session saved successfully
+ *   expired     — session found but check failed
+ *   error       — unexpected error
+ */
+type ConnectStep = 'idle' | 'connecting' | 'waiting' | 'saving' | 'connected' | 'expired' | 'error';
+
 function ConnectPanel({ userId, account, onRefresh }: {
   userId?: string; account: FreelanceAccount | null; onRefresh: () => void;
 }) {
-  const [token, setToken]         = useState('');
-  const [showTokenInput, setShowTokenInput] = useState(false);
-  const [saving, setSaving]       = useState(false);
+  const [step, setStep]           = useState<ConnectStep>('idle');
+  const [sessionId, setSessionId] = useState<string | null>(null);
+  const [loginUrl, setLoginUrl]   = useState<string | null>(null);
+  const [username, setUsername]   = useState<string | null>(null);
   const [error, setError]         = useState<string | null>(null);
   const [workerBusy, setWorkerBusy] = useState(false);
   const [runResult, setRunResult] = useState<{ ok: boolean; msg: string } | null>(null);
   const [jobStats, setJobStats]   = useState<{ found: number; submitted: number; skipped: number; failed: number } | null>(null);
+  const [pollTimer, setPollTimer] = useState<ReturnType<typeof setInterval> | null>(null);
 
-  const isConnected = account?.status === 'connected' && !!account?.apiToken;
+  // Browser session = connected when status is 'connected' (no apiToken required)
+  const isConnected = account?.status === 'connected';
 
-  const handleConnect = async () => {
-    if (!userId || !token.trim()) return;
+  // ── Stop polling helper ────────────────────────────────────────────────────
+  const stopPoll = useCallback((timer: ReturnType<typeof setInterval> | null) => {
+    if (timer) clearInterval(timer);
+    setPollTimer(null);
+  }, []);
+
+  // ── Start browser login session via worker ────────────────────────────────
+  const handleStartConnect = async () => {
+    if (!userId) return;
     haptic.medium();
-    setSaving(true); setError(null);
+    setStep('connecting');
+    setError(null);
+    setLoginUrl(null);
+    setSessionId(null);
+
     try {
-      const res = await fetch('/api/freelance/connect', {
+      const res = await fetch('/api/connect/freelancehunt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, token: token.trim() }),
       }).then((r) => r.json());
-      if (res.ok) {
-        haptic.success();
-        setToken('');
-        setShowTokenInput(false);
-        onRefresh();
-      } else {
-        setError(res.error ?? 'Помилка підключення');
+
+      if (!res.ok) {
+        setError(res.error ?? 'Не вдалося запустити браузер. Перевірте, що worker запущено.');
+        setStep('error');
         haptic.error();
+        return;
       }
-    } finally { setSaving(false); }
+
+      setSessionId(res.sessionId);
+      setLoginUrl(res.loginUrl ?? 'https://freelancehunt.com/login');
+      setStep('waiting');
+
+      // Poll every 3 s until login confirmed
+      const timer = setInterval(async () => {
+        try {
+          const poll = await fetch(
+            `/api/connect/freelancehunt?session=${encodeURIComponent(res.sessionId)}`,
+          ).then((r) => r.json());
+
+          if (poll.status === 'logged_in' || poll.status === 'saved') {
+            stopPoll(timer);
+            await handleSaveSession(res.sessionId);
+          } else if (poll.status === 'error') {
+            stopPoll(timer);
+            setError(poll.error ?? 'Помилка під час входу');
+            setStep('error');
+            haptic.error();
+          }
+          // else still 'pending' — keep polling
+        } catch { /* network hiccup — keep polling */ }
+      }, 3000);
+      setPollTimer(timer);
+
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Помилка підключення');
+      setStep('error');
+      haptic.error();
+    }
   };
 
+  // ── Save session after successful login ───────────────────────────────────
+  const handleSaveSession = useCallback(async (sid: string) => {
+    if (!userId) return;
+    setStep('saving');
+    try {
+      const res = await fetch('/api/connect/freelancehunt?action=save', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ sessionId: sid, userId }),
+      }).then((r) => r.json());
+
+      if (res.ok) {
+        setUsername(res.username ?? null);
+        setStep('connected');
+        haptic.success();
+        onRefresh();
+        setTimeout(() => onRefresh(), 2000); // second refresh after DB propagation
+      } else {
+        setError(res.error ?? 'Не вдалося зберегти сесію');
+        setStep('error');
+        haptic.error();
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Помилка збереження сесії');
+      setStep('error');
+      haptic.error();
+    }
+  }, [userId, onRefresh]);
+
+  // ── Disconnect ────────────────────────────────────────────────────────────
   const handleDisconnect = async () => {
     if (!userId) return;
     haptic.error();
+    stopPoll(pollTimer);
+    await fetch('/api/connect/freelancehunt?action=logout', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+    }).catch(() => {});
     await fetch('/api/freelance/disconnect', {
       method: 'POST', headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ userId }),
-    });
-    setShowTokenInput(false);
+    }).catch(() => {});
+    setStep('idle');
+    setError(null);
     onRefresh();
   };
 
+  // ── Auto-bid trigger ──────────────────────────────────────────────────────
   const handleToggleWorker = async (start: boolean) => {
     if (!userId) return;
     haptic.medium();
@@ -180,9 +271,15 @@ function ConnectPanel({ userId, account, onRefresh }: {
         setTimeout(() => setRunResult(null), 4000);
       } else {
         const msg = res.error ?? 'Помилка запуску';
-        setRunResult({ ok: false, msg });
+        // SESSION_REQUIRED — ask user to reconnect
+        const isSessionGone = res.setupRequired ||
+          msg.includes('NO_SESSION') || msg.includes('LOGIN_REQUIRED') || msg.includes('Reconnect');
+        setRunResult({ ok: false, msg: isSessionGone ? 'Потрібно перепідключити акаунт' : msg });
         haptic.error();
-        if (res.setupRequired) setShowTokenInput(true);
+        if (isSessionGone) {
+          setStep('expired');
+          onRefresh();
+        }
       }
       onRefresh();
     } finally { setWorkerBusy(false); }
@@ -195,39 +292,86 @@ function ConnectPanel({ userId, account, onRefresh }: {
     error:        { icon: XCircle, cls: 'text-red-400',           bg: 'bg-red-500/10 border-red-500/20',       label: 'Помилка' },
   } as const;
 
-  const statusKey = (isConnected ? 'connected' : (account?.status ?? 'disconnected')) as keyof typeof statusMap;
-  const s    = statusMap[statusKey] ?? statusMap.disconnected;
+  const effectiveStatus = isConnected ? 'connected'
+    : step === 'expired' ? 'expired'
+    : step === 'error' ? 'error'
+    : (account?.status ?? 'disconnected') as keyof typeof statusMap;
+  const s    = statusMap[effectiveStatus] ?? statusMap.disconnected;
   const Icon = s.icon;
 
   return (
     <div className="flex flex-col gap-4">
+
       {/* Status card */}
       <div className={cn('p-4 rounded-2xl border flex items-center gap-3', s.bg)}>
         <div className={cn(
-          'w-9 h-9 rounded-xl flex items-center justify-center',
+          'w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0',
           isConnected ? 'bg-green-500/20' : 'bg-secondary',
         )}>
-          <Icon size={16} className={s.cls} />
+          {(step === 'connecting' || step === 'waiting' || step === 'saving')
+            ? <Loader2 size={16} className="text-primary animate-spin" />
+            : <Icon size={16} className={s.cls} />
+          }
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold">{s.label}</p>
-          {isConnected && account?.accountName && (
-            <p className="text-[11px] text-muted-foreground truncate">@{account.accountName}</p>
-          )}
-          {isConnected && account?.lastCheckAt && (
-            <p className="text-[11px] text-muted-foreground">
-              Перевірено: {new Date(account.lastCheckAt).toLocaleString('uk-UA')}
-            </p>
-          )}
-          {!isConnected && (
-            <p className="text-[11px] text-muted-foreground">Додайте API токен для роботи</p>
-          )}
+          <p className="text-sm font-semibold">
+            {step === 'connecting' && 'Запуск браузера...'}
+            {step === 'waiting'    && 'Очікуємо вхід...'}
+            {step === 'saving'     && 'Збереження сесії...'}
+            {step === 'connected'  && `Підключено${username ? ` — ${username}` : ''}`}
+            {step === 'error'      && 'Помилка'}
+            {step === 'expired'    && 'Потрібно перепідключити'}
+            {step === 'idle'       && s.label}
+          </p>
+          <p className="text-[11px] text-muted-foreground truncate mt-0.5">
+            {step === 'connecting' && 'Playwright відкриває freelancehunt.com…'}
+            {step === 'waiting'    && (loginUrl ? `Відкрийте: ${loginUrl}` : 'Увійдіть у браузері worker\'а')}
+            {step === 'saving'     && 'Зберігаємо cookies у базу даних…'}
+            {step === 'connected'  && (account?.lastCheckAt
+              ? `Оновлено: ${new Date(account.lastCheckAt).toLocaleString('uk-UA')}`
+              : 'Сесія активна')}
+            {step === 'error'      && (error ?? 'Помилка з\'єднання')}
+            {step === 'expired'    && 'Сесія закінчилась. Підключіться знову.'}
+            {step === 'idle'       && (isConnected
+              ? (account?.accountName ? `@${account.accountName}` : 'Сесія активна')
+              : 'Підключіть через браузер для автоматичної подачі заявок')}
+          </p>
         </div>
-        {isConnected && <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />}
+        {isConnected && step === 'idle' && (
+          <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
+        )}
       </div>
 
-      {/* Auto-bid trigger — only when truly connected with token */}
-      {isConnected && (
+      {/* Waiting — show login URL prominently */}
+      {step === 'waiting' && loginUrl && (
+        <div className="rounded-2xl border border-primary/30 bg-primary/5 p-4 flex flex-col gap-2.5">
+          <div className="flex items-center gap-2">
+            <Monitor size={14} className="text-primary flex-shrink-0" />
+            <p className="text-xs font-semibold text-primary">Увійдіть у браузері</p>
+          </div>
+          <p className="text-[11px] text-muted-foreground leading-relaxed">
+            Worker відкрив браузер. Увійдіть у свій акаунт на Freelancehunt — система збереже сесію автоматично.
+          </p>
+          <div className="flex items-center gap-2 rounded-xl bg-secondary border border-border px-3 py-2">
+            <p className="text-[10px] font-mono text-foreground truncate flex-1">{loginUrl}</p>
+            <ArrowRight size={11} className="text-muted-foreground flex-shrink-0" />
+          </div>
+          <p className="text-[10px] text-muted-foreground text-center animate-pulse">
+            Перевіряємо кожні 3 секунди...
+          </p>
+        </div>
+      )}
+
+      {/* Error with retry */}
+      {(step === 'error' || step === 'expired') && error && (
+        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-3 flex items-start gap-2">
+          <XCircle size={13} className="text-red-400 flex-shrink-0 mt-0.5" />
+          <p className="text-[11px] text-red-400 leading-relaxed">{error}</p>
+        </div>
+      )}
+
+      {/* Auto-bid trigger — only when session connected */}
+      {isConnected && step !== 'connecting' && step !== 'waiting' && step !== 'saving' && (
         <div className="flex flex-col gap-2">
           <div className="flex gap-2">
             <button
@@ -269,57 +413,53 @@ function ConnectPanel({ userId, account, onRefresh }: {
         </div>
       )}
 
-      {/* Connect / update token form */}
-      {(!isConnected || showTokenInput) && (
+      {/* Connect via browser button — when not connected */}
+      {!isConnected && step !== 'connecting' && step !== 'waiting' && step !== 'saving' && (
         <div className="rounded-2xl border border-border bg-card p-4 flex flex-col gap-3">
-          <div className="flex items-center justify-between">
-            <p className="text-xs font-semibold">
-              {isConnected ? 'Оновити API токен' : 'Підключити Freelancehunt'}
-            </p>
-            {showTokenInput && isConnected && (
-              <button onClick={() => { setShowTokenInput(false); setError(null); }} className="text-[11px] text-muted-foreground">Скасувати</button>
-            )}
-          </div>
+          <p className="text-xs font-semibold">Підключити через браузер</p>
           <p className="text-[11px] text-muted-foreground leading-relaxed">
-            Введіть ваш Freelancehunt API токен. Токен безпечно зберігається на сервері.{'\n'}
-            Де взяти: <span className="text-foreground">freelancehunt.com → Профіль → Налаштування → API</span>
+            Worker відкриє браузер — увійдіть у свій акаунт Freelancehunt.
+            Система автоматично збереже сесію та почне подавати заявки від вашого імені.
           </p>
-          <input
-            type="password"
-            value={token}
-            onChange={(e) => { setToken(e.target.value); setError(null); }}
-            onKeyDown={(e) => { if (e.key === 'Enter') handleConnect(); }}
-            placeholder="Вставте токен тут…"
-            autoComplete="off"
-            className="w-full bg-secondary rounded-xl px-3 py-2.5 text-xs font-mono outline-none border border-border focus:border-primary transition-colors"
-          />
-          {error && (
-            <div className="flex items-start gap-1.5 text-red-400">
-              <XCircle size={12} className="mt-0.5 flex-shrink-0" />
-              <p className="text-[11px]">{error}</p>
-            </div>
-          )}
+          <div className="flex items-start gap-2 rounded-xl bg-secondary/60 border border-border p-3">
+            <Shield size={12} className="text-primary flex-shrink-0 mt-0.5" />
+            <p className="text-[11px] text-muted-foreground leading-relaxed">
+              Пароль не зберігається. Зберігаються лише cookies браузерної сесії.
+            </p>
+          </div>
           <button
-            onClick={handleConnect}
-            disabled={saving || !token.trim()}
+            onClick={handleStartConnect}
+            disabled={!userId}
             className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
           >
-            {saving ? <RefreshCw size={13} className="animate-spin" /> : <Plus size={13} />}
-            {saving ? 'Перевірка токену...' : isConnected ? 'Оновити токен' : 'Підключити'}
+            <Monitor size={13} />
+            Підключити через браузер
           </button>
         </div>
       )}
 
-      {/* Update token button — when connected and form is hidden */}
-      {isConnected && !showTokenInput && (
+      {/* Loading spinner for in-progress steps */}
+      {(step === 'connecting' || step === 'waiting' || step === 'saving') && (
+        <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
+          <Loader2 size={13} className="animate-spin" />
+          {step === 'connecting' && 'Запуск Playwright...'}
+          {step === 'waiting'    && 'Очікуємо вхід у браузері...'}
+          {step === 'saving'     && 'Збереження сесії у базі...'}
+        </div>
+      )}
+
+      {/* Disconnect / reconnect — when connected or expired */}
+      {(isConnected || step === 'expired') && step !== 'connecting' && step !== 'waiting' && step !== 'saving' && (
         <div className="flex items-center gap-3">
-          <button
-            onClick={() => { setShowTokenInput(true); }}
-            className="flex items-center gap-2 text-xs text-muted-foreground hover:text-foreground transition-colors"
-          >
-            <Settings2 size={12} /> Оновити токен
-          </button>
-          <span className="text-border">·</span>
+          {step === 'expired' && (
+            <button
+              onClick={handleStartConnect}
+              className="flex items-center gap-2 text-xs text-primary hover:text-primary/80 transition-colors"
+            >
+              <RefreshCw size={12} /> Перепідключити
+            </button>
+          )}
+          {step === 'expired' && <span className="text-border">·</span>}
           <button
             onClick={handleDisconnect}
             className="flex items-center gap-2 text-xs text-red-400/70 hover:text-red-400 transition-colors"

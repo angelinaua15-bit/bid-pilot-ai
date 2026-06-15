@@ -7,7 +7,8 @@ import {
   AlertTriangle, Clock, Shield, ArrowRight,
   Wifi, WifiOff, Link2, Link2Off,
 } from 'lucide-react';
-import { haptic } from '@/lib/telegram';
+import { haptic, openExternalLink } from '@/lib/telegram';
+import { useTelegram } from '@/hooks/useTelegram';
 import { cn } from '@/lib/utils';
 import { formatDistanceToNow } from 'date-fns';
 import { uk } from 'date-fns/locale';
@@ -37,6 +38,8 @@ interface SessionStatus {
 }
 
 export function FreelancehuntProfileScreen() {
+  const { user } = useTelegram();
+  const userId = user?.id ? String(user.id) : '';
   const [status, setStatus]         = useState<SessionStatus | null>(null);
   const [loading, setLoading]       = useState(true);
   const [step, setStep]             = useState<ConnectStep>('idle');
@@ -47,16 +50,22 @@ export function FreelancehuntProfileScreen() {
   const [workerAvailable, setWorkerAvailable] = useState<boolean | null>(null);
   const pollRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  function handleBrowserConnect() {
+    haptic.medium();
+    const url = `${window.location.origin}/freelancehunt/connect${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`;
+    openExternalLink(url);
+  }
+
   const loadStatus = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/freelancehunt/status');
+      const res = await fetch(`/api/freelancehunt/status${userId ? `?userId=${encodeURIComponent(userId)}` : ''}`);
       const data = await res.json();
       if (data.ok) setStatus(data.data);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [userId]);
 
   useEffect(() => {
     loadStatus();
@@ -413,6 +422,15 @@ export function FreelancehuntProfileScreen() {
 
       {/* Action buttons */}
       <div className="flex flex-col gap-2 mt-auto">
+        {!isConnected && (step === 'idle' || step === 'error') && (
+          <button
+            onClick={handleBrowserConnect}
+            className="w-full py-3.5 rounded-2xl font-semibold text-sm bg-primary text-primary-foreground brand-glow transition-all active:scale-95 flex items-center justify-center gap-2"
+          >
+            <Globe size={15} />
+            Підключити Freelancehunt через браузер
+          </button>
+        )}
         {(step === 'idle' || step === 'error') && !isConnected && (
           <button
             onClick={step === 'error' ? handleRetry : handleConnect}

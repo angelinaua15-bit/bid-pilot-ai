@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="uk">
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body { font-family: -apple-system, system-ui, sans-serif; width: 320px; padding: 16px; margin: 0; }
+      h1 { font-size: 15px; margin: 0 0 4px; }
+      p { font-size: 12px; color: #555; margin: 0 0 12px; line-height: 1.4; }
+      label { font-size: 12px; font-weight: 600; display: block; margin-bottom: 4px; }
+      input { width: 100%; box-sizing: border-box; padding: 8px; font-size: 13px; border: 1px solid #ccc; border-radius: 8px; margin-bottom: 12px; }
+      button { width: 100%; padding: 10px; font-size: 14px; font-weight: 600; color: #fff; background: #2563eb; border: none; border-radius: 8px; cursor: pointer; }
+      button:disabled { background: #9ca3af; cursor: default; }
+      #status { font-size: 12px; margin-top: 12px; min-height: 16px; }
+      .ok { color: #166534; } .err { color: #991b1b; } .muted { color: #6b7280; }
+    </style>
+  </head>
+  <body>
+    <h1>Підключити Freelancehunt</h1>
+    <p>1. Увійдіть у свій акаунт на freelancehunt.com у цій вкладці.<br />
+       2. Вставте код підключення з застосунку.<br />
+       3. Натисніть «Підключити».</p>
+    <label for="code">Код підключення</label>
+    <input id="code" placeholder="напр. a1B2c3..." autocomplete="off" />
+    <button id="connect">Підключити</button>
+    <div id="status" class="muted"></div>
+    <script src="popup.js"></script>
+  </body>
+</html>

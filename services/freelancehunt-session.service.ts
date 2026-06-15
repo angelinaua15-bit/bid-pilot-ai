@@ -34,9 +34,9 @@ export interface PlaywrightCookie {
   domain: string;
   path: string;
   expires: number; // unix seconds, -1 for session cookies
-  httpOnly?: boolean;
-  secure?: boolean;
-  sameSite?: 'Strict' | 'Lax' | 'None';
+  httpOnly: boolean;
+  secure: boolean;
+  sameSite: 'Strict' | 'Lax' | 'None';
 }
 
 export interface PlaywrightStorageState {
@@ -187,4 +187,67 @@ export async function deleteSession(userId: string): Promise<void> {
   const client = getClient();
   if (!client) return;
   await client.from(TABLE).delete().eq('user_id', userId);
+}
+
+// ─── Connect tokens (one-time, bind an upload to a userId) ─────────────────────
+//
+//   create table if not exists freelancehunt_connect_tokens (
+//     token       text primary key,
+//     user_id     text not null,
+//     created_at  timestamptz not null default now(),
+//     expires_at  timestamptz not null,
+//     used        boolean not null default false
+//   );
+
+const CONNECT_TABLE = 'freelancehunt_connect_tokens';
+const CONNECT_TTL_MIN = Number(process.env.FH_CONNECT_TOKEN_TTL_MIN ?? 15);
+
+function randomToken(): string {
+  // URL-safe, ~32 chars
+  const bytes = new Uint8Array(24);
+  (globalThis.crypto ?? require('node:crypto').webcrypto).getRandomValues(bytes);
+  return Buffer.from(bytes).toString('base64url');
+}
+
+/** Mint a one-time connect token bound to a userId. Called by the authenticated Mini App. */
+export async function mintConnectToken(
+  userId: string
+): Promise<{ ok: boolean; token?: string; expiresAt?: string; reason?: string }> {
+  if (!userId) return { ok: false, reason: 'no userId' };
+  const client = getClient();
+  if (!client) return { ok: false, reason: 'supabase not configured' };
+
+  const token = randomToken();
+  const expiresAt = new Date(Date.now() + CONNECT_TTL_MIN * 60_000).toISOString();
+
+  const { error } = await client.from(CONNECT_TABLE).insert({
+    token, user_id: userId, expires_at: expiresAt, used: false,
+  });
+  if (error) return { ok: false, reason: error.message };
+  return { ok: true, token, expiresAt };
+}
+
+/** Validate + consume a connect token. Returns the userId it was bound to. */
+export async function consumeConnectToken(
+  token: string
+): Promise<{ ok: boolean; userId?: string; reason?: string }> {
+  if (!token) return { ok: false, reason: 'no token' };
+  const client = getClient();
+  if (!client) return { ok: false, reason: 'supabase not configured' };
+
+  const { data, error } = await client
+    .from(CONNECT_TABLE)
+    .select('user_id, expires_at, used')
+    .eq('token', token)
+    .maybeSingle();
+
+  if (error) return { ok: false, reason: `db error: ${error.message}` };
+  if (!data) return { ok: false, reason: 'invalid token' };
+  const row = data as { user_id: string; expires_at: string; used: boolean };
+  if (row.used) return { ok: false, reason: 'token already used' };
+  if (new Date(row.expires_at).getTime() < Date.now()) return { ok: false, reason: 'token expired' };
+
+  // Mark used (best-effort single-use guard)
+  await client.from(CONNECT_TABLE).update({ used: true }).eq('token', token);
+  return { ok: true, userId: row.user_id };
 }
