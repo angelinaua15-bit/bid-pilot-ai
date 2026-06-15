@@ -1,62 +1,42 @@
 /**
- * POST /api/freelancehunt/connect   body: { userId, email, password }
+ * app/api/freelancehunt/connect-token/route.ts
  *
- * Credential login (Variant 1). Playwright NEVER runs on Vercel — this route
- * only proxies the credentials to the Railway worker, which logs in headlessly,
- * captures the session and saves it to Supabase under userId.
+ * POST /api/freelancehunt/connect-token   body: { userId }
+ * Mints a one-time, short-lived code that the browser extension (or local
+ * helper) uses to upload the captured session for THIS user.
  *
- * The password is forwarded once over HTTPS to the worker and is never stored
- * or logged; only the resulting session cookies are persisted.
+ * Security: derive userId from your authenticated Mini App session, not from
+ * untrusted client input. The line below reads it from the body for clarity —
+ * replace `bodyUserId` with your server-side session userId once wired to your
+ * auth (Telegram initData / Supabase auth).
  */
 
 import { NextResponse } from 'next/server';
-import { config } from '@/lib/config';
+import { mintConnectToken } from '@/services/freelancehunt-session.service';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const FALLBACK: Record<string, string> = {
-  PLAYWRIGHT_NOT_INSTALLED: 'Worker не налаштований. Chromium не встановлено на Railway.',
-  BROWSER_LAUNCH_FAILED:    'Не вдалося запустити браузер на worker.',
-  CAPTCHA_REQUIRED:         'Freelancehunt показав капчу — автоматичний вхід неможливий.',
-  INVALID_CREDENTIALS:      'Невірний email або пароль Freelancehunt.',
-  WORKER_REQUIRED:          'Worker не налаштований.',
-  TIMEOUT:                  'Freelancehunt не відповів вчасно. Спробуйте ще раз.',
-};
-
-export async function POST(req: Request) {
-  if (!config.worker.enabled) {
-    return NextResponse.json(
-      { ok: false, code: 'WORKER_REQUIRED', message: 'Worker не налаштований. Перевірте AUTOMATION_WORKER_URL.' },
-      { status: 200 },
-    );
-  }
-
-  let body: { userId?: string; email?: string; password?: string } = {};
-  try { body = await req.json(); } catch { /* ignore */ }
-
-  const { userId, email, password } = body;
-  if (!email || !password) {
-    return NextResponse.json(
-      { ok: false, code: 'MISSING_CREDENTIALS', message: 'Вкажіть email і пароль Freelancehunt.' },
-      { status: 200 },
-    );
-  }
-
+export async function POST(request: Request) {
+  let body: { userId?: string } = {};
   try {
-    const res = await fetch(`${config.worker.url}/connect/freelancehunt/login`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.worker.secret}` },
-      body: JSON.stringify({ userId, email, password }),
-      signal: AbortSignal.timeout(60_000), // headless login can take a while
-    });
-    const data = await res.json().catch(() => ({}));
-    if (!data.ok && data.code && !data.message) data.message = FALLBACK[data.code] ?? 'Сталася помилка. Спробуйте ще раз.';
-    return NextResponse.json(data, { status: 200 });
+    body = await request.json();
   } catch {
-    return NextResponse.json(
-      { ok: false, code: 'WORKER_REQUIRED', message: 'Worker недоступний. Перевірте, що сервіс на Railway запущений.' },
-      { status: 200 },
-    );
+    body = {};
   }
+
+  const userId = body.userId?.trim();
+  if (!userId) {
+    return NextResponse.json({ ok: false, error: 'MISSING_USER_ID' }, { status: 400 });
+  }
+
+  const result = await mintConnectToken(userId);
+  if (!result.ok) {
+    return NextResponse.json({ ok: false, error: result.reason }, { status: 500 });
+  }
+
+  return NextResponse.json(
+    { ok: true, token: result.token, expiresAt: result.expiresAt },
+    { status: 200, headers: { 'Cache-Control': 'no-store' } }
+  );
 }
