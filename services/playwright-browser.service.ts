@@ -137,7 +137,10 @@ export async function getAuthenticatedContext(userId: string): Promise<BrowserCo
   }
 
   const browser = await ensureBrowser();
-  const context = await browser.newContext({ ...CONTEXT_OPTS, storageState });
+  const context = await browser.newContext({
+    ...CONTEXT_OPTS,
+    storageState: storageState as Parameters<typeof browser.newContext>[0]['storageState'],
+  });
   context.on('close', () => _userContexts.delete(userId));
   _userContexts.set(userId, context);
   return context;

@@ -120,7 +120,7 @@ export async function POST(req: NextRequest) {
         msg.includes('session expired');
 
       if (isSessionError) {
-        await upsertFreelanceAccount({ userId, status: 'session_expired' });
+        await upsertFreelanceAccount({ userId, status: 'expired' });
         return NextResponse.json(
           { ok: false, error: 'Сесія Freelancehunt протухла. Перепідключіть акаунт.', sessionExpired: true },
           { status: 401 },
@@ -311,7 +311,7 @@ export async function POST(req: NextRequest) {
             }).catch(() => {});
           } else if (result.status === 'login_required') {
             // Session expired mid-cycle
-            await upsertFreelanceAccount({ userId, status: 'session_expired' }).catch(() => {});
+            await upsertFreelanceAccount({ userId, status: 'expired' }).catch(() => {});
             errors.push(`СЕСІЯ ПРОТУХЛА: ${result.reason}`);
             await appendLog({
               id:        randomUUID(),
@@ -366,9 +366,6 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // ── Restore env and finalize ─────────────────────────────────────────────���
-    if (prevSession !== undefined) process.env.FREELANCEHUNT_SESSION_PATH = prevSession;
-    else delete process.env.FREELANCEHUNT_SESSION_PATH;
 
     const cycleNow = new Date().toISOString();
 

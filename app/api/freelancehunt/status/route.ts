@@ -113,7 +113,7 @@ export async function GET(req: NextRequest) {
           },
         });
       }
-      if (account?.status === 'session_expired') {
+      if (account?.status === 'expired') {
         return NextResponse.json({
           ok: true,
           data: {
@@ -127,21 +127,27 @@ export async function GET(req: NextRequest) {
     } catch { /* non-fatal */ }
   }
 
-  // ── 5. Fallback: FREELANCEHUNT_TOKEN env var ──────────────────────────────
+  // ── 5. FREELANCEHUNT_TOKEN env var — legacy fallback (API deprecated, skipped) ──
+  // POST /v2/projects/{id}/bids returns HTTP 410; only used for display name lookup.
   const token = process.env.FREELANCEHUNT_TOKEN ?? '';
   if (token) {
     try {
-      const { validateFreelancehuntToken } = await import('@/services/freelancehunt.service');
-      const result = await validateFreelancehuntToken(token);
-      return NextResponse.json({
-        ok: true,
-        data: {
-          connected:  result.valid,
-          workerMode: 'none',
-          username:   result.username,
-          error:      result.valid ? undefined : 'Token invalid or expired',
-        },
-      });
+      // Attempt a simple profile check — validateFreelancehuntToken may not exist
+      // in older builds; skip gracefully if not found
+      const fhService = await import('@/services/freelancehunt.service') as Record<string, unknown>;
+      const validateFn = fhService['validateFreelancehuntToken'];
+      if (typeof validateFn === 'function') {
+        const result = await (validateFn as (t: string) => Promise<{ valid: boolean; username?: string }>)(token);
+        return NextResponse.json({
+          ok: true,
+          data: {
+            connected:  result.valid,
+            workerMode: 'none',
+            username:   result.username,
+            error:      result.valid ? undefined : 'Token invalid or expired',
+          },
+        });
+      }
     } catch { /* continue */ }
   }
 
