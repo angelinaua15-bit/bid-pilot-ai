@@ -1,56 +1,43 @@
-import { NextResponse } from 'next/server';
-
 /**
  * GET /api/health/playwright
  *
- * Verifies Playwright can launch Chromium in the current environment.
- * Returns { ok, browser, chromiumVersion } or { ok: false, error, code }.
- *
- * This runs on the Next.js server (Vercel), NOT on Railway — use the worker
- * GET /health?check=browser to test Playwright on Railway.
+ * Playwright MUST NOT run on Vercel. This route never launches Chromium.
+ * It proxies the check to the Railway worker (GET /health/playwright) if one is
+ * configured; otherwise it returns a clean WORKER_REQUIRED structured error.
  */
+
+import { NextResponse } from 'next/server';
+import { config } from '@/lib/config';
+import { PLAYWRIGHT_USER_MESSAGE, userMessageForCode } from '@/lib/playwright-errors';
+
+export const runtime = 'nodejs';
+export const dynamic = 'force-dynamic';
+
 export async function GET() {
-  try {
-    const { chromium } = await import('playwright');
-    const browser = await chromium.launch({
-      headless: true,
-      args: [
-        '--no-sandbox',
-        '--disable-setuid-sandbox',
-        '--disable-dev-shm-usage',
-        '--disable-gpu',
-        '--no-zygote',
-      ],
-    });
-    const version = browser.version();
-    await browser.close();
-
-    return NextResponse.json({
-      ok: true,
-      browser: 'chromium',
-      chromiumVersion: version,
-      environment: process.env.NODE_ENV ?? 'unknown',
-      timestamp: new Date().toISOString(),
-    });
-  } catch (err) {
-    const message = err instanceof Error ? err.message : String(err);
-    const code = message.includes('libglib')    ? 'MISSING_SYSTEM_DEPS'
-               : message.includes('ENOENT')      ? 'CHROMIUM_NOT_INSTALLED'
-               : message.includes('cannot open') ? 'MISSING_SHARED_LIBS'
-               : 'PLAYWRIGHT_BROWSER_ERROR';
-
+  if (!config.worker.enabled) {
     return NextResponse.json(
-      {
-        ok: false,
-        browser: 'chromium',
-        code,
-        error: message.slice(0, 500),
-        hint: code === 'PLAYWRIGHT_BROWSER_ERROR' || code === 'MISSING_SYSTEM_DEPS'
-          ? 'Run: npx playwright install --with-deps chromium — or use the official mcr.microsoft.com/playwright Docker image'
-          : 'Chromium binary missing — run: npx playwright install chromium',
-        timestamp: new Date().toISOString(),
-      },
-      { status: 500 }
+      { success: false, code: 'WORKER_REQUIRED', message: PLAYWRIGHT_USER_MESSAGE.WORKER_REQUIRED },
+      { status: 200 },
+    );
+  }
+
+  try {
+    const res = await fetch(`${config.worker.url}/health/playwright`, {
+      headers: { Authorization: `Bearer ${config.worker.secret}` },
+      signal: AbortSignal.timeout(15_000),
+    });
+    const data = await res.json().catch(() => ({}));
+
+    if (data?.ok) {
+      return NextResponse.json({ success: true, code: 'OK', browser: 'chromium', chromiumVersion: data.chromiumVersion });
+    }
+    const code = data?.code ?? 'PLAYWRIGHT_NOT_INSTALLED';
+    return NextResponse.json({ success: false, code, message: userMessageForCode(code) }, { status: 200 });
+  } catch {
+    // Worker unreachable — do not leak anything raw.
+    return NextResponse.json(
+      { success: false, code: 'WORKER_REQUIRED', message: PLAYWRIGHT_USER_MESSAGE.WORKER_REQUIRED },
+      { status: 200 },
     );
   }
 }
