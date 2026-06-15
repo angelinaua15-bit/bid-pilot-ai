@@ -1,6 +1,7 @@
 # ── BidPilot Worker (Railway) ────────────────────────────────────────────────
-# Single-stage: Chromium + ALL its system libraries (libglib, libnss, libatk…)
-# end up in the SAME image that runs. Uses pnpm to match the repo's lockfile.
+# Single-stage. node:22-bookworm-slim ALWAYS exists (no version-pinned image tag
+# to get wrong). `playwright install --with-deps chromium` puts Chromium AND its
+# system libraries (libglib, libnss, …) into THIS image → no libglib errors.
 FROM node:22-bookworm-slim
 
 WORKDIR /app
@@ -8,18 +9,15 @@ WORKDIR /app
 # Browser co-located with the package (matches PLAYWRIGHT_BROWSERS_PATH=0).
 ENV PLAYWRIGHT_BROWSERS_PATH=0
 
-# pnpm (same major version Railpack used).
-RUN corepack enable && corepack prepare pnpm@9.15.9 --activate
-
-# Install ALL deps (tsx is a devDependency the worker needs to run).
-COPY package.json pnpm-lock.yaml* ./
-RUN pnpm install --no-frozen-lockfile
+# Install deps with npm (built into the image — no corepack/network surprises).
+# Copy only package.json so a lockfile mismatch can never fail the build.
+COPY package.json ./
+RUN npm install --legacy-peer-deps --no-audit --no-fund
 
 COPY . .
 
-# THE KEY LINE: installs Chromium AND apt-installs every required system library
-# into this image. This is what fixes "libglib-2.0.so.0: cannot open shared object".
-RUN pnpm exec playwright install --with-deps chromium
+# THE KEY LINE: Chromium + all required system libraries into this image.
+RUN npx playwright install --with-deps chromium
 
 ENV NODE_ENV=production
-CMD ["pnpm", "exec", "tsx", "worker/index.ts"]
+CMD ["npx", "tsx", "worker/index.ts"]
