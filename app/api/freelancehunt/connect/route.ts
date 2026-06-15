@@ -1,143 +1,62 @@
 /**
- * app/api/freelancehunt/connect/route.ts
+ * POST /api/freelancehunt/connect   body: { userId, email, password }
  *
- * Vercel-safe connect controller. The interactive Playwright login runs on the
- * WORKER (Railway), never on Vercel — so this route only PROXIES to the worker.
+ * Credential login (Variant 1). Playwright NEVER runs on Vercel — this route
+ * only proxies the credentials to the Railway worker, which logs in headlessly,
+ * captures the session and saves it to Supabase under userId.
  *
- * It imports nothing heavy: no 'playwright', no 'node:http', no worker code.
- * That is what keeps `next build` / Vercel deploy green.
- *
- * Worker endpoints proxied (see worker/server.ts):
- *   POST   /connect              → start login, returns { sessionId }
- *   GET    /connect/status?sessionId=...   → { status, username, error }
- *   POST   /connect/save         body { sessionId, userId } → persists session
- *   POST   /connect/logout       body { userId }            → clears session
- *
- * Client usage:
- *   POST /api/freelancehunt/connect            { action: 'start' }
- *   GET  /api/freelancehunt/connect?sessionId=...
- *   POST /api/freelancehunt/connect            { action: 'save', sessionId, userId }
- *   POST /api/freelancehunt/connect            { action: 'logout', userId }
+ * The password is forwarded once over HTTPS to the worker and is never stored
+ * or logged; only the resulting session cookies are persisted.
  */
 
 import { NextResponse } from 'next/server';
+import { config } from '@/lib/config';
 
 export const runtime = 'nodejs';
 export const dynamic = 'force-dynamic';
 
-const WORKER_URL =
-  process.env.WORKER_URL ??
-  process.env.NEXT_PUBLIC_WORKER_URL ??
-  process.env.RAILWAY_WORKER_URL;
+const FALLBACK: Record<string, string> = {
+  PLAYWRIGHT_NOT_INSTALLED: 'Worker не налаштований. Chromium не встановлено на Railway.',
+  BROWSER_LAUNCH_FAILED:    'Не вдалося запустити браузер на worker.',
+  CAPTCHA_REQUIRED:         'Freelancehunt показав капчу — автоматичний вхід неможливий.',
+  INVALID_CREDENTIALS:      'Невірний email або пароль Freelancehunt.',
+  WORKER_REQUIRED:          'Worker не налаштований.',
+  TIMEOUT:                  'Freelancehunt не відповів вчасно. Спробуйте ще раз.',
+};
 
-const AUTH = process.env.AUTOMATION_SECRET ?? '';
-
-function workerHeaders(): HeadersInit {
-  return {
-    'Content-Type': 'application/json',
-    Authorization: `Bearer ${AUTH}`,
-  };
-}
-
-function noWorker() {
-  return NextResponse.json(
-    { ok: false, error: 'WORKER_URL is not configured' },
-    { status: 503 }
-  );
-}
-
-/** Forward a request to the worker and pass its JSON response straight through. */
-async function forward(path: string, init: RequestInit) {
-  const res = await fetch(`${WORKER_URL}${path}`, init);
-  const text = await res.text();
-  let body: unknown;
-  try {
-    body = text ? JSON.parse(text) : {};
-  } catch {
-    body = { ok: false, error: `Non-JSON worker response: ${text.slice(0, 200)}` };
-  }
-  return NextResponse.json(body, { status: res.status });
-}
-
-// ─── GET: connect status ──────────────────────────────────────────────────────
-
-export async function GET(request: Request) {
-  if (!WORKER_URL) return noWorker();
-
-  const { searchParams } = new URL(request.url);
-  const sessionId = searchParams.get('sessionId')?.trim();
-  if (!sessionId) {
+export async function POST(req: Request) {
+  if (!config.worker.enabled) {
     return NextResponse.json(
-      { ok: false, error: 'MISSING_SESSION_ID: query param "sessionId" is required' },
-      { status: 400 }
+      { ok: false, code: 'WORKER_REQUIRED', message: 'Worker не налаштований. Перевірте AUTOMATION_WORKER_URL.' },
+      { status: 200 },
+    );
+  }
+
+  let body: { userId?: string; email?: string; password?: string } = {};
+  try { body = await req.json(); } catch { /* ignore */ }
+
+  const { userId, email, password } = body;
+  if (!email || !password) {
+    return NextResponse.json(
+      { ok: false, code: 'MISSING_CREDENTIALS', message: 'Вкажіть email і пароль Freelancehunt.' },
+      { status: 200 },
     );
   }
 
   try {
-    return await forward(`/connect/status?sessionId=${encodeURIComponent(sessionId)}`, {
-      method: 'GET',
-      headers: workerHeaders(),
+    const res = await fetch(`${config.worker.url}/connect/freelancehunt/login`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${config.worker.secret}` },
+      body: JSON.stringify({ userId, email, password }),
+      signal: AbortSignal.timeout(60_000), // headless login can take a while
     });
-  } catch (err) {
-    return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      { status: 502 }
-    );
-  }
-}
-
-// ─── POST: start / save / logout ────────────────────────────────────────────-
-
-export async function POST(request: Request) {
-  if (!WORKER_URL) return noWorker();
-
-  let payload: { action?: string; sessionId?: string; userId?: string } = {};
-  try {
-    payload = await request.json();
+    const data = await res.json().catch(() => ({}));
+    if (!data.ok && data.code && !data.message) data.message = FALLBACK[data.code] ?? 'Сталася помилка. Спробуйте ще раз.';
+    return NextResponse.json(data, { status: 200 });
   } catch {
-    payload = {};
-  }
-  const action = payload.action ?? 'start';
-
-  try {
-    switch (action) {
-      case 'start':
-        return await forward('/connect', {
-          method: 'POST',
-          headers: workerHeaders(),
-          body: JSON.stringify({ userId: payload.userId }),
-        });
-
-      case 'save':
-        if (!payload.sessionId || !payload.userId) {
-          return NextResponse.json(
-            { ok: false, error: 'SAVE requires { sessionId, userId }' },
-            { status: 400 }
-          );
-        }
-        return await forward('/connect/save', {
-          method: 'POST',
-          headers: workerHeaders(),
-          body: JSON.stringify({ sessionId: payload.sessionId, userId: payload.userId }),
-        });
-
-      case 'logout':
-        return await forward('/connect/logout', {
-          method: 'POST',
-          headers: workerHeaders(),
-          body: JSON.stringify({ userId: payload.userId }),
-        });
-
-      default:
-        return NextResponse.json(
-          { ok: false, error: `Unknown action "${action}"` },
-          { status: 400 }
-        );
-    }
-  } catch (err) {
     return NextResponse.json(
-      { ok: false, error: err instanceof Error ? err.message : String(err) },
-      { status: 502 }
+      { ok: false, code: 'WORKER_REQUIRED', message: 'Worker недоступний. Перевірте, що сервіс на Railway запущений.' },
+      { status: 200 },
     );
   }
 }
