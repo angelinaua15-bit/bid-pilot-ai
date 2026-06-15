@@ -241,6 +241,24 @@ function classifyPwError(err: unknown): { code: string; message: string } {
   return { code: 'UNKNOWN', message: 'Сталася помилка автоматизації.' }
 }
 
+/** Residential-proxy config from env (Variant V). Undefined → direct connection. */
+function fhProxy(): { server: string; username?: string; password?: string } | undefined {
+  const server = process.env.FH_PROXY_SERVER?.trim()
+  if (!server) return undefined
+  return {
+    server,
+    username: process.env.FH_PROXY_USERNAME?.trim() || undefined,
+    password: process.env.FH_PROXY_PASSWORD?.trim() || undefined,
+  }
+}
+
+/** Basic stealth: mask the most obvious headless/automation signals. */
+const STEALTH_INIT =
+  "Object.defineProperty(navigator,'webdriver',{get:()=>undefined});" +
+  "Object.defineProperty(navigator,'languages',{get:()=>['uk-UA','uk','en-US','en']});" +
+  "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});" +
+  "window.chrome=window.chrome||{runtime:{}};"
+
 // ─── Auto-loop ────────────────────────────────────────────────────────────────
 
 async function runAutoLoop() {
@@ -516,9 +534,10 @@ async function handleConnectLogin(req: http.IncomingMessage, res: http.ServerRes
   const { chromium } = await import('playwright')
   let browser: import('playwright').Browser | undefined
   try {
-    addLog({ level: 'info', message: `[Connect] Credential login${userId ? ` for user ${userId}` : ''} (password is never stored)` })
+    addLog({ level: 'info', message: `[Connect] Credential login${userId ? ` for user ${userId}` : ''} (proxy: ${fhProxy() ? 'on' : 'off'}, password never stored)` })
     browser = await chromium.launch({
       headless: true,
+      proxy: fhProxy(),
       args: ['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage', '--disable-gpu', '--no-zygote'],
     })
     const context = await browser.newContext({
@@ -526,6 +545,7 @@ async function handleConnectLogin(req: http.IncomingMessage, res: http.ServerRes
       locale: 'uk-UA',
       viewport: { width: 1280, height: 900 },
     })
+    await context.addInitScript(STEALTH_INIT)
     const page = await context.newPage()
 
     const LOGIN_URL = 'https://freelancehunt.com/profile/login'
