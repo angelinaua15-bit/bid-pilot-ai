@@ -83,10 +83,42 @@ let _browser: Browser | null = null;
 let _browserLaunching: Promise<Browser> | null = null;
 const _userContexts = new Map<string, BrowserContext>();
 
+let _chromiumInstalled = false;
+
+/** True when the launch error means the Chromium binary is simply not installed. */
+function looksLikeMissingBrowser(err: unknown): boolean {
+  const m = String(err instanceof Error ? err.message : err);
+  return m.includes("Executable doesn't exist") || m.includes('playwright install');
+}
+
+/**
+ * Self-heal: download Chromium into Playwright's cache at runtime. Needed when
+ * the worker host was NOT built with `npx playwright install` (e.g. Railway
+ * nixpacks fallback). Runs once; requires network + writable FS (Railway has both).
+ */
+async function installChromiumOnce(): Promise<void> {
+  if (_chromiumInstalled) return;
+  const { execSync } = await import('node:child_process');
+  console.log('[playwright] Chromium missing — running `npx playwright install chromium`…');
+  execSync('npx playwright install chromium', { stdio: 'inherit' });
+  _chromiumInstalled = true;
+  console.log('[playwright] Chromium installed.');
+}
+
 async function ensureBrowser(): Promise<Browser> {
   if (_browser) return _browser;
   if (_browserLaunching) return _browserLaunching;
-  _browserLaunching = chromium.launch({ headless: true, args: LAUNCH_ARGS }).then((b: Browser) => {
+
+  _browserLaunching = (async (): Promise<Browser> => {
+    let b: Browser;
+    try {
+      b = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+    } catch (err) {
+      if (!looksLikeMissingBrowser(err)) throw err;
+      // Chromium binary is missing — download it once, then retry the launch.
+      await installChromiumOnce();
+      b = await chromium.launch({ headless: true, args: LAUNCH_ARGS });
+    }
     b.on('disconnected', () => {
       _browser = null;
       _browserLaunching = null;
@@ -95,7 +127,8 @@ async function ensureBrowser(): Promise<Browser> {
     _browser = b;
     _browserLaunching = null;
     return b;
-  });
+  })();
+
   return _browserLaunching;
 }
 
