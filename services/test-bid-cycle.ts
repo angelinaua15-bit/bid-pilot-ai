@@ -28,7 +28,12 @@ const log = (level: string, message: string) =>
 
 async function main() {
   const dryRun = process.env.CONFIRM_REAL_BID !== '1';
-  log('info', `Mode: ${dryRun ? 'DRY RUN (no bid posted)' : 'REAL BID (will post one bid)'}`);
+  const userId = process.env.TEST_USER_ID;
+  if (!userId) {
+    log('error', 'Set TEST_USER_ID=<connected user id> to run the cycle. Aborting.');
+    process.exit(1);
+  }
+  log('info', `Mode: ${dryRun ? 'DRY RUN (no bid posted)' : 'REAL BID (will post one bid)'} | user:${userId}`);
 
   // 1. Parse
   log('info', 'Step 1/5 — parsing feed…');
@@ -63,15 +68,14 @@ async function main() {
   // 3-5. Open → fill → (submit or stop)
   log('info', `Step 3-5/5 — opening project page, filling${dryRun ? '' : ' + submitting'}…`);
   const days = parseInt(String(bid.deadline ?? '14'), 10) || 14;
-  const testUserId = process.env.TEST_USER_ID ?? 'test-user';
   const result = await submitBidViaBrowser({
-    userId:     testUserId,
-    projectId:  project.id.replace('fh_', ''),
+    userId,
+    projectId: project.id.replace('fh_', ''),
     projectUrl: project.projectUrl,
-    comment:    bid.text,
-    amount:     bid.price && bid.price > 0 ? bid.price : project.budget || 500,
+    comment: bid.text,
+    amount: bid.price && bid.price > 0 ? bid.price : project.budget || 500,
     days,
-    safeType:   'no_safe',
+    safeType: 'no_safe',
     dryRun,
     log: (lvl, msg) => log(lvl, msg),
   });
