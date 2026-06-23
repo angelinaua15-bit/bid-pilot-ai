@@ -24,11 +24,23 @@ import { Logger, LogLevel } from 'telegram/extensions/Logger.js'
 // ---------------------------------------------------------------------------
 
 function getCredentials(): { apiId: number; apiHash: string } {
-  const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0)
-  const apiHash = process.env.TELEGRAM_API_HASH ?? ''
-  if (!apiId || !apiHash) {
-    throw new Error('TELEGRAM_API_ID or TELEGRAM_API_HASH env var is missing')
+  const rawApiId = process.env.TELEGRAM_API_ID
+  const apiHash  = process.env.TELEGRAM_API_HASH ?? ''
+
+  const apiIdSet   = Boolean(rawApiId)
+  const apiHashSet = Boolean(apiHash)
+
+  console.log(`[telegram-mtproto] getCredentials — apiIdSet:${apiIdSet} apiHashSet:${apiHashSet}`)
+
+  if (!apiIdSet || !apiHashSet) {
+    throw new Error('TELEGRAM_ENV_MISSING: TELEGRAM_API_ID or TELEGRAM_API_HASH is not set')
   }
+
+  const apiId = Number(rawApiId)
+  if (!Number.isFinite(apiId) || apiId <= 0) {
+    throw new Error(`API_ID_INVALID: TELEGRAM_API_ID="${rawApiId}" is not a valid positive number`)
+  }
+
   return { apiId, apiHash }
 }
 
@@ -108,18 +120,20 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     const client = makeClient(apiId, apiHash)
 
     try {
-      // ── Use the GramJS high-level sendCode() — NOT client.invoke(Api.auth.SendCode) ──
-      //
-      // client.sendCode() handles DC migration automatically (PHONE_MIGRATE_X errors).
-      // Low-level client.invoke(Api.auth.SendCode) on a fresh StringSession('') does NOT
-      // handle DC migration, so the code silently fails to be delivered on the first
-      // attempt for numbers that live on a non-default Telegram DC.
-      //
-      // client.connect() is called internally by sendCode(); no need to call it first.
+      // ── Step 1: explicit connect ─────────────────────────────────────────────
+      // client.sendCode() does NOT call connect() internally — you MUST connect first.
+      // Without this, GramJS throws "Cannot send requests while disconnected."
       console.log(`SEND_CODE_CONNECTING — phone:${phoneNumber}`)
+      await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, `connect (attempt ${attempt})`)
+      console.log(`clientConnected:true — attempt:${attempt} phone:${phoneNumber}`)
+
+      // ── Step 2: high-level sendCode (handles DC migration automatically) ─────
+      // client.sendCode() handles PHONE_MIGRATE_X transparently.
+      // Do NOT use client.invoke(Api.auth.SendCode) — it does not handle DC migration.
+      console.log(`sendCodeStarted — phone:${phoneNumber}`)
       const result = await withTimeout(
         client.sendCode({ apiId, apiHash }, phoneNumber),
-        SEND_CODE_CONNECT_TIMEOUT + SEND_CODE_INVOKE_TIMEOUT,
+        SEND_CODE_INVOKE_TIMEOUT,
         `sendCode (attempt ${attempt})`,
       )
 
@@ -133,7 +147,7 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
       const codeTypeRaw  = isCodeViaApp ? 'app' : 'sms'
 
       console.log(
-        `TELEGRAM_SEND_CODE_RESPONSE — phone:${phoneNumber}` +
+        `sendCodeResult — phone:${phoneNumber}` +
         ` phoneCodeHash:${result.phoneCodeHash}` +
         ` isCodeViaApp:${isCodeViaApp}` +
         ` codeType:${codeTypeRaw}` +

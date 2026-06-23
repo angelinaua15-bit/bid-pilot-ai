@@ -31,21 +31,33 @@ export async function POST(req: NextRequest) {
     }
 
     // Validate env vars up front — give a clear error instead of a cryptic GramJS crash
-    const apiId   = Number(process.env.TELEGRAM_API_ID ?? 0);
-    const apiHash = process.env.TELEGRAM_API_HASH ?? '';
+    const rawApiId = process.env.TELEGRAM_API_ID;
+    const apiHash  = process.env.TELEGRAM_API_HASH ?? '';
+    const apiId    = Number(rawApiId ?? 0);
+    const apiIdSet   = Boolean(rawApiId);
+    const apiHashSet = Boolean(apiHash);
 
     console.log('[send-code] handler', {
       accountId,
       requesterId:   requesterId ?? '(not provided)',
-      apiIdSet:      Boolean(apiId),
-      apiHashLen:    apiHash.length,
+      apiIdSet,
+      apiHashSet,
+      apiIdValue:    apiIdSet ? apiId : '(not set)',
+      apiIdValid:    apiIdSet && Number.isFinite(apiId) && apiId > 0,
       handledBy:     'vercel',
     });
 
-    if (!apiId || !apiHash) {
-      console.error('[send-code] TELEGRAM_API_ID or TELEGRAM_API_HASH not set');
+    if (!apiIdSet || !apiHashSet) {
+      console.error('[send-code] TELEGRAM_ENV_MISSING — TELEGRAM_API_ID or TELEGRAM_API_HASH not set');
       return NextResponse.json(
-        { ok: false, error: 'Telegram API credentials not configured on server', phoneHashExists: false },
+        { ok: false, error: 'TELEGRAM_ENV_MISSING: Змінні TELEGRAM_API_ID / TELEGRAM_API_HASH не налаштовані на сервері', phoneHashExists: false },
+        { status: 503 }
+      );
+    }
+    if (!Number.isFinite(apiId) || apiId <= 0) {
+      console.error(`[send-code] API_ID_INVALID — TELEGRAM_API_ID="${rawApiId}" is not a valid number`);
+      return NextResponse.json(
+        { ok: false, error: `API_ID_INVALID: TELEGRAM_API_ID="${rawApiId}" не є числом`, phoneHashExists: false },
         { status: 503 }
       );
     }
@@ -109,7 +121,13 @@ export async function POST(req: NextRequest) {
     let friendlyError = message;
     let status = 500;
 
-    if (/PHONE_NUMBER_INVALID|INVALID_PHONE/i.test(message)) {
+    if (/TELEGRAM_ENV_MISSING/i.test(message)) {
+      friendlyError = 'Змінні TELEGRAM_API_ID / TELEGRAM_API_HASH не налаштовані на сервері';
+      status = 503;
+    } else if (/API_ID_INVALID/i.test(message)) {
+      friendlyError = 'TELEGRAM_API_ID не є коректним числом або заблокований Telegram';
+      status = 503;
+    } else if (/PHONE_NUMBER_INVALID|INVALID_PHONE/i.test(message)) {
       friendlyError = 'Невірний формат номера телефону';
       status = 400;
     } else if (/PHONE_NUMBER_BANNED/i.test(message)) {
