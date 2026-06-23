@@ -3,34 +3,35 @@
  *
  * Wraps GramJS (TelegramClient) for three operations:
  *  1. sendTelegramCode    — send OTP via MTProto, returns phoneHash + sessionString
- *  2. signInWithCode      — verify OTP (+ optional 2FA), returns final sessionString
- *  3. sendMessageMTProto  — send a message using an existing session
+ *  2. resendTelegramCode  — resend via auth.ResendCode (nextType fallback: SMS/call)
+ *  3. signInWithCode      — verify OTP (+ optional 2FA), returns final sessionString
+ *  4. sendMessageMTProto  — send a message using an existing session
  *
- * Design notes for serverless (Next.js API routes):
- * - Each function creates its own fresh TelegramClient.
- * - connect() is called before every invoke; disconnect() in finally.
- * - A 30-second timeout wraps the whole operation to prevent hanging.
- * - All GramJS errors are re-thrown with their original message so callers
- *   can map them to friendly error strings.
+ * Design rules for serverless (Next.js / Vercel):
+ * - Each function creates its own fresh TelegramClient — NO shared singleton.
+ * - await client.connect() MUST be called before every invoke().
+ * - client.disconnect() MUST be called in finally.
+ * - A timeout wraps every network call to prevent Vercel function hangs.
+ * - DO NOT use client.sendCode() — it does not exist in GramJS v2.
+ * - Use client.invoke(Api.auth.SendCode) directly (original working pattern).
  */
 
 import { TelegramClient } from 'telegram'
-import { StringSession } from 'telegram/sessions/index.js'
-import { Api } from 'telegram/tl/index.js'
+import { StringSession }  from 'telegram/sessions/index.js'
+import { Api }            from 'telegram/tl/index.js'
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js'
 
 // ---------------------------------------------------------------------------
-// Credentials
+// Credentials — validated once at call-time, never cached
 // ---------------------------------------------------------------------------
 
 function getCredentials(): { apiId: number; apiHash: string } {
-  const rawApiId = process.env.TELEGRAM_API_ID
-  const apiHash  = process.env.TELEGRAM_API_HASH ?? ''
-
-  const apiIdSet   = Boolean(rawApiId)
+  const rawApiId  = process.env.TELEGRAM_API_ID
+  const apiHash   = process.env.TELEGRAM_API_HASH ?? ''
+  const apiIdSet  = Boolean(rawApiId)
   const apiHashSet = Boolean(apiHash)
 
-  console.log(`[telegram-mtproto] getCredentials — apiIdSet:${apiIdSet} apiHashSet:${apiHashSet}`)
+  console.log(`[telegram] getCredentials — apiIdSet:${apiIdSet} apiHashSet:${apiHashSet}`)
 
   if (!apiIdSet || !apiHashSet) {
     throw new Error('TELEGRAM_ENV_MISSING: TELEGRAM_API_ID or TELEGRAM_API_HASH is not set')
@@ -45,7 +46,7 @@ function getCredentials(): { apiId: number; apiHash: string } {
 }
 
 // ---------------------------------------------------------------------------
-// Helper: build a silent client
+// Factory — always creates a fresh client with a clean (or restored) session
 // ---------------------------------------------------------------------------
 
 function makeClient(apiId: number, apiHash: string, sessionStr = ''): TelegramClient {
@@ -53,25 +54,25 @@ function makeClient(apiId: number, apiHash: string, sessionStr = ''): TelegramCl
   const logger  = new Logger(LogLevel.ERROR)
 
   return new TelegramClient(session, apiId, apiHash, {
-    // useWSS: false — use raw TCP. GramJS handles DC migration and port selection
-    // internally. Switching to WSS broke delivery because the handshake sequence
-    // differs and GramJS's high-level methods are tested primarily with raw TCP.
-    connectionRetries: 5,
+    connectionRetries: 3,
     retryDelay:        1_000,
-    useWSS:            false,
+    useWSS:            false,   // raw TCP — original working setting; WSS breaks GramJS DC migration
     baseLogger:        logger,
   })
 }
 
 // ---------------------------------------------------------------------------
-// Helper: abort after N ms
+// Timeout helper
 // ---------------------------------------------------------------------------
 
 function withTimeout<T>(promise: Promise<T>, ms: number, label: string): Promise<T> {
   return Promise.race([
     promise,
     new Promise<never>((_, reject) =>
-      setTimeout(() => reject(new Error(`[telegram-mtproto] ${label} timed out after ${ms}ms`)), ms)
+      setTimeout(
+        () => reject(new Error(`[telegram] ${label} timed out after ${ms}ms`)),
+        ms,
+      )
     ),
   ])
 }
@@ -84,12 +85,14 @@ export interface SendCodeResult {
   phoneHash:     string
   isCodeViaApp:  boolean
   sessionString: string
-  /** Raw Telegram type className, e.g. "auth.SentCodeTypeApp" or "auth.SentCodeTypeSms" */
+  /** "app" | "sms" | "call" | raw className */
   codeType:      string
-  /** Next fallback type Telegram will use on resend, if provided */
   nextType?:     string
-  /** Seconds until resend is allowed (Telegram FLOOD_WAIT equivalent for this code) */
   timeout?:      number
+}
+
+export interface ResendCodeResult extends SendCodeResult {
+  typeChanged: boolean
 }
 
 export interface SignInResult {
@@ -101,103 +104,98 @@ export interface SignInResult {
 
 // ---------------------------------------------------------------------------
 // 1. sendTelegramCode
+//    Uses client.invoke(Api.auth.SendCode) — the original working pattern.
+//    DO NOT replace with client.sendCode() — that method does not exist in GramJS v2.
 // ---------------------------------------------------------------------------
 
-// ── Timeout budgets designed for Vercel's 60-second function limit ──────────
-// connect: 20s + SendCode: 25s = 45s max per attempt — leaves 15s buffer.
-// Only 1 attempt on Vercel to avoid exceeding the 60s limit.
-const SEND_CODE_MAX_ATTEMPTS    = 1
-const SEND_CODE_CONNECT_TIMEOUT = 20_000
-const SEND_CODE_INVOKE_TIMEOUT  = 25_000
+const CONNECT_TIMEOUT    = 20_000   // 20 s
+const SEND_CODE_TIMEOUT  = 20_000   // 20 s
+const SIGN_IN_TIMEOUT    = 20_000   // 20 s
 
 export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeResult> {
   const { apiId, apiHash } = getCredentials()
 
-  let lastError: Error = new Error('sendTelegramCode: no attempts made')
+  // Always create a brand-new client with an empty session for sendCode.
+  // Never reuse a cached client — stale sessions cause DC mismatch failures.
+  const client = makeClient(apiId, apiHash)
 
-  for (let attempt = 1; attempt <= SEND_CODE_MAX_ATTEMPTS; attempt++) {
-    console.log(`SEND_CODE_STARTED — attempt:${attempt} phone:${phoneNumber} apiId:${apiId}`)
-    const client = makeClient(apiId, apiHash)
+  console.log(`[telegram/sendCode] STARTED — phone:${phoneNumber} apiId:${apiId}`)
 
-    try {
-      // ── Step 1: explicit connect ─────────────────────────────────────────────
-      // client.sendCode() does NOT call connect() internally — you MUST connect first.
-      // Without this, GramJS throws "Cannot send requests while disconnected."
-      console.log(`SEND_CODE_CONNECTING — phone:${phoneNumber}`)
-      await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, `connect (attempt ${attempt})`)
-      console.log(`clientConnected:true — attempt:${attempt} phone:${phoneNumber}`)
+  try {
+    // Step 1: connect — MUST be called before any invoke()
+    console.log(`[telegram/sendCode] CONNECTING — phone:${phoneNumber}`)
+    await withTimeout(client.connect(), CONNECT_TIMEOUT, 'sendCode/connect')
+    console.log(`[telegram/sendCode] CONNECTED — phone:${phoneNumber}`)
 
-      // ── Step 2: high-level sendCode (handles DC migration automatically) ─────
-      // client.sendCode() handles PHONE_MIGRATE_X transparently.
-      // Do NOT use client.invoke(Api.auth.SendCode) — it does not handle DC migration.
-      console.log(`sendCodeStarted — phone:${phoneNumber}`)
-      const result = await withTimeout(
-        client.sendCode({ apiId, apiHash }, phoneNumber),
-        SEND_CODE_INVOKE_TIMEOUT,
-        `sendCode (attempt ${attempt})`,
-      )
+    // Step 2: send code via MTProto
+    // allowAppHash:true  → Telegram may deliver to the Telegram app (SentCodeTypeApp)
+    // allowAppHash:false → Telegram forces SMS
+    // We use true (original working setting) so Telegram picks the best method.
+    // isCodeViaApp in the response tells the UI which channel was used.
+    const result = await withTimeout(
+      client.invoke(
+        new Api.auth.SendCode({
+          phoneNumber,
+          apiId,
+          apiHash,
+          settings: new Api.CodeSettings({
+            allowFlashcall: false,
+            currentNumber:  false,
+            allowAppHash:   true,
+          }),
+        })
+      ),
+      SEND_CODE_TIMEOUT,
+      'auth.SendCode',
+    ) as Api.auth.SentCode
 
-      // Serialise session AFTER sendCode so DC routing data is preserved
-      const sessionString = (client.session.save() as unknown) as string
+    // Serialise session AFTER sendCode — DC routing data is now baked in
+    const sessionString = (client.session.save() as unknown) as string
 
-      // client.sendCode() returns { phoneCodeHash, isCodeViaApp: boolean }
-      // isCodeViaApp=true  → Telegram sent the code to the user's Telegram app
-      // isCodeViaApp=false → Telegram sent the code via SMS
-      const isCodeViaApp = result.isCodeViaApp
-      const codeTypeRaw  = isCodeViaApp ? 'app' : 'sms'
+    const typeClass    = result.type?.className ?? ''
+    const typeId       = (result.type as unknown as { CONSTRUCTOR_ID?: number })?.CONSTRUCTOR_ID
+    const isCodeViaApp = typeClass === 'auth.SentCodeTypeApp' ||
+                         typeClass.includes('SentCodeTypeApp') ||
+                         typeId === 0x3dbb5986
 
-      console.log(
-        `sendCodeResult — phone:${phoneNumber}` +
-        ` phoneCodeHash:${result.phoneCodeHash}` +
-        ` isCodeViaApp:${isCodeViaApp}` +
-        ` codeType:${codeTypeRaw}` +
-        ` hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`
-      )
-      console.log(`SEND_CODE_SUCCESS — attempt:${attempt} codeType:${codeTypeRaw} isCodeViaApp:${isCodeViaApp}`)
+    const nextTypeClass = (result as unknown as { nextType?: { className?: string } })?.nextType?.className
+    const codeTimeout   = (result as unknown as { timeout?: number })?.timeout
+    const codeType      = isCodeViaApp ? 'app' : (typeClass.toLowerCase().includes('sms') ? 'sms' : typeClass)
 
-      return {
-        phoneHash:    result.phoneCodeHash,
-        isCodeViaApp,
-        sessionString,
-        codeType:     codeTypeRaw,
-        nextType:     undefined,
-        timeout:      undefined,
-      }
-    } catch (err) {
-      lastError = err instanceof Error ? err : new Error(String(err))
-      console.error(`SEND_CODE_FAILED — attempt:${attempt} error: ${lastError.message}`)
+    console.log(
+      `[telegram/sendCode] RESPONSE` +
+      ` — phone:${phoneNumber}` +
+      ` phoneCodeHash:${result.phoneCodeHash}` +
+      ` type.className:${typeClass}` +
+      ` nextType.className:${nextTypeClass ?? 'none'}` +
+      ` timeout:${codeTimeout ?? 'none'}` +
+      ` isCodeViaApp:${isCodeViaApp}`
+    )
+    console.log(`[telegram/sendCode] SUCCESS — codeType:${codeType} hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`)
 
-      const msg = lastError.message
-      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|PHONE_NUMBER_FLOOD|API_ID_INVALID|PHONE_NUMBER_UNOCCUPIED|^Unauthorized$/.test(msg) ||
-          msg === 'Unauthorized') {
-        console.log('[telegram/sendCode] permanent error — not retrying:', msg)
-        throw lastError
-      }
-
-      if (attempt >= SEND_CODE_MAX_ATTEMPTS) {
-        console.log(`[telegram/sendCode] max attempts reached`)
-      }
-    } finally {
-      client.disconnect().catch(() => {})
+    return {
+      phoneHash:    result.phoneCodeHash,
+      isCodeViaApp,
+      sessionString,
+      codeType,
+      nextType:  nextTypeClass,
+      timeout:   typeof codeTimeout === 'number' ? codeTimeout : undefined,
     }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[telegram/sendCode] FAILED — phone:${phoneNumber} error:${msg}`)
+    throw err instanceof Error ? err : new Error(msg)
+  } finally {
+    client.disconnect().catch(() => {})
   }
-
-  throw new Error(
-    `SEND_CODE_FAILED — Telegram connection failed after ${SEND_CODE_MAX_ATTEMPTS} attempt(s). ` +
-    `Last error: ${lastError.message}. ` +
-    `Possible causes: cloud IP blocks, invalid api_id, or network timeout.`
-  )
 }
 
 // ---------------------------------------------------------------------------
-// 1b. resendTelegramCode  — calls auth.ResendCode with existing phoneHash
-//     so Telegram delivers the code via the nextType method (e.g. SMS / call)
+// 2. resendTelegramCode
+//    Calls auth.ResendCode with the existing phoneHash so Telegram delivers
+//    via the nextType fallback (SMS or call instead of app notification).
+//    Requires an existing session string from the previous sendCode call.
 // ---------------------------------------------------------------------------
-
-export interface ResendCodeResult extends SendCodeResult {
-  /** true when resend succeeded; false if resend returned the same type (nothing changed) */
-  typeChanged: boolean
-}
 
 export async function resendTelegramCode(
   phoneNumber:   string,
@@ -205,18 +203,22 @@ export async function resendTelegramCode(
   sessionString: string,
 ): Promise<ResendCodeResult> {
   const { apiId, apiHash } = getCredentials()
+
+  // Restore the existing session so we hit the same DC as the original sendCode
   const client = makeClient(apiId, apiHash, sessionString)
 
-  console.log(`RESEND_CODE_STARTED — phone:${phoneNumber} hashPrefix:${phoneHash.slice(0, 8)}`)
+  console.log(`[telegram/resendCode] STARTED — phone:${phoneNumber} hashPrefix:${phoneHash.slice(0, 8)}`)
 
   try {
-    await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, 'resend/connect')
+    console.log(`[telegram/resendCode] CONNECTING`)
+    await withTimeout(client.connect(), CONNECT_TIMEOUT, 'resendCode/connect')
+    console.log(`[telegram/resendCode] CONNECTED`)
 
     const result = await withTimeout(
       client.invoke(
         new Api.auth.ResendCode({ phoneNumber, phoneCodeHash: phoneHash })
       ),
-      SEND_CODE_INVOKE_TIMEOUT,
+      SEND_CODE_TIMEOUT,
       'auth.ResendCode',
     ) as Api.auth.SentCode
 
@@ -231,9 +233,11 @@ export async function resendTelegramCode(
     const nextTypeClass = (result as unknown as { nextType?: { className?: string } })?.nextType?.className
     const codeTimeout   = (result as unknown as { timeout?: number })?.timeout
     const newHash       = result.phoneCodeHash
+    const codeType      = isCodeViaApp ? 'app' : (typeClass.toLowerCase().includes('sms') ? 'sms' : typeClass)
 
     console.log(
-      `RESEND_CODE_SUCCESS — phone:${phoneNumber}` +
+      `[telegram/resendCode] SUCCESS` +
+      ` — phone:${phoneNumber}` +
       ` type:${typeClass} isCodeViaApp:${isCodeViaApp}` +
       ` nextType:${nextTypeClass ?? 'none'}` +
       ` timeout:${codeTimeout ?? 'none'}` +
@@ -241,25 +245,27 @@ export async function resendTelegramCode(
     )
 
     return {
-      phoneHash:    newHash,
+      phoneHash:     newHash,
       isCodeViaApp,
       sessionString: newSessionString,
-      codeType:     typeClass,
+      codeType,
       nextType:     nextTypeClass,
       timeout:      typeof codeTimeout === 'number' ? codeTimeout : undefined,
-      typeChanged:  typeClass !== (isCodeViaApp ? 'auth.SentCodeTypeApp' : ''),
+      typeChanged:  newHash !== phoneHash,
     }
   } catch (err) {
-    const error = err instanceof Error ? err : new Error(String(err))
-    console.error(`RESEND_CODE_FAILED — phone:${phoneNumber} error: ${error.message}`)
-    throw error
+    const msg = err instanceof Error ? err.message : String(err)
+    console.error(`[telegram/resendCode] FAILED — phone:${phoneNumber} error:${msg}`)
+    throw err instanceof Error ? err : new Error(msg)
   } finally {
     client.disconnect().catch(() => {})
   }
 }
 
 // ---------------------------------------------------------------------------
-// 2. signInWithCode
+// 3. signInWithCode
+//    Verifies the OTP.  Restores the session from sendCode so we hit the same DC.
+//    Handles SESSION_PASSWORD_NEEDED (2FA) transparently.
 // ---------------------------------------------------------------------------
 
 export async function signInWithCode(
@@ -271,22 +277,33 @@ export async function signInWithCode(
 ): Promise<SignInResult> {
   const { apiId, apiHash } = getCredentials()
 
-  // Restore session so we reconnect to the same DC used during sendCode
+  // Restore the session so GramJS reconnects to the same DC used in sendCode.
+  // If existingSession is empty, GramJS will re-negotiate the DC — slower but works.
   const client = makeClient(apiId, apiHash, existingSession ?? '')
 
-  console.log(`CONFIRM_CODE_STARTED — phone:${phoneNumber} hashPrefix:${phoneHash.slice(0, 8)} hasSession:${Boolean(existingSession)}`)
-
-  await withTimeout(client.connect(), 25_000, 'connect')
-  console.log('[telegram/signIn] connected, invoking auth.SignIn')
+  console.log(
+    `[telegram/signIn] STARTED` +
+    ` — phone:${phoneNumber}` +
+    ` hashPrefix:${phoneHash.slice(0, 8)}` +
+    ` hasSession:${Boolean(existingSession)}`
+  )
 
   try {
+    console.log(`[telegram/signIn] CONNECTING`)
+    await withTimeout(client.connect(), CONNECT_TIMEOUT, 'signIn/connect')
+    console.log(`[telegram/signIn] CONNECTED — invoking auth.SignIn`)
+
     try {
-      await client.invoke(
-        new Api.auth.SignIn({
-          phoneNumber,
-          phoneCodeHash: phoneHash,
-          phoneCode:     code,
-        })
+      await withTimeout(
+        client.invoke(
+          new Api.auth.SignIn({
+            phoneNumber,
+            phoneCodeHash: phoneHash,
+            phoneCode:     code,
+          })
+        ),
+        SIGN_IN_TIMEOUT,
+        'auth.SignIn',
       )
     } catch (signInErr: unknown) {
       const msg = (signInErr as Error)?.message ?? ''
@@ -294,35 +311,44 @@ export async function signInWithCode(
       if (msg.includes('SESSION_PASSWORD_NEEDED')) {
         if (!password) throw new Error('SESSION_PASSWORD_NEEDED')
 
-        console.log('[telegram/signIn] 2FA required, checking password')
-        const srpParams = await client.invoke(new Api.account.GetPassword())
+        console.log('[telegram/signIn] 2FA required — checking password')
+        const srpParams = await withTimeout(
+          client.invoke(new Api.account.GetPassword()),
+          SIGN_IN_TIMEOUT,
+          'account.GetPassword',
+        )
         const { computeCheck } = await import('telegram/Password.js')
         const srpCheck = await computeCheck(srpParams, password)
-        await client.invoke(new Api.auth.CheckPassword({ password: srpCheck }))
+        await withTimeout(
+          client.invoke(new Api.auth.CheckPassword({ password: srpCheck })),
+          SIGN_IN_TIMEOUT,
+          'auth.CheckPassword',
+        )
       } else {
-        const signInErrMsg = (signInErr as Error)?.message ?? String(signInErr)
-        console.error(`SIGN_IN_FAILED — phone:${phoneNumber} error:${signInErrMsg}`)
+        console.error(`[telegram/signIn] FAILED — phone:${phoneNumber} error:${msg}`)
         throw signInErr
       }
     }
 
     const sessionString = (client.session.save() as unknown) as string
-    console.log(`SIGN_IN_SUCCESS — phone:${phoneNumber}`)
+    console.log(`[telegram/signIn] SUCCESS — phone:${phoneNumber}`)
 
-    // Validate session with getMe() — confirms the auth key works
+    // getMe() — confirms the auth key is valid; non-fatal if it fails
     let telegramId: string | undefined
     let username:   string | undefined
     let firstName:  string | undefined
     try {
-      const me = await client.invoke(
-        new Api.users.GetUsers({ id: [new Api.InputUserSelf()] })
+      const me = await withTimeout(
+        client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] })),
+        10_000,
+        'GetUsers/self',
       ) as Api.User[]
-      const user = me?.[0]
-      if (user) {
-        telegramId = String(user.id)
-        username   = user.username ?? undefined
-        firstName  = user.firstName ?? undefined
-        console.log('[telegram/signIn] getMe OK — id:', telegramId, 'username:', username)
+      const u = me?.[0]
+      if (u) {
+        telegramId = String(u.id)
+        username   = u.username  ?? undefined
+        firstName  = u.firstName ?? undefined
+        console.log(`[telegram/signIn] getMe OK — id:${telegramId} username:${username}`)
       }
     } catch (getMeErr) {
       console.warn('[telegram/signIn] getMe failed (non-fatal):', (getMeErr as Error)?.message)
@@ -335,7 +361,7 @@ export async function signInWithCode(
 }
 
 // ---------------------------------------------------------------------------
-// 3. sendMessageMTProto
+// 4. sendMessageMTProto
 // ---------------------------------------------------------------------------
 
 export async function sendMessageMTProto(
@@ -347,7 +373,7 @@ export async function sendMessageMTProto(
   const client = makeClient(apiId, apiHash, sessionString)
 
   console.log('[telegram/sendMessage] connecting for peer', peer)
-  await withTimeout(client.connect(), 25_000, 'connect')
+  await withTimeout(client.connect(), CONNECT_TIMEOUT, 'sendMessage/connect')
   try {
     await withTimeout(
       client.sendMessage(peer, { message: text, parseMode: 'html' }),

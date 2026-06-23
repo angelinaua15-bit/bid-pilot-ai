@@ -507,7 +507,7 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
   );
 }
 
-// ── Telegram Accounts Tab ───────────────────�����─────────────────────────────────
+// ── Telegram Accounts Tab ────────────────��──�����─────────────────────────────────
 
 type WizardStep = 'idle' | 'phone' | 'code' | 'password' | 'done';
 
@@ -815,13 +815,20 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     }
   }
 
-  /** Delete the account row + clear local state so user can start completely fresh */
+  /**
+   * Fully cancel the current auth flow and start from scratch.
+   * Clears: OTP session (phoneCodeHash + sessionString), account row,
+   * and all local wizard state.
+   */
   async function handleCancelAndRestart() {
     setError('');
     if (currentAccountId) {
-      try {
-        await fetch(`/api/telegram/accounts?id=${currentAccountId}`, { method: 'DELETE' });
-      } catch { /* ignore — even if delete fails, reset UI */ }
+      // 1. Delete stored OTP session (phoneCodeHash + sessionString) first
+      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}`, { method: 'DELETE' })
+        .catch(() => {});
+      // 2. Delete the account row so next attempt creates a fresh one
+      await fetch(`/api/telegram/accounts?id=${currentAccountId}`, { method: 'DELETE' })
+        .catch(() => {});
     }
     resetWizard();
     await load();
