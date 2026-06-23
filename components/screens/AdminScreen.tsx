@@ -644,9 +644,14 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId: currentAccountId, code: code.trim() }),
       });
-      const data = await res.json() as { ok: boolean; requires2fa?: boolean; error?: string };
+      const data = await res.json() as {
+        ok: boolean; requires2fa?: boolean; error?: string;
+        codeExpired?: boolean; authRestart?: boolean;
+      };
       if (!data.ok) {
-        if (data.requires2fa) { setStep('password'); return; }
+        if (data.requires2fa)  { setStep('password'); return; }
+        if (data.codeExpired)  { setError('Код протермінований. Натисніть "Надіслати знову" щоб отримати новий.'); return; }
+        if (data.authRestart)  { setError('Telegram вимагає перезапуску. Натисніть "Скасувати і почати заново".'); return; }
         setError(data.error ?? 'Невірний код');
         return;
       }
@@ -681,14 +686,32 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     }
   }
 
+  /** Apply a successful send/resend response to UI state */
+  function applyCodeResponse(
+    res: { ok: true; isCodeViaApp?: boolean; codeType?: string; nextType?: string | null; timeout?: number | null },
+    url: string,
+    rawStatus: number,
+    rawJson: Record<string, unknown>,
+  ) {
+    setSendCodeDebug({ url, status: rawStatus, json: rawJson, phoneHashExists: true });
+    setIsCodeViaApp(res.isCodeViaApp ?? false);
+    setCodeType(res.codeType ?? '');
+    setNextType(res.nextType ?? null);
+    setCodeTimeout(res.timeout ?? null);
+    setResendCooldown(res.timeout ?? 60);
+    setCode('');
+    setStep('code');
+  }
+
+  /** Send a fresh OTP — used when resending to an existing account from the list */
   async function handleResendCode(accountId: string) {
     setError('');
     setWorking(true);
     setCurrentAccountId(accountId);
     setSendCodeDebug(null);
     try {
-      const codeUrl = '/api/telegram/accounts/send-code';
-      const res = await fetch(codeUrl, {
+      const url = '/api/telegram/accounts/send-code';
+      const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ accountId, requesterId: user.id }),
@@ -699,26 +722,68 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
         codeType?: string; nextType?: string | null; timeout?: number | null;
       };
       setSendCodeDebug({
-        url:             codeUrl,
-        status:          res.status,
-        json:            data as Record<string, unknown>,
-        phoneHashExists: data.phoneHashExists ?? false,
-        telegramError:   data.telegramError,
+        url, status: res.status, json: data as Record<string, unknown>,
+        phoneHashExists: data.phoneHashExists ?? false, telegramError: data.telegramError,
       });
       if (!data.ok) { setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код'); return; }
       if (!data.phoneHashExists) { setError('Telegram не повернув phoneCodeHash — код не відправлено'); return; }
-      setIsCodeViaApp(data.isCodeViaApp ?? false);
-      setCodeType(data.codeType ?? '');
-      setNextType(data.nextType ?? null);
-      setCodeTimeout(data.timeout ?? null);
-      setResendCooldown(data.timeout ?? 60);
-      setCode('');
-      setStep('code');
+      applyCodeResponse(data as Parameters<typeof applyCodeResponse>[0], url, res.status, data as Record<string, unknown>);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Помилка мережі');
     } finally {
       setWorking(false);
     }
+  }
+
+  /** Resend via auth.ResendCode so Telegram delivers via nextType (SMS/call) */
+  async function handleResendViaNextType() {
+    if (!currentAccountId) return;
+    setError('');
+    setWorking(true);
+    try {
+      const url = '/api/telegram/accounts/resend-code';
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: currentAccountId }),
+      });
+      const data = await res.json() as {
+        ok: boolean; error?: string; telegramError?: string;
+        isCodeViaApp?: boolean; phoneHashExists?: boolean; sessionExpired?: boolean;
+        codeType?: string; nextType?: string | null; timeout?: number | null;
+      };
+      setSendCodeDebug({
+        url, status: res.status, json: data as Record<string, unknown>,
+        phoneHashExists: data.phoneHashExists ?? false, telegramError: data.telegramError,
+      });
+      if (!data.ok) {
+        // OTP session expired — need a full restart
+        if (data.sessionExpired) {
+          setError('Сесія авторизації протермінувалась. Натисніть "Скасувати і почати заново".');
+          return;
+        }
+        setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код');
+        return;
+      }
+      if (!data.phoneHashExists) { setError('Telegram не повернув phoneCodeHash'); return; }
+      applyCodeResponse(data as Parameters<typeof applyCodeResponse>[0], url, res.status, data as Record<string, unknown>);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка мережі');
+    } finally {
+      setWorking(false);
+    }
+  }
+
+  /** Delete the account row + clear local state so user can start completely fresh */
+  async function handleCancelAndRestart() {
+    setError('');
+    if (currentAccountId) {
+      try {
+        await fetch(`/api/telegram/accounts?id=${currentAccountId}`, { method: 'DELETE' });
+      } catch { /* ignore — even if delete fails, reset UI */ }
+    }
+    resetWizard();
+    await load();
   }
 
   async function handleTestConnection(accountId: string) {
@@ -814,25 +879,31 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
 
               {/* Delivery method banner */}
               {isCodeViaApp ? (
-                <div className="rounded-xl bg-blue-500/10 border border-blue-500/25 px-3 py-2.5 space-y-1">
-                  <p className="text-[12px] font-medium text-blue-400">
+                <div className="rounded-xl bg-blue-500/10 border border-blue-500/25 px-3 py-2.5 space-y-1.5">
+                  <p className="text-[12px] font-semibold text-blue-400">
                     Код надіслано в Telegram-додаток, не SMS.
                   </p>
                   <p className="text-[11px] text-blue-300/80 leading-relaxed">
-                    Перевірте Telegram на номері, який ви вказали. Відкрийте додаток Telegram
-                    &mdash; там повинно прийти повідомлення від офіційного бота з кодом.
+                    Відкрийте Telegram на цьому номері &mdash; там має бути системне повідомлення з кодом.
+                    Якщо ви не бачите Telegram або код не прийшов &mdash; скористайтесь кнопками нижче.
                   </p>
-                  {nextType && (
-                    <p className="text-[11px] text-blue-300/60 pt-0.5">
-                      Якщо не прийшло &mdash; натисніть &laquo;Надіслати знову&raquo; щоб отримати
-                      {nextType.toLowerCase().includes('sms') ? ' SMS' : ` (${nextType})`}.
-                    </p>
-                  )}
+                </div>
+              ) : codeType.toLowerCase().includes('sms') ? (
+                <div className="rounded-xl bg-green-500/10 border border-green-500/25 px-3 py-2.5">
+                  <p className="text-[12px] text-green-400 font-medium">
+                    Код надіслано SMS на вказаний номер.
+                  </p>
+                </div>
+              ) : codeType.toLowerCase().includes('call') ? (
+                <div className="rounded-xl bg-yellow-500/10 border border-yellow-500/25 px-3 py-2.5">
+                  <p className="text-[12px] text-yellow-400 font-medium">
+                    Код надіслано дзвінком &mdash; підніміть слухавку і введіть цифри.
+                  </p>
                 </div>
               ) : (
-                <div className="rounded-xl bg-green-500/10 border border-green-500/25 px-3 py-2.5">
-                  <p className="text-[12px] text-green-400">
-                    Код надіслано SMS-повідомленням на вказаний номер.
+                <div className="rounded-xl bg-secondary px-3 py-2.5">
+                  <p className="text-[12px] text-muted-foreground">
+                    Перевірте Telegram або SMS на вказаному номері.
                   </p>
                 </div>
               )}
@@ -848,21 +919,49 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                 autoFocus
               />
 
-              {/* Resend button with cooldown */}
-              {currentAccountId && (
+              {/* Fallback action buttons */}
+              <div className="flex flex-col gap-1.5">
+                {/* If code was sent via app and nextType is SMS/call — show targeted fallback */}
+                {isCodeViaApp && nextType && currentAccountId && (
+                  <button
+                    disabled={working || resendCooldown > 0}
+                    onClick={handleResendViaNextType}
+                    className="w-full flex items-center justify-center gap-1.5 py-2.5 rounded-xl bg-blue-500/15 border border-blue-500/30 text-[12px] text-blue-400 font-medium disabled:opacity-50 hover:bg-blue-500/20 transition-colors"
+                  >
+                    <Send size={11} className={working ? 'animate-spin' : ''} />
+                    {working
+                      ? 'Надсилаю…'
+                      : resendCooldown > 0
+                        ? `Отримати ${nextType.toLowerCase().includes('sms') ? 'SMS' : nextType.toLowerCase().includes('call') ? 'дзвінок' : nextType} (${resendCooldown}с)`
+                        : `Отримати ${nextType.toLowerCase().includes('sms') ? 'SMS' : nextType.toLowerCase().includes('call') ? 'дзвінок' : nextType} замість`}
+                  </button>
+                )}
+
+                {/* Generic resend (fresh sendCode) with cooldown */}
+                {currentAccountId && (
+                  <button
+                    disabled={working || resendCooldown > 0}
+                    onClick={() => handleResendCode(currentAccountId)}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-border text-[12px] text-muted-foreground disabled:opacity-50 hover:bg-secondary/60 transition-colors"
+                  >
+                    <RefreshCw size={11} className={working ? 'animate-spin' : ''} />
+                    {working
+                      ? 'Надсилаю…'
+                      : resendCooldown > 0
+                        ? `Надіслати знову (${resendCooldown}с)`
+                        : 'Надіслати код ще раз'}
+                  </button>
+                )}
+
+                {/* Cancel and full restart — clears account row */}
                 <button
-                  disabled={working || resendCooldown > 0}
-                  onClick={() => handleResendCode(currentAccountId)}
-                  className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-border text-[12px] text-muted-foreground disabled:opacity-50 hover:bg-secondary/60 transition-colors"
+                  disabled={working}
+                  onClick={handleCancelAndRestart}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl text-[11px] text-red-400/80 hover:text-red-400 transition-colors disabled:opacity-50"
                 >
-                  <RefreshCw size={11} className={working ? 'animate-spin' : ''} />
-                  {working
-                    ? 'Надсилаю…'
-                    : resendCooldown > 0
-                      ? `Надіслати знову (${resendCooldown}с)`
-                      : 'Надіслати код знову'}
+                  Скасувати і почати заново
                 </button>
-              )}
+              </div>
             </>
           )}
           {step === 'password' && (

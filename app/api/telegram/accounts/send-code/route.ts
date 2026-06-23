@@ -104,30 +104,30 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Map well-known Telegram errors to friendly messages
+    // Map well-known Telegram errors to Ukrainian friendly messages
     let friendlyError = message;
     let status = 500;
 
     if (/PHONE_NUMBER_INVALID|INVALID_PHONE/i.test(message)) {
-      friendlyError = 'Invalid phone number format';
+      friendlyError = 'Невірний формат номера телефону';
       status = 400;
     } else if (/PHONE_NUMBER_BANNED/i.test(message)) {
-      friendlyError = 'This phone number is banned by Telegram';
+      friendlyError = 'Цей номер телефону заблокований у Telegram';
       status = 403;
     } else if (/FLOOD_WAIT/i.test(message)) {
       const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
-      friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
+      friendlyError = `Забагато спроб. Зачекайте ${seconds} секунд.`;
       status = 429;
     } else if (/API_ID_INVALID|api_id/i.test(message)) {
-      friendlyError = 'Invalid Telegram API credentials (API_ID_INVALID)';
+      friendlyError = 'Невірні облікові дані Telegram API (API_ID_INVALID)';
       status = 503;
     } else if (/^Unauthorized$|UNAUTHORIZED/i.test(message)) {
       friendlyError =
-        'Telegram rejected the request (401 Unauthorized). ' +
-        'The api_id may be blocked on cloud IPs — create a new app at my.telegram.org.';
+        'Telegram відхилив запит (401). ' +
+        'api_id може бути заблокований з хмарних IP — створіть новий додаток на my.telegram.org.';
       status = 503;
     } else if (/ECONNREFUSED|ENOTFOUND|fetch failed|network|timed out/i.test(message)) {
-      friendlyError = 'Cannot reach Telegram servers. Check network connection.';
+      friendlyError = 'Не вдалось зʼєднатися з Telegram. Перевірте мережу.';
       status = 503;
     }
 

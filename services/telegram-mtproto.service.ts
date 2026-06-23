@@ -204,6 +204,75 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 }
 
 // ---------------------------------------------------------------------------
+// 1b. resendTelegramCode  — calls auth.ResendCode with existing phoneHash
+//     so Telegram delivers the code via the nextType method (e.g. SMS / call)
+// ---------------------------------------------------------------------------
+
+export interface ResendCodeResult extends SendCodeResult {
+  /** true when resend succeeded; false if resend returned the same type (nothing changed) */
+  typeChanged: boolean
+}
+
+export async function resendTelegramCode(
+  phoneNumber:   string,
+  phoneHash:     string,
+  sessionString: string,
+): Promise<ResendCodeResult> {
+  const { apiId, apiHash } = getCredentials()
+  const client = makeClient(apiId, apiHash, sessionString)
+
+  console.log(`RESEND_CODE_STARTED — phone:${phoneNumber} hashPrefix:${phoneHash.slice(0, 8)}`)
+
+  try {
+    await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, 'resend/connect')
+
+    const result = await withTimeout(
+      client.invoke(
+        new Api.auth.ResendCode({ phoneNumber, phoneCodeHash: phoneHash })
+      ),
+      SEND_CODE_INVOKE_TIMEOUT,
+      'auth.ResendCode',
+    ) as Api.auth.SentCode
+
+    const newSessionString = (client.session.save() as unknown) as string
+
+    const typeClass    = result.type?.className ?? ''
+    const typeId       = (result.type as unknown as { CONSTRUCTOR_ID?: number })?.CONSTRUCTOR_ID
+    const isCodeViaApp = typeClass === 'auth.SentCodeTypeApp' ||
+                         typeClass.includes('SentCodeTypeApp') ||
+                         typeId === 0x3dbb5986
+
+    const nextTypeClass = (result as unknown as { nextType?: { className?: string } })?.nextType?.className
+    const codeTimeout   = (result as unknown as { timeout?: number })?.timeout
+    const newHash       = result.phoneCodeHash
+
+    console.log(
+      `RESEND_CODE_SUCCESS — phone:${phoneNumber}` +
+      ` type:${typeClass} isCodeViaApp:${isCodeViaApp}` +
+      ` nextType:${nextTypeClass ?? 'none'}` +
+      ` timeout:${codeTimeout ?? 'none'}` +
+      ` newHash:${newHash?.slice(0, 8)} oldHash:${phoneHash.slice(0, 8)}`
+    )
+
+    return {
+      phoneHash:    newHash,
+      isCodeViaApp,
+      sessionString: newSessionString,
+      codeType:     typeClass,
+      nextType:     nextTypeClass,
+      timeout:      typeof codeTimeout === 'number' ? codeTimeout : undefined,
+      typeChanged:  typeClass !== (isCodeViaApp ? 'auth.SentCodeTypeApp' : ''),
+    }
+  } catch (err) {
+    const error = err instanceof Error ? err : new Error(String(err))
+    console.error(`RESEND_CODE_FAILED — phone:${phoneNumber} error: ${error.message}`)
+    throw error
+  } finally {
+    client.disconnect().catch(() => {})
+  }
+}
+
+// ---------------------------------------------------------------------------
 // 2. signInWithCode
 // ---------------------------------------------------------------------------
 
