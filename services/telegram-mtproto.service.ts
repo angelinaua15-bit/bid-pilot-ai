@@ -72,6 +72,12 @@ export interface SendCodeResult {
   phoneHash:     string
   isCodeViaApp:  boolean
   sessionString: string
+  /** Raw Telegram type className, e.g. "auth.SentCodeTypeApp" or "auth.SentCodeTypeSms" */
+  codeType:      string
+  /** Next fallback type Telegram will use on resend, if provided */
+  nextType?:     string
+  /** Seconds until resend is allowed (Telegram FLOOD_WAIT equivalent for this code) */
+  timeout?:      number
 }
 
 export interface SignInResult {
@@ -150,12 +156,24 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
                            typeClass.includes('SentCodeTypeApp') ||
                            typeId === 0x3dbb5986
 
-      console.log(`SEND_CODE_SUCCESS — attempt:${attempt} type:${typeClass} typeId:${typeId} isCodeViaApp:${isCodeViaApp} hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`)
+      // Extract nextType and timeout from the SentCode result
+      const nextTypeClass = (result as unknown as { nextType?: { className?: string } })?.nextType?.className
+      const codeTimeout   = (result as unknown as { timeout?: number })?.timeout
+
+      console.log(
+        `SEND_CODE_SUCCESS — attempt:${attempt}` +
+        ` type:${typeClass} typeId:${typeId} isCodeViaApp:${isCodeViaApp}` +
+        ` nextType:${nextTypeClass ?? 'none'} timeout:${codeTimeout ?? 'none'}` +
+        ` hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`
+      )
 
       return {
-        phoneHash: result.phoneCodeHash,
+        phoneHash:    result.phoneCodeHash,
         isCodeViaApp,
         sessionString,
+        codeType:     typeClass,
+        nextType:     nextTypeClass,
+        timeout:      typeof codeTimeout === 'number' ? codeTimeout : undefined,
       }
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
