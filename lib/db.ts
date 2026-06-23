@@ -745,6 +745,15 @@ export async function saveTelegramOtpSession(
   } catch (err) { console.error('[db] saveTelegramOtpSession error:', err); return null; }
 }
 
+export async function clearTelegramOtpSession(accountId: string): Promise<void> {
+  if (!isSupabaseConfigured) return;
+  try {
+    const db = getDb(); if (!db) return;
+    await db.from('telegram_otp_sessions').delete().eq('account_id', accountId);
+    console.log('[db] clearTelegramOtpSession — cleared for accountId:', accountId);
+  } catch (err) { console.error('[db] clearTelegramOtpSession error:', err); }
+}
+
 export async function getTelegramOtpSession(
   accountId: string,
 ): Promise<{ phoneHash: string; sessionString: string | null } | null> {
