@@ -134,25 +134,38 @@ export async function POST(req: NextRequest) {
       }
     }
 
-    // Map well-known Telegram error codes
+    // Map well-known Telegram error codes to Ukrainian friendly messages
     let friendlyError = message;
     let status = 500;
+    let codeExpired = false;
+    let authRestart = false;
 
     if (/PHONE_CODE_INVALID|CODE_INVALID/i.test(message)) {
-      friendlyError = 'Invalid verification code';
+      friendlyError = 'Невірний код підтвердження. Перевірте та спробуйте знову.';
       status = 400;
     } else if (/PHONE_CODE_EXPIRED|CODE_EXPIRED/i.test(message)) {
-      friendlyError = 'Verification code expired — please request a new one';
+      friendlyError = 'Код підтвердження протермінований. Запросіть новий код.';
       status = 400;
+      codeExpired = true;
+    } else if (/AUTH_RESTART/i.test(message)) {
+      friendlyError = 'Telegram вимагає перезапуску авторизації. Почніть знову.';
+      status = 400;
+      authRestart = true;
     } else if (/FLOOD_WAIT/i.test(message)) {
       const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
-      friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
+      friendlyError = `Забагато спроб. Зачекайте ${seconds} секунд.`;
       status = 429;
     } else if (/PASSWORD_HASH_INVALID/i.test(message)) {
-      friendlyError = 'Incorrect 2FA password';
+      friendlyError = 'Невірний пароль 2FA. Спробуйте ще раз.';
+      status = 400;
+    } else if (/PHONE_NUMBER_INVALID/i.test(message)) {
+      friendlyError = 'Невірний формат номера телефону.';
       status = 400;
     }
 
-    return NextResponse.json({ ok: false, error: friendlyError }, { status });
+    return NextResponse.json(
+      { ok: false, error: friendlyError, codeExpired, authRestart },
+      { status }
+    );
   }
 }
