@@ -1,67 +1,157 @@
-/**
- * POST /api/freelancehunt/generate-bid
- * body: { title, description, budget?, code? }
- * returns: { text, amount, days }
- *
- * AI writes the proposal AND decides a competitive bid amount (UAH) and a
- * realistic deadline (days), based on the project. Called by the BidPilot
- * extension. CORS-open for the chrome-extension origin.
- */
-import { NextResponse } from 'next/server';
+// ── BidPilot background (service worker) ─────────────────────────────────────
+// Fully automatic. AI writes the proposal text AND decides the bid amount and
+// deadline. The user never enters a URL — it is baked in here once by you (the
+// app owner) before distributing the extension.
 
-export const runtime = 'nodejs';
-export const dynamic = 'force-dynamic';
+// ↓↓↓ SET THIS ONCE to your DEPLOYED app domain (the *.vercel.app the app opens
+// at — NOT the vercel.com dashboard link). Example: https://bidpilot.vercel.app
+const APP_URL = 'https://v0-bidpilot-ai-saas.vercel.app';
 
-const CORS = {
-  'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Methods': 'POST, OPTIONS',
-  'Access-Control-Allow-Headers': 'Content-Type',
+const DEFAULTS = {
+  autoOn: false,
+  connectCode: '',          // per-user: links this browser to their account
+  keywords: '',             // optional filter; empty = all
+  minBudget: 0,             // optional filter
+  intervalMin: 10,
+  maxPerCycle: 5,
+  fallbackText: 'Вітаю! Готовий якісно виконати ваш проєкт. Маю досвід у подібних задачах, обговоримо деталі.',
 };
-export function OPTIONS() { return new NextResponse(null, { status: 204, headers: CORS }); }
 
-export async function POST(req: Request) {
-  let body: { title?: string; description?: string; budget?: number } = {};
-  try { body = await req.json(); } catch { /* ignore */ }
-  const title = (body.title || '').slice(0, 300);
-  const description = (body.description || '').slice(0, 3000);
-  const budget = Number(body.budget) || 0;
+async function getCfg() { const s = await chrome.storage.local.get('cfg'); return { ...DEFAULTS, ...(s.cfg || {}) }; }
+async function setCfg(patch) { const cfg = { ...(await getCfg()), ...patch }; await chrome.storage.local.set({ cfg }); await reschedule(cfg); return cfg; }
+async function getProcessed() { return (await chrome.storage.local.get('processed')).processed || []; }
+async function markProcessed(url) { const p = await getProcessed(); p.push(url); await chrome.storage.local.set({ processed: p.slice(-500) }); }
+async function addLog(e) { const s = (await chrome.storage.local.get('log')).log || []; s.unshift({ t: Date.now(), ...e }); await chrome.storage.local.set({ log: s.slice(0, 100) }); }
 
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) return NextResponse.json({ text: '', amount: budget || '', days: 3 }, { headers: CORS });
+async function reschedule(cfg) { await chrome.alarms.clear('cycle'); if (cfg.autoOn) chrome.alarms.create('cycle', { periodInMinutes: Math.max(2, cfg.intervalMin) }); }
+chrome.alarms.onAlarm.addListener((a) => { if (a.name === 'cycle') runCycle().catch((e) => addLog({ level: 'error', msg: String(e) })); });
 
-  const sys =
-    'Ти досвідчений україномовний фрілансер. Проаналізуй проєкт і поверни ВИКЛЮЧНО JSON без пояснень і без markdown, у форматі: ' +
-    '{"text": string, "amount": number, "days": number}. ' +
-    '"text" — коротка (3-5 речень) привітна й конкретна заявка українською, без вигадок, без контактів і посилань, звертання на «ви», показати розуміння задачі. ' +
-    '"amount" — конкурентна ставка в гривнях (число). Якщо вказано бюджет > 0 — орієнтуйся на нього (можна трохи нижче, але не демпінгуй). Якщо бюджет 0 — оціни розумно за обсягом. ' +
-    '"days" — реалістичний термін виконання в днях (ціле число, зазвичай 1-14).';
-  const user = `Назва: ${title}\nБюджет (грн, 0 = невідомо): ${budget}\nОпис: ${description}`;
+// ── Injected page functions (self-contained) ─────────────────────────────────
+function SCRAPE_FEED() {
+  const out = [], seen = new Set();
+  document.querySelectorAll('a[href*="/project/"]').forEach((a) => {
+    const href = a.href.split('?')[0];
+    if (!/\/project\/[^/]+\/\d+/.test(href) || seen.has(href)) return;
+    seen.add(href);
+    const row = a.closest('tr, li, article, [class*=project]') || a.parentElement;
+    const title = (a.textContent || '').trim();
+    let budget = 0;
+    if (row) { const m = (row.textContent || '').match(/(\d[\d\s]{2,})\s*(UAH|грн)/i); if (m) budget = parseInt(m[1].replace(/\s/g, ''), 10) || 0; }
+    if (title.length > 3) out.push({ url: href, title, budget });
+  });
+  return out;
+}
+function SCRAPE_PROJECT() {
+  const title = (document.querySelector('h1, [class*=title]')?.textContent || document.title || '').trim();
+  const cand = document.querySelector('[class*=description], [class*=desc], article, main') || document.body;
+  let budget = 0; const m = (document.body.textContent || '').match(/(\d[\d\s]{3,})\s*(UAH|грн)/i); if (m) budget = parseInt(m[1].replace(/\s/g, ''), 10) || 0;
+  return { title, desc: (cand.textContent || '').replace(/\s+/g, ' ').trim().slice(0, 4000), budget };
+}
+function OPEN_BID_FORM() {
+  const btn = [...document.querySelectorAll('button, a')].find((b) => /зробити ставку|зробити пропозицію|подати заявку|зробити заявку/i.test(b.textContent || ''));
+  if (btn) { btn.click(); return true; }
+  return !!document.querySelector('textarea');
+}
+function FILL_BID(text, amount, days, autosubmit) {
+  const r = { textarea: false, cost: false, term: false, submit: false, submitted: false, buttons: [] };
+  const vis = (el) => el && el.offsetParent !== null && !el.disabled && !el.readOnly;
+  const setVal = (el, v) => { const p = el instanceof HTMLTextAreaElement ? HTMLTextAreaElement.prototype : HTMLInputElement.prototype; Object.getOwnPropertyDescriptor(p, 'value').set.call(el, v); el.dispatchEvent(new Event('input', { bubbles: true })); el.dispatchEvent(new Event('change', { bubbles: true })); };
+  const lab = (el) => { let t = ''; if (el.id) { const l = document.querySelector('label[for="' + el.id + '"]'); if (l) t += ' ' + l.textContent; } const w = el.closest('label'); if (w) t += ' ' + w.textContent; t += ' ' + (el.getAttribute('aria-label') || '') + ' ' + (el.placeholder || '') + ' ' + (el.name || ''); const p = el.parentElement; if (p) t += ' ' + (p.textContent || '').slice(0, 100); const pp = p && p.parentElement; if (pp) t += ' ' + (pp.textContent || '').slice(0, 120); return t.toLowerCase(); };
+  const tas = [...document.querySelectorAll('textarea')].filter(vis);
+  const ta = tas.find((t) => /коментар|заяв|ставк|пропоз|опис|comment/i.test(lab(t))) || tas[0];
+  if (ta && text) { setVal(ta, text); r.textarea = true; }
+  const nums = [...document.querySelectorAll('input')].filter((i) => vis(i) && (i.type === 'number' || i.type === 'text' || i.type === ''));
+  if (amount) { const c = nums.find((i) => { const L = lab(i); return /вартіст|вартост|сум|бюджет|ціна|uah|грн|cost|price|amount/.test(L) && !/термін|строк|днів|\bдні\b|day/.test(L); }); if (c) { setVal(c, String(amount)); r.cost = true; } }
+  if (days) { const d = nums.find((i) => /термін|строк|днів|\bдні\b|day|period|deadline/.test(lab(i))); if (d) { setVal(d, String(days)); r.term = true; } }
+  const all = [...document.querySelectorAll('button, input[type=submit], input[type=button], a[role=button], [role=button], .btn, .button')];
+  const txt = (b) => ((b.textContent || '') + ' ' + (b.value || '')).replace(/\s+/g, ' ').trim();
+  const isSubmit = (b) => { const s = txt(b).toLowerCase(); if (/приклад/.test(s)) return false; return /зробити ставку|завершити ставку|подати ставку|подати заявку|надіслати ставку|відправити ставку/.test(s) || /^[\s\u{1F528}+\u2795]*додати[\s\u{1F528}+\u2795]*$/u.test(s); };
+  r.buttons = all.map((b) => txt(b) + (b.disabled ? ' [off]' : '')).filter((t) => t.replace(' [off]', '').length > 1).slice(0, 20);
+  const sub = all.find((b) => vis(b) && isSubmit(b));
+  if (sub) { r.submit = true; r.submitText = txt(sub).slice(0, 40); sub.style.outline = '3px solid #22c55e'; if (autosubmit) { sub.click(); r.submitted = true; } }
+  return r;
+}
 
+// ── Helpers ──────────────────────────────────────────────────────────────────
+async function exec(tabId, func, args = []) { const [res] = await chrome.scripting.executeScript({ target: { tabId }, func, args }); return res?.result; }
+function wait(ms) { return new Promise((r) => setTimeout(r, ms)); }
+async function waitLoad(tabId) { for (let i = 0; i < 30; i++) { await wait(500); const t = await chrome.tabs.get(tabId).catch(() => null); if (!t || t.status === 'complete') break; } await wait(1200); }
+async function openTab(url) { const tab = await chrome.tabs.create({ url, active: false }); await waitLoad(tab.id); return tab; }
+
+// AI decides text + amount + days. Returns { text, amount, days, ai }.
+async function aiBid(cfg, project) {
+  const fallback = { text: cfg.fallbackText, amount: project.budget || '', days: 3, ai: false };
   try {
-    const res = await fetch('https://api.openai.com/v1/chat/completions', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${key}` },
-      body: JSON.stringify({
-        model: 'gpt-4o-mini',
-        messages: [{ role: 'system', content: sys }, { role: 'user', content: user }],
-        max_tokens: 400,
-        temperature: 0.7,
-        response_format: { type: 'json_object' },
-      }),
+    const res = await fetch(APP_URL.replace(/\/$/, '') + '/api/freelancehunt/generate-bid', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ code: cfg.connectCode, title: project.title, description: project.desc, budget: project.budget || 0 }),
     });
-    const data = await res.json().catch(() => ({}));
-    const raw = data?.choices?.[0]?.message?.content?.trim() || '';
-    let parsed: { text?: string; amount?: number; days?: number } = {};
-    try { parsed = JSON.parse(raw.replace(/```json|```/g, '').trim()); } catch { /* leave empty */ }
-
-    const text = (parsed.text || '').trim();
-    let amount = Number(parsed.amount) || budget || 0;
-    if (budget > 0 && amount > budget * 1.2) amount = budget; // safety: never overbid wildly
-    let days = Math.round(Number(parsed.days) || 3);
-    if (days < 1) days = 1; if (days > 60) days = 60;
-
-    return NextResponse.json({ text, amount: amount || '', days }, { headers: CORS });
-  } catch {
-    return NextResponse.json({ text: '', amount: budget || '', days: 3 }, { headers: CORS });
+    if (!res.ok) { await addLog({ level: 'error', msg: `AI: HTTP ${res.status} — роут не задеплоєний або помилка` }); return fallback; }
+    const d = await res.json().catch(() => null);
+    if (d && d.text) return { text: d.text, amount: d.amount || project.budget || '', days: d.days || 3, ai: true };
+    await addLog({ level: 'error', msg: 'AI: порожня відповідь — немає OPENAI_API_KEY на Vercel?' });
+    return fallback;
+  } catch (e) {
+    await addLog({ level: 'error', msg: 'AI: запит не пройшов — ' + String(e).slice(0, 70) });
+    return fallback;
   }
 }
+
+async function findFeedTab() { const tabs = await chrome.tabs.query({ url: 'https://freelancehunt.com/*' }); return tabs.find((t) => /\/projects|\/my\//.test(t.url)) || tabs[0]; }
+
+async function runCycle() {
+  const cfg = await getCfg();
+  if (!cfg.autoOn) return;
+  if (APP_URL.includes('YOUR-APP')) { await addLog({ level: 'error', msg: 'APP_URL не налаштовано в коді розширення' }); return; }
+
+  let feed = await findFeedTab(), tempFeed = false;
+  if (!feed) { feed = await openTab('https://freelancehunt.com/projects'); tempFeed = true; }
+  const projects = (await exec(feed.id, SCRAPE_FEED)) || [];
+  if (tempFeed) await chrome.tabs.remove(feed.id).catch(() => {});
+
+  const processed = new Set(await getProcessed());
+  const kw = cfg.keywords.split(',').map((s) => s.trim().toLowerCase()).filter(Boolean);
+  const matches = projects.filter((p) => !processed.has(p.url)
+    && (!kw.length || kw.some((k) => p.title.toLowerCase().includes(k)))
+    && (!cfg.minBudget || !p.budget || p.budget >= cfg.minBudget)
+  ).slice(0, cfg.maxPerCycle);
+
+  await addLog({ level: 'info', msg: `Скан: ${projects.length} проєктів, підходить ${matches.length}` });
+
+  let workTab = null;
+  for (const p of matches) {
+    try {
+      if (!workTab) workTab = await openTab(p.url);
+      else { await chrome.tabs.update(workTab.id, { url: p.url }); await waitLoad(workTab.id); }
+      const proj = (await exec(workTab.id, SCRAPE_PROJECT)) || { title: p.title, desc: '', budget: p.budget };
+      proj.budget = proj.budget || p.budget;
+      const bid = await aiBid(cfg, proj);
+      await exec(workTab.id, OPEN_BID_FORM);
+      await wait(1500);
+      const r = await exec(workTab.id, FILL_BID, [bid.text, bid.amount, bid.days, true]);
+      await markProcessed(p.url);
+      const ok = r?.submitted ? 'подано' : (r?.textarea ? 'заповнено (кнопку не натиснуто)' : 'не вдалось');
+      await addLog({ level: r?.submitted ? 'success' : (r?.textarea ? 'info' : 'error'), msg: `${p.title.slice(0, 44)} — ${ok} · ${bid.ai ? 'AI' : 'станд.'} · ${bid.amount || '?'} грн / ${bid.days} дн` });
+      if (!r?.submit && r?.buttons?.length) await addLog({ level: 'info', msg: 'Кнопки: ' + r.buttons.join(', ') });
+      await wait(1500);
+    } catch (e) { await addLog({ level: 'error', msg: `${p.title.slice(0, 40)}: ${String(e).slice(0, 80)}` }); }
+    await wait(2500);
+  }
+  if (workTab) await chrome.tabs.remove(workTab.id).catch(() => {});
+}
+
+chrome.runtime.onMessage.addListener((msg, _s, reply) => {
+  (async () => {
+    if (msg.type === 'getCfg') reply(await getCfg());
+    else if (msg.type === 'setCfg') reply(await setCfg(msg.patch));
+    else if (msg.type === 'getLog') reply((await chrome.storage.local.get('log')).log || []);
+    else if (msg.type === 'runNow') { runCycle().catch(() => {}); reply({ ok: true }); }
+    else if (msg.type === 'testScan') {
+      const feed = await findFeedTab();
+      if (!feed) { reply({ ok: false, error: 'Відкрий вкладку зі стрічкою freelancehunt.com/projects' }); return; }
+      const projects = (await exec(feed.id, SCRAPE_FEED)) || [];
+      reply({ ok: true, projects: projects.slice(0, 10), count: projects.length });
+    } else reply({ ok: false });
+  })();
+  return true;
+});
