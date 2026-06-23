@@ -66,6 +66,7 @@ export async function POST(req: NextRequest) {
       saveTelegramOtpSession(accountId, result.phoneHash, result.sessionString),
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
+    console.log(`PHONE_CODE_HASH_SAVED — accountId:${accountId} hashPrefix:${result.phoneHash.slice(0, 8)}`);
 
     console.log(
       `SEND_CODE_SUCCESS — phone:${account.phoneNumber}` +
