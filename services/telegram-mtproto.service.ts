@@ -44,8 +44,8 @@ function makeClient(apiId: number, apiHash: string, sessionStr = ''): TelegramCl
     // useWSS: true — CRITICAL for Vercel/Railway: raw TCP port 443 is blocked
     // by most cloud providers; WSS (WebSocket over HTTPS) works through all firewalls.
     // useWSS: false causes silent hangs/timeouts and codes are never delivered.
-    connectionRetries: 1,
-    retryDelay:        500,
+    connectionRetries: 3,
+    retryDelay:        1_000,
     useWSS:            true,
     baseLogger:        logger,
   })
@@ -104,50 +104,57 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
   let lastError: Error = new Error('sendTelegramCode: no attempts made')
 
   for (let attempt = 1; attempt <= SEND_CODE_MAX_ATTEMPTS; attempt++) {
+    console.log(`CLEAN_OLD_SESSION — creating fresh StringSession for phone:${phoneNumber}`)
     const client = makeClient(apiId, apiHash)
+    console.log(`NEW_CLIENT_CREATED — attempt:${attempt} phone:${phoneNumber} apiId:${apiId}`)
 
     console.log(`SEND_CODE_STARTED — attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} phone:${phoneNumber} apiId:${apiId}`)
 
     try {
       await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, `connect (attempt ${attempt})`)
 
-      console.log(`[telegram/sendCode] SEND_CODE_CONNECTED (attempt ${attempt}) — running InitConnection then auth.SendCode`)
+      console.log(`[telegram/sendCode] SEND_CODE_CONNECTED (attempt ${attempt}) — running auth.SendCode`)
 
-      // Wrap auth.SendCode in invokeWithLayer + initConnection so Telegram's auth
-      // server recognises the client on cloud IPs. Without this, cloud-hosted api_ids
-      // can receive 401 UNAUTHORIZED on auth.SendCode even with valid credentials.
-      const sendCodeRequest = new Api.auth.SendCode({
-        phoneNumber,
-        apiId,
-        apiHash,
-        settings: new Api.CodeSettings({
-          allowFlashcall: false,
-          currentNumber:  false,
-          allowAppHash:   true,
-        }),
-      })
-
-      const wrappedRequest = new Api.InvokeWithLayer({
-        layer: 167, // current TL schema layer
-        query: new Api.InitConnection({
-          apiId,
-          deviceModel:    'Server',
-          systemVersion:  'Linux',
-          appVersion:     '1.0.0',
-          langCode:       'en',
-          langPack:       '',
-          systemLangCode: 'en',
-          query: sendCodeRequest,
-        }),
-      })
-
+      // ── Plain auth.SendCode — NO InvokeWithLayer/InitConnection wrapper ──────
+      //
+      // IMPORTANT: wrapping auth.SendCode inside InvokeWithLayer+InitConnection
+      // causes Telegram to return SentCodeTypeApp (push to existing Telegram app)
+      // instead of SMS, because the InitConnection fingerprint tells Telegram this
+      // is a "known device". With allowAppHash:true + InitConnection the push is
+      // targeted at the device session's push token — which doesn't exist on a
+      // fresh server StringSession('') — so the code IS generated but NEVER arrives.
+      //
+      // Fix: call auth.SendCode directly (GramJS handles the DC negotiation
+      // transparently) and set allowAppHash:false to prefer SMS over app push.
       const result = await withTimeout(
-        client.invoke(wrappedRequest),
+        client.invoke(
+          new Api.auth.SendCode({
+            phoneNumber,
+            apiId,
+            apiHash,
+            settings: new Api.CodeSettings({
+              allowFlashcall: false,
+              currentNumber:  false,
+              // false = do NOT send to the Telegram app; prefer SMS/call
+              // true  = send to Telegram app (only works with a real device session)
+              allowAppHash:   false,
+            }),
+          })
+        ),
         SEND_CODE_INVOKE_TIMEOUT,
         `auth.SendCode (attempt ${attempt})`,
       ) as Api.auth.SentCode
 
       const sessionString = (client.session.save() as unknown) as string
+
+      // Log the full raw Telegram SentCode response for diagnostics
+      console.log(
+        `TELEGRAM_SEND_CODE_RESPONSE — phone:${phoneNumber}` +
+        ` phoneCodeHash:${result.phoneCodeHash}` +
+        ` type.className:${result.type?.className ?? 'unknown'}` +
+        ` nextType.className:${(result as unknown as { nextType?: { className?: string } })?.nextType?.className ?? 'none'}` +
+        ` timeout:${(result as unknown as { timeout?: number })?.timeout ?? 'none'}`
+      )
 
       // GramJS v2: check both className and CONSTRUCTOR_ID for the app-code type
       const typeClass    = result.type?.className ?? ''
@@ -288,7 +295,7 @@ export async function signInWithCode(
   // Restore session so we reconnect to the same DC used during sendCode
   const client = makeClient(apiId, apiHash, existingSession ?? '')
 
-  console.log('[telegram/signIn] connecting for', phoneNumber)
+  console.log(`CONFIRM_CODE_STARTED — phone:${phoneNumber} hashPrefix:${phoneHash.slice(0, 8)} hasSession:${Boolean(existingSession)}`)
   await withTimeout(client.connect(), 20_000, 'connect')
   console.log('[telegram/signIn] connected, invoking auth.SignIn')
 
@@ -325,12 +332,14 @@ export async function signInWithCode(
           'auth.CheckPassword',
         )
       } else {
+        const signInErrMsg = (signInErr as Error)?.message ?? String(signInErr)
+        console.error(`SIGN_IN_FAILED — phone:${phoneNumber} error:${signInErrMsg}`)
         throw signInErr
       }
     }
 
     const sessionString = (client.session.save() as unknown) as string
-    console.log('[telegram/signIn] sign-in successful for', phoneNumber, '— calling getMe()')
+    console.log(`SIGN_IN_SUCCESS — phone:${phoneNumber}`)
 
     // Validate session immediately with getMe() — confirms the auth key works
     let telegramId: string | undefined
