@@ -507,7 +507,7 @@ function AdminLogsTab({ user }: { user: SaaSUser }) {
   );
 }
 
-// ── Telegram Accounts Tab ───────────────────���─────────────────────────────────
+// ── Telegram Accounts Tab ───────────────────�����─────────────────────────────────
 
 type WizardStep = 'idle' | 'phone' | 'code' | 'password' | 'done';
 
@@ -774,6 +774,47 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     }
   }
 
+  /**
+   * Clear the existing OTP session for this account, then immediately call sendCode again
+   * with a completely fresh TelegramClient. Use this when the code never arrived.
+   */
+  async function handleResetSessionAndResend() {
+    if (!currentAccountId) return;
+    setError('');
+    setWorking(true);
+    setSendCodeDebug(null);
+    try {
+      // 1. Delete the stored OTP session so the next sendCode starts completely fresh
+      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}`, { method: 'DELETE' });
+    } catch { /* non-fatal — proceed even if delete fails */ }
+
+    try {
+      // 2. Trigger a brand new sendCode with a clean StringSession
+      const url = '/api/telegram/accounts/send-code';
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ accountId: currentAccountId, forceNewSession: true }),
+      });
+      const data = await res.json() as {
+        ok: boolean; error?: string; telegramError?: string;
+        isCodeViaApp?: boolean; phoneHashExists?: boolean;
+        codeType?: string; nextType?: string | null; timeout?: number | null;
+      };
+      setSendCodeDebug({
+        url, status: res.status, json: data as Record<string, unknown>,
+        phoneHashExists: data.phoneHashExists ?? false, telegramError: data.telegramError,
+      });
+      if (!data.ok) { setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код'); return; }
+      if (!data.phoneHashExists) { setError('Telegram не повернув phoneCodeHash — код не відправлено'); return; }
+      applyCodeResponse(data as Parameters<typeof applyCodeResponse>[0], url, res.status, data as Record<string, unknown>);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Помилка мережі');
+    } finally {
+      setWorking(false);
+    }
+  }
+
   /** Delete the account row + clear local state so user can start completely fresh */
   async function handleCancelAndRestart() {
     setError('');
@@ -950,6 +991,18 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                       : resendCooldown > 0
                         ? `Надіслати знову (${resendCooldown}с)`
                         : 'Надіслати код ще раз'}
+                  </button>
+                )}
+
+                {/* Reset OTP session and send fresh code — for when code never arrived */}
+                {currentAccountId && (
+                  <button
+                    disabled={working}
+                    onClick={handleResetSessionAndResend}
+                    className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-orange-500/30 bg-orange-500/10 text-[12px] text-orange-400 disabled:opacity-50 hover:bg-orange-500/15 transition-colors"
+                  >
+                    <RefreshCw size={11} className={working ? 'animate-spin' : ''} />
+                    Скинути сесію і надіслати знову
                   </button>
                 )}
 
