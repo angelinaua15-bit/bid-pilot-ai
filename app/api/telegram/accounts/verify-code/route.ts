@@ -6,6 +6,10 @@
  *
  * Body: { accountId, code, password? }
  */
+
+// Vercel max function duration — GramJS needs up to 40s (20s connect + 20s SignIn)
+export const maxDuration = 60;
+
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getTelegramAccountById,

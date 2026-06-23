@@ -85,8 +85,12 @@ export interface SignInResult {
 // 1. sendTelegramCode
 // ---------------------------------------------------------------------------
 
-const SEND_CODE_MAX_ATTEMPTS = 3
-const SEND_CODE_RETRY_DELAY_MS = 5_000
+// ── Timeout budgets designed for Vercel's 60-second function limit ──────────
+// connect: 20s + SendCode: 25s = 45s max per attempt — leaves 15s buffer.
+// Only 1 attempt on Vercel to avoid exceeding the 60s limit.
+const SEND_CODE_MAX_ATTEMPTS    = 1
+const SEND_CODE_CONNECT_TIMEOUT = 20_000
+const SEND_CODE_INVOKE_TIMEOUT  = 25_000
 
 export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeResult> {
   const { apiId, apiHash } = getCredentials()
@@ -96,12 +100,12 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
   for (let attempt = 1; attempt <= SEND_CODE_MAX_ATTEMPTS; attempt++) {
     const client = makeClient(apiId, apiHash)
 
-    console.log(`[telegram/sendCode] attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} — connecting for ${phoneNumber} apiId:${apiId}`)
+    console.log(`SEND_CODE_STARTED — attempt ${attempt}/${SEND_CODE_MAX_ATTEMPTS} phone:${phoneNumber} apiId:${apiId}`)
 
     try {
-      await withTimeout(client.connect(), 60_000, `connect (attempt ${attempt})`)
+      await withTimeout(client.connect(), SEND_CODE_CONNECT_TIMEOUT, `connect (attempt ${attempt})`)
 
-      console.log(`[telegram/sendCode] connected (attempt ${attempt}) — running initConnection then auth.SendCode`)
+      console.log(`[telegram/sendCode] SEND_CODE_CONNECTED (attempt ${attempt}) — running InitConnection then auth.SendCode`)
 
       // Wrap auth.SendCode in invokeWithLayer + initConnection so Telegram's auth
       // server recognises the client on cloud IPs. Without this, cloud-hosted api_ids
@@ -121,11 +125,11 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
         layer: 167, // current TL schema layer
         query: new Api.InitConnection({
           apiId,
-          deviceModel:   'Server',
-          systemVersion: 'Linux',
-          appVersion:    '1.0.0',
-          langCode:      'en',
-          langPack:      '',
+          deviceModel:    'Server',
+          systemVersion:  'Linux',
+          appVersion:     '1.0.0',
+          langCode:       'en',
+          langPack:       '',
           systemLangCode: 'en',
           query: sendCodeRequest,
         }),
@@ -133,7 +137,7 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 
       const result = await withTimeout(
         client.invoke(wrappedRequest),
-        60_000,
+        SEND_CODE_INVOKE_TIMEOUT,
         `auth.SendCode (attempt ${attempt})`,
       ) as Api.auth.SentCode
 
@@ -146,7 +150,7 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
                            typeClass.includes('SentCodeTypeApp') ||
                            typeId === 0x3dbb5986
 
-      console.log(`[telegram/sendCode] success (attempt ${attempt}) — type:${typeClass} typeId:${typeId} isCodeViaApp:${isCodeViaApp} hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`)
+      console.log(`SEND_CODE_SUCCESS — attempt:${attempt} type:${typeClass} typeId:${typeId} isCodeViaApp:${isCodeViaApp} hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`)
 
       return {
         phoneHash: result.phoneCodeHash,
@@ -155,7 +159,7 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
       }
     } catch (err) {
       lastError = err instanceof Error ? err : new Error(String(err))
-      console.error(`[telegram/sendCode] attempt ${attempt} FAILED: ${lastError.message}`)
+      console.error(`SEND_CODE_FAILED — attempt:${attempt} error: ${lastError.message}`)
 
       // Do not retry permanent Telegram errors
       const msg = lastError.message
@@ -165,9 +169,9 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
         throw lastError
       }
 
-      if (attempt < SEND_CODE_MAX_ATTEMPTS) {
-        console.log(`[telegram/sendCode] retrying in ${SEND_CODE_RETRY_DELAY_MS / 1000}s…`)
-        await new Promise(r => setTimeout(r, SEND_CODE_RETRY_DELAY_MS))
+      // For transient errors: still re-throw on last attempt
+      if (attempt >= SEND_CODE_MAX_ATTEMPTS) {
+        console.log(`[telegram/sendCode] max attempts (${SEND_CODE_MAX_ATTEMPTS}) reached, throwing`)
       }
     } finally {
       client.disconnect().catch(() => {})
@@ -175,9 +179,9 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
   }
 
   throw new Error(
-    `Telegram connection timeout after ${SEND_CODE_MAX_ATTEMPTS} attempts. ` +
+    `SEND_CODE_FAILED — Telegram connection failed after ${SEND_CODE_MAX_ATTEMPTS} attempt(s). ` +
     `Last error: ${lastError.message}. ` +
-    `Try again or use the Railway auth endpoint.`
+    `Possible causes: cloud IP blocks, invalid api_id, or network timeout.`
   )
 }
 

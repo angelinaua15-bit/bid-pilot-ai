@@ -6,6 +6,10 @@
  *
  * When phoneNumber is given without an accountId, creates a pending account first.
  */
+
+// Vercel max function duration — GramJS needs up to 45s (20s connect + 25s SendCode)
+export const maxDuration = 60;
+
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getTelegramAccountById,
@@ -72,11 +76,11 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'accountId or phoneNumber is required' }, { status: 400 });
     }
 
-    console.log('[send-code] sending code to', account.phoneNumber);
+    console.log(`SEND_CODE_STARTED — accountId:${accountId} phone:${account.phoneNumber}`);
 
     const { phoneHash, isCodeViaApp, sessionString } = await sendTelegramCode(account.phoneNumber);
 
-    console.log('[send-code] code sent, isCodeViaApp=', isCodeViaApp);
+    console.log(`SEND_CODE_SUCCESS — phone:${account.phoneNumber} isCodeViaApp:${isCodeViaApp} hashPrefix:${phoneHash?.slice(0, 8)}`);
 
     await Promise.all([
       saveTelegramOtpSession(accountId, phoneHash, sessionString),
@@ -86,7 +90,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({ ok: true, accountId, message: 'Code sent', isCodeViaApp });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[send-code] error:', message);
+    console.error(`SEND_CODE_FAILED — accountId:${accountId ?? 'unknown'} error: ${message}`);
 
     let friendlyError = message;
     let status = 500;

@@ -6,6 +6,10 @@
  *
  * Body: { accountId, requesterId? }
  */
+
+// Vercel max function duration — must fit within connect(20s) + SendCode(25s) = 45s
+export const maxDuration = 60;
+
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getTelegramAccountById,
@@ -52,10 +56,7 @@ export async function POST(req: NextRequest) {
       return NextResponse.json({ ok: false, error: 'Account not found' }, { status: 404 });
     }
 
-    console.log('[send-code] account found, invoking GramJS sendTelegramCode', {
-      phoneNumber: account.phoneNumber,
-      status:      account.status,
-    });
+    console.log(`SEND_CODE_STARTED — accountId:${accountId} phone:${account.phoneNumber} status:${account.status}`);
 
     // ── Run GramJS directly on Vercel ─────────────────────────────────────────
     const result = await sendTelegramCode(account.phoneNumber);
@@ -66,12 +67,7 @@ export async function POST(req: NextRequest) {
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
 
-    console.log('[send-code] success', {
-      phoneNumber:  account.phoneNumber,
-      isCodeViaApp: result.isCodeViaApp,
-      hashPrefix:   result.phoneHash.slice(0, 8),
-      handledBy:    'vercel',
-    });
+    console.log(`SEND_CODE_SUCCESS — phone:${account.phoneNumber} isCodeViaApp:${result.isCodeViaApp} hashPrefix:${result.phoneHash.slice(0, 8)} handledBy:vercel`);
 
     return NextResponse.json({
       ok:              true,
@@ -83,7 +79,7 @@ export async function POST(req: NextRequest) {
 
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    console.error('[send-code] FAILED', { message, accountId });
+    console.error(`SEND_CODE_FAILED — accountId:${accountId ?? 'unknown'} error: ${message}`);
 
     // Persist error on the account row
     if (accountId) {
