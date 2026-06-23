@@ -540,6 +540,10 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
   const [error, setError]           = useState('');
   const [currentAccountId, setCurrentAccountId] = useState<string | null>(null);
   const [isCodeViaApp, setIsCodeViaApp]         = useState(false);
+  const [codeType, setCodeType]                 = useState('');
+  const [nextType, setNextType]                 = useState<string | null>(null);
+  const [codeTimeout, setCodeTimeout]           = useState<number | null>(null);
+  const [resendCooldown, setResendCooldown]     = useState(0);
   const [testingId, setTestingId]               = useState<string | null>(null);
   const [testResult, setTestResult]             = useState<Record<string, boolean>>({});
   const [sendCodeDebug, setSendCodeDebug]       = useState<{
@@ -562,6 +566,13 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
   }, []);
 
   useEffect(() => { load(); }, [load]);
+
+  // Resend cooldown countdown
+  useEffect(() => {
+    if (resendCooldown <= 0) return;
+    const id = setTimeout(() => setResendCooldown(c => Math.max(0, c - 1)), 1000);
+    return () => clearTimeout(id);
+  }, [resendCooldown]);
 
   // ── Step 1: register phone → create account row ───────────────────────────
   async function handleAddPhone() {
@@ -588,6 +599,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const codeData = await codeRes.json() as {
         ok: boolean; error?: string; telegramError?: string;
         isCodeViaApp?: boolean; phoneHashExists?: boolean;
+        codeType?: string; nextType?: string | null; timeout?: number | null;
       };
       // Always populate debug panel so developer can see exactly what happened
       setSendCodeDebug({
@@ -607,6 +619,11 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
         return;
       }
       setIsCodeViaApp(codeData.isCodeViaApp ?? false);
+      setCodeType(codeData.codeType ?? '');
+      setNextType(codeData.nextType ?? null);
+      setCodeTimeout(codeData.timeout ?? null);
+      // Start a 60s resend cooldown (or use Telegram's timeout if provided)
+      setResendCooldown(codeData.timeout ?? 60);
       setStep('code');
       await load();
     } catch (e) {
@@ -679,6 +696,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const data = await res.json() as {
         ok: boolean; error?: string; telegramError?: string;
         isCodeViaApp?: boolean; phoneHashExists?: boolean;
+        codeType?: string; nextType?: string | null; timeout?: number | null;
       };
       setSendCodeDebug({
         url:             codeUrl,
@@ -690,6 +708,10 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       if (!data.ok) { setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код'); return; }
       if (!data.phoneHashExists) { setError('Telegram не повернув phoneCodeHash — код не відправлено'); return; }
       setIsCodeViaApp(data.isCodeViaApp ?? false);
+      setCodeType(data.codeType ?? '');
+      setNextType(data.nextType ?? null);
+      setCodeTimeout(data.timeout ?? null);
+      setResendCooldown(data.timeout ?? 60);
       setCode('');
       setStep('code');
     } catch (e) {
@@ -728,6 +750,10 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setError('');
     setCurrentAccountId(null);
     setIsCodeViaApp(false);
+    setCodeType('');
+    setNextType(null);
+    setCodeTimeout(null);
+    setResendCooldown(0);
     setSendCodeDebug(null);
   }
 
@@ -781,27 +807,36 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
           )}
           {step === 'code' && (
             <>
-              <div className="flex items-center justify-between">
-                <div className="flex items-center gap-2">
-                  <KeyRound size={15} className="text-primary" />
-                  <p className="text-[13px] font-medium">Введіть код з Telegram</p>
-                </div>
-                {currentAccountId && (
-                  <button
-                    disabled={working}
-                    onClick={() => currentAccountId && handleResendCode(currentAccountId)}
-                    className="text-[11px] text-primary disabled:opacity-40 flex items-center gap-1"
-                  >
-                    <RefreshCw size={10} className={working ? 'animate-spin' : ''} />
-                    Надіслати знову
-                  </button>
-                )}
+              <div className="flex items-center gap-2">
+                <KeyRound size={15} className="text-primary" />
+                <p className="text-[13px] font-medium">Введіть код з Telegram</p>
               </div>
-              <p className="text-[11px] text-muted-foreground -mt-1">
-                {isCodeViaApp
-                  ? 'Код надіслано у Telegram-додаток (перевірте повідомлення від Telegram)'
-                  : 'Код надіслано SMS-повідомленням на вказаний номер'}
-              </p>
+
+              {/* Delivery method banner */}
+              {isCodeViaApp ? (
+                <div className="rounded-xl bg-blue-500/10 border border-blue-500/25 px-3 py-2.5 space-y-1">
+                  <p className="text-[12px] font-medium text-blue-400">
+                    Код надіслано в Telegram-додаток, не SMS.
+                  </p>
+                  <p className="text-[11px] text-blue-300/80 leading-relaxed">
+                    Перевірте Telegram на номері, який ви вказали. Відкрийте додаток Telegram
+                    &mdash; там повинно прийти повідомлення від офіційного бота з кодом.
+                  </p>
+                  {nextType && (
+                    <p className="text-[11px] text-blue-300/60 pt-0.5">
+                      Якщо не прийшло &mdash; натисніть &laquo;Надіслати знову&raquo; щоб отримати
+                      {nextType.toLowerCase().includes('sms') ? ' SMS' : ` (${nextType})`}.
+                    </p>
+                  )}
+                </div>
+              ) : (
+                <div className="rounded-xl bg-green-500/10 border border-green-500/25 px-3 py-2.5">
+                  <p className="text-[12px] text-green-400">
+                    Код надіслано SMS-повідомленням на вказаний номер.
+                  </p>
+                </div>
+              )}
+
               <input
                 type="text"
                 inputMode="numeric"
@@ -812,6 +847,22 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                 className="w-full bg-secondary rounded-xl px-3 py-2.5 text-sm outline-none border border-border focus:border-primary transition-colors tracking-widest"
                 autoFocus
               />
+
+              {/* Resend button with cooldown */}
+              {currentAccountId && (
+                <button
+                  disabled={working || resendCooldown > 0}
+                  onClick={() => handleResendCode(currentAccountId)}
+                  className="w-full flex items-center justify-center gap-1.5 py-2 rounded-xl border border-border text-[12px] text-muted-foreground disabled:opacity-50 hover:bg-secondary/60 transition-colors"
+                >
+                  <RefreshCw size={11} className={working ? 'animate-spin' : ''} />
+                  {working
+                    ? 'Надсилаю…'
+                    : resendCooldown > 0
+                      ? `Надіслати знову (${resendCooldown}с)`
+                      : 'Надіслати код знову'}
+                </button>
+              )}
             </>
           )}
           {step === 'password' && (
@@ -842,12 +893,8 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
           {sendCodeDebug && (
             <div className="rounded-xl border border-border bg-secondary/50 p-3 flex flex-col gap-1.5 text-[10px] font-mono overflow-x-auto">
               <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide font-sans mb-0.5">
-                Debug: send-code request
+                Debug: Telegram send-code
               </p>
-              <div className="flex gap-2 items-center">
-                <span className="text-muted-foreground">URL:</span>
-                <span className="text-foreground">{sendCodeDebug.url}</span>
-              </div>
               <div className="flex gap-2 items-center">
                 <span className="text-muted-foreground">Status:</span>
                 <span className={sendCodeDebug.status === 200 ? 'text-green-400' : 'text-red-400'}>
@@ -860,6 +907,24 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
                   {String(sendCodeDebug.phoneHashExists)}
                 </span>
               </div>
+              {codeType && (
+                <div className="flex gap-2 items-center">
+                  <span className="text-muted-foreground">codeType:</span>
+                  <span className="text-yellow-400">{codeType}</span>
+                </div>
+              )}
+              {nextType && (
+                <div className="flex gap-2 items-center">
+                  <span className="text-muted-foreground">nextType:</span>
+                  <span className="text-blue-400">{nextType}</span>
+                </div>
+              )}
+              {codeTimeout !== null && (
+                <div className="flex gap-2 items-center">
+                  <span className="text-muted-foreground">timeout:</span>
+                  <span className="text-foreground">{codeTimeout}s</span>
+                </div>
+              )}
               {sendCodeDebug.telegramError && (
                 <div className="flex flex-col gap-0.5">
                   <span className="text-muted-foreground">telegramError:</span>

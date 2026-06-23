@@ -67,7 +67,14 @@ export async function POST(req: NextRequest) {
       upsertTelegramAccount({ ...account, status: 'code_sent', errorMessage: undefined }),
     ]);
 
-    console.log(`SEND_CODE_SUCCESS — phone:${account.phoneNumber} isCodeViaApp:${result.isCodeViaApp} hashPrefix:${result.phoneHash.slice(0, 8)} handledBy:vercel`);
+    console.log(
+      `SEND_CODE_SUCCESS — phone:${account.phoneNumber}` +
+      ` isCodeViaApp:${result.isCodeViaApp}` +
+      ` codeType:${result.codeType}` +
+      ` nextType:${result.nextType ?? 'none'}` +
+      ` timeout:${result.timeout ?? 'none'}` +
+      ` hashPrefix:${result.phoneHash.slice(0, 8)} handledBy:vercel`
+    );
 
     return NextResponse.json({
       ok:              true,
@@ -75,6 +82,10 @@ export async function POST(req: NextRequest) {
       isCodeViaApp:    result.isCodeViaApp,
       phoneHashExists: true,
       handledBy:       'vercel',
+      // Full Telegram delivery details for the UI
+      codeType:        result.codeType,
+      nextType:        result.nextType ?? null,
+      timeout:         result.timeout ?? null,
     });
 
   } catch (err) {
