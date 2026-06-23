@@ -2,9 +2,9 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Wifi, WifiOff, RefreshCw, Settings2, Trash2,
-  CheckCircle2, XCircle, Clock, ChevronDown, ChevronUp,
-  Play, Square, Monitor, Loader2, Shield,
+  Wifi, WifiOff, RefreshCw, Settings2,
+  CheckCircle2, XCircle, ChevronDown, ChevronUp,
+  Monitor, Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
@@ -122,277 +122,121 @@ export function FreelanceScreen({ user }: Props) {
  */
 type ConnectStep = 'idle' | 'connecting' | 'waiting' | 'saving' | 'connected' | 'expired' | 'error';
 
-function ConnectPanel({ userId, account, onRefresh }: {
+function ConnectPanel({ userId }: {
   userId?: string; account: FreelanceAccount | null; onRefresh: () => void;
 }) {
-  const [step, setStep]           = useState<ConnectStep>('idle');
-  const [email, setEmail]         = useState('');
-  const [password, setPassword]   = useState('');
-  const [username, setUsername]   = useState<string | null>(null);
-  const [error, setError]         = useState<string | null>(null);
-  const [workerBusy, setWorkerBusy] = useState(false);
-  const [runResult, setRunResult] = useState<{ ok: boolean; msg: string } | null>(null);
-  const [jobStats, setJobStats]   = useState<{ found: number; submitted: number; skipped: number; failed: number } | null>(null);
+  const [stats, setStats] = useState<any>(null);
+  const [recent, setRecent] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [copied, setCopied] = useState(false);
+  const [showGuide, setShowGuide] = useState(false);
 
-  // Connected when the saved session status is 'connected', or right after a successful login.
-  const isConnected = account?.status === 'connected' || step === 'connected';
-  const busy = step === 'connecting';
+  const code = userId || '';
 
-  // ── Credential login (Variant 1): worker logs in headlessly & saves session ──
-  const handleConnect = async () => {
-    if (!userId) { setError('Не вдалося визначити користувача'); setStep('error'); return; }
-    if (!email || !password) { setError('Введіть email і пароль Freelancehunt'); setStep('error'); return; }
-    haptic.medium();
-    setStep('connecting');
-    setError(null);
+  const fetchStats = useCallback(async () => {
+    if (!userId) { setLoading(false); return; }
     try {
-      const res = await fetch('/api/freelancehunt/connect', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId, email, password }),
-      }).then((r) => r.json()).catch(() => ({ ok: false, message: 'Помилка мережі' }));
+      const r = await fetch(`/api/freelancehunt/extension-stats?userId=${userId}`).then((x) => x.json()).catch(() => null);
+      if (r?.ok) { setStats(r.stats); setRecent(r.recent || []); }
+    } finally { setLoading(false); }
+  }, [userId]);
 
-      if (res.ok) {
-        setUsername(res.username ?? null);
-        setPassword('');
-        setStep('connected');
-        haptic.success();
-        onRefresh();
-        setTimeout(() => onRefresh(), 2000); // second refresh after DB propagation
-      } else {
-        setError(res.message ?? 'Не вдалося підключитися. Спробуйте ще раз.');
-        setStep('error');
-        haptic.error();
-      }
-    } catch (err) {
-      setError(err instanceof Error ? err.message : 'Помилка підключення');
-      setStep('error');
-      haptic.error();
-    }
+  useEffect(() => {
+    fetchStats();
+    const t = setInterval(fetchStats, 10000);
+    return () => clearInterval(t);
+  }, [fetchStats]);
+
+  const copyCode = async () => {
+    try { await navigator.clipboard.writeText(code); setCopied(true); setTimeout(() => setCopied(false), 2000); } catch { /* ignore */ }
   };
 
-  // ── Disconnect ────────────────────────────────────────────────────────────
-  const handleDisconnect = async () => {
-    if (!userId) return;
-    haptic.error();
-    await fetch('/api/freelance/disconnect', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ userId }),
-    }).catch(() => {});
-    setStep('idle');
-    setUsername(null);
-    setError(null);
-    onRefresh();
-  };
-
-  // ── Auto-bid trigger ──────────────────────────────────────────────────────
-  const handleToggleWorker = async (start: boolean) => {
-    if (!userId) return;
-    haptic.medium();
-    setWorkerBusy(true);
-    setRunResult(null);
-    if (start) setJobStats(null);
-    try {
-      const res = await fetch(start ? '/api/freelance/start' : '/api/freelance/stop', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId }),
-      }).then((r) => r.json()).catch(() => ({ ok: false, error: 'Помилка мережі' }));
-
-      if (start && res.ok) {
-        haptic.success();
-        const found     = res.found     ?? 0;
-        const submitted = res.submitted ?? 0;
-        const skipped   = (res.filter?.dailyLimit ?? found) - submitted;
-        setRunResult({ ok: true, msg: `Знайдено ${found}, надіслано ${submitted}` });
-        setJobStats({ found, submitted, skipped: Math.max(0, skipped), failed: res.errors?.length ?? 0 });
-        setTimeout(() => setRunResult(null), 8000);
-      } else if (!start && res.ok) {
-        haptic.success();
-        setRunResult({ ok: true, msg: 'Автопошук зупинено' });
-        setTimeout(() => setRunResult(null), 4000);
-      } else {
-        const msg = res.error ?? res.message ?? 'Помилка запуску';
-        const isSessionGone = res.setupRequired ||
-          msg.includes('NO_SESSION') || msg.includes('LOGIN_REQUIRED') || msg.includes('Reconnect');
-        setRunResult({ ok: false, msg: isSessionGone ? 'Потрібно перепідключити акаунт' : msg });
-        haptic.error();
-        if (isSessionGone) { setStep('expired'); onRefresh(); }
-      }
-      onRefresh();
-    } finally { setWorkerBusy(false); }
-  };
-
-  const statusMap = {
-    connected:    { icon: Wifi,    cls: 'text-green-400',         bg: 'bg-green-500/10 border-green-500/20',   label: 'Підключено' },
-    disconnected: { icon: WifiOff, cls: 'text-muted-foreground',  bg: 'bg-secondary border-border',            label: 'Не підключено' },
-    expired:      { icon: Clock,   cls: 'text-yellow-400',        bg: 'bg-yellow-500/10 border-yellow-500/20', label: 'Сесія закінчилась' },
-    error:        { icon: XCircle, cls: 'text-red-400',           bg: 'bg-red-500/10 border-red-500/20',       label: 'Помилка' },
-  } as const;
-
-  const effectiveStatus = isConnected ? 'connected'
-    : step === 'expired' ? 'expired'
-    : step === 'error' ? 'error'
-    : (account?.status ?? 'disconnected') as keyof typeof statusMap;
-  const s    = statusMap[effectiveStatus] ?? statusMap.disconnected;
-  const Icon = s.icon;
+  const connected = !!stats?.connected;
+  const fmtTime = (s?: string | null) => s ? new Date(s).toLocaleString('uk-UA', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' }) : '—';
 
   return (
     <div className="flex flex-col gap-4">
 
-      {/* Status card */}
-      <div className={cn('p-4 rounded-2xl border flex items-center gap-3', s.bg)}>
-        <div className={cn(
-          'w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0',
-          isConnected ? 'bg-green-500/20' : 'bg-secondary',
-        )}>
-          {busy
-            ? <Loader2 size={16} className="text-primary animate-spin" />
-            : <Icon size={16} className={s.cls} />
-          }
+      {/* Status */}
+      <div className={cn('p-4 rounded-2xl border flex items-center gap-3',
+        connected ? 'bg-green-500/10 border-green-500/20' : 'bg-secondary border-border')}>
+        <div className={cn('w-9 h-9 rounded-xl flex items-center justify-center flex-shrink-0', connected ? 'bg-green-500/20' : 'bg-secondary')}>
+          {loading ? <Loader2 size={16} className="text-primary animate-spin" /> : connected ? <Wifi size={16} className="text-green-400" /> : <WifiOff size={16} className="text-muted-foreground" />}
         </div>
         <div className="flex-1 min-w-0">
-          <p className="text-sm font-semibold">
-            {busy                 && 'Входимо у Freelancehunt...'}
-            {step === 'connected' && `Підключено${username ? ` — ${username}` : ''}`}
-            {step === 'error'     && 'Помилка'}
-            {step === 'expired'   && 'Потрібно перепідключити'}
-            {step === 'idle'      && s.label}
-          </p>
+          <p className="text-sm font-semibold">{connected ? 'Розширення активне' : 'Розширення не підключене'}</p>
           <p className="text-[11px] text-muted-foreground truncate mt-0.5">
-            {busy                 && 'Worker входить у ваш акаунт…'}
-            {step === 'connected' && (account?.lastCheckAt
-              ? `Оновлено: ${new Date(account.lastCheckAt).toLocaleString('uk-UA')}`
-              : 'Сесія активна')}
-            {step === 'error'     && (error ?? 'Помилка з\'єднання')}
-            {step === 'expired'   && 'Сесія закінчилась. Підключіться знову.'}
-            {step === 'idle'      && (isConnected
-              ? (account?.accountName ? `@${account.accountName}` : 'Сесія активна')
-              : 'Увійдіть акаунтом Freelancehunt для автоматичної подачі заявок')}
+            {connected ? `Остання активність: ${fmtTime(stats?.lastActive)}` : 'Встановіть розширення BidPilot у Chrome і введіть код нижче'}
           </p>
         </div>
-        {isConnected && !busy && (
-          <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
-        )}
+        {connected && <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />}
       </div>
 
-      {/* Error */}
-      {(step === 'error' || step === 'expired') && error && (
-        <div className="rounded-2xl border border-red-500/20 bg-red-500/5 p-3 flex items-start gap-2">
-          <XCircle size={13} className="text-red-400 flex-shrink-0 mt-0.5" />
-          <p className="text-[11px] text-red-400 leading-relaxed">{error}</p>
-        </div>
-      )}
-
-      {/* Auto-bid trigger — only when session connected */}
-      {isConnected && !busy && (
-        <div className="flex flex-col gap-2">
-          <div className="flex gap-2">
-            <button
-              onClick={() => handleToggleWorker(true)}
-              disabled={workerBusy}
-              className="flex-1 py-3 rounded-xl bg-green-500/15 text-green-400 border border-green-500/20 text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-            >
-              {workerBusy ? <RefreshCw size={13} className="animate-spin" /> : <Play size={13} />}
-              {workerBusy ? 'Пошук...' : 'Запустити пошук заявок'}
-            </button>
-            <button
-              onClick={() => handleToggleWorker(false)}
-              disabled={workerBusy}
-              className="py-3 px-4 rounded-xl bg-secondary text-muted-foreground text-xs font-semibold flex items-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-            >
-              <Square size={13} />
-            </button>
-          </div>
-          {runResult && (
-            <p className={cn('text-[11px] text-center px-2', runResult.ok ? 'text-green-400' : 'text-red-400')}>
-              {runResult.msg}
-            </p>
-          )}
-          {jobStats && (
-            <div className="grid grid-cols-4 gap-2 mt-1">
-              {[
-                { label: 'Знайдено',  value: jobStats.found },
-                { label: 'Надіслано', value: jobStats.submitted },
-                { label: 'Пропущено', value: jobStats.skipped },
-                { label: 'Помилок',   value: jobStats.failed },
-              ].map(({ label, value }) => (
-                <div key={label} className="rounded-xl bg-secondary border border-border p-2 text-center">
-                  <p className="text-sm font-bold">{value}</p>
-                  <p className="text-[9px] text-muted-foreground leading-tight mt-0.5">{label}</p>
-                </div>
-              ))}
+      {/* Analytics */}
+      {connected && (
+        <div className="grid grid-cols-2 gap-2">
+          {[
+            { label: 'Подано сьогодні', value: stats?.bidsToday ?? 0 },
+            { label: 'Подано всього', value: stats?.bidsTotal ?? 0 },
+            { label: 'Заповнено форм', value: stats?.filled ?? 0 },
+            { label: 'Частка AI', value: (stats?.aiShare ?? 0) + '%' },
+          ].map(({ label, value }) => (
+            <div key={label} className="rounded-2xl bg-secondary border border-border p-3">
+              <p className="text-xl font-bold">{value}</p>
+              <p className="text-[10px] text-muted-foreground mt-0.5">{label}</p>
             </div>
-          )}
+          ))}
         </div>
       )}
 
-      {/* Credential login form — when not connected */}
-      {!isConnected && !busy && (
-        <div className="rounded-2xl border border-border bg-card p-4 flex flex-col gap-3">
-          <p className="text-xs font-semibold">Підключити акаунт Freelancehunt</p>
-
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground">Email або логін</label>
-            <input
-              type="text"
-              inputMode="email"
-              autoComplete="username"
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              placeholder="you@example.com"
-              className="w-full px-3 py-2.5 rounded-xl bg-secondary border border-border text-sm outline-none focus:border-primary"
-            />
+      {/* Recent activity */}
+      {connected && recent.length > 0 && (
+        <div className="rounded-2xl border border-border bg-card p-3">
+          <p className="text-xs font-semibold mb-2">Останні заявки</p>
+          <div className="flex flex-col gap-1.5 max-h-56 overflow-auto">
+            {recent.map((r, i) => (
+              <div key={i} className="flex items-center gap-2 text-[11px]">
+                <span className={cn('w-1.5 h-1.5 rounded-full flex-shrink-0', r.status === 'submitted' ? 'bg-green-400' : r.status === 'failed' ? 'bg-red-400' : 'bg-yellow-400')} />
+                <span className="flex-1 min-w-0 truncate text-foreground">{r.title || 'Проєкт'}</span>
+                {r.amount ? <span className="text-muted-foreground flex-shrink-0">{r.amount} грн</span> : null}
+                {r.ai ? <span className="text-primary flex-shrink-0">AI</span> : null}
+              </div>
+            ))}
           </div>
+        </div>
+      )}
 
-          <div className="flex flex-col gap-1">
-            <label className="text-[11px] font-medium text-muted-foreground">Пароль</label>
-            <input
-              type="password"
-              autoComplete="current-password"
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              placeholder="••••••••"
-              className="w-full px-3 py-2.5 rounded-xl bg-secondary border border-border text-sm outline-none focus:border-primary"
-            />
+      {/* Connect code */}
+      <div className="rounded-2xl border border-border bg-card p-4 flex flex-col gap-2">
+        <div className="flex items-center gap-2"><Monitor size={14} className="text-primary" /><p className="text-xs font-semibold">Код підключення розширення</p></div>
+        <p className="text-[11px] text-muted-foreground leading-relaxed">Вставте цей код у розширення BidPilot → Налаштування → «Код підключення», щоб бачити свою статистику тут.</p>
+        <button onClick={copyCode} className="w-full rounded-xl bg-secondary border border-border px-3 py-2.5 flex items-center justify-between gap-2 active:scale-[0.99] transition-all">
+          <span className="text-[12px] font-mono text-foreground truncate">{code || '—'}</span>
+          <span className={cn('text-[10px] font-semibold flex-shrink-0', copied ? 'text-green-400' : 'text-primary')}>{copied ? 'Скопійовано' : 'Копіювати'}</span>
+        </button>
+      </div>
+
+      {/* Install guide */}
+      <div className="rounded-2xl border border-border bg-card overflow-hidden">
+        <button onClick={() => setShowGuide((v) => !v)} className="w-full px-4 py-3 flex items-center justify-between">
+          <span className="text-xs font-semibold">Як встановити розширення у Chrome</span>
+          {showGuide ? <ChevronUp size={15} className="text-muted-foreground" /> : <ChevronDown size={15} className="text-muted-foreground" />}
+        </button>
+        {showGuide && (
+          <div className="px-4 pb-4">
+            <ol className="flex flex-col gap-2 text-[11px] text-muted-foreground leading-relaxed list-decimal list-inside">
+              <li>Завантажте теку розширення <b>BidPilot</b> (надамо файли/посилання).</li>
+              <li>У Chrome відкрийте <b>chrome://extensions</b>.</li>
+              <li>Увімкніть <b>Developer mode</b> (перемикач справа вгорі).</li>
+              <li>Натисніть <b>Load unpacked</b> і виберіть теку розширення.</li>
+              <li>Залогіньтесь на <b>freelancehunt.com</b> у цьому ж Chrome.</li>
+              <li>Відкрийте розширення → <b>Налаштування</b> → вставте код підключення вище → Зберегти.</li>
+              <li>Увімкніть <b>Автоподача</b> — і статистика з'явиться тут.</li>
+            </ol>
+            <p className="text-[10px] text-muted-foreground/70 mt-3 leading-relaxed">Розширення працює лише в десктопному Chrome і поки відкрите вікно браузера. Вхід виконується у вашому браузері — пароль ми не бачимо.</p>
           </div>
-
-          <div className="flex items-start gap-2 rounded-xl bg-secondary/60 border border-border p-3">
-            <Shield size={12} className="text-primary flex-shrink-0 mt-0.5" />
-            <p className="text-[11px] text-muted-foreground leading-relaxed">
-              Пароль використовується один раз для входу і не зберігається — зберігаються лише cookies сесії.
-            </p>
-          </div>
-
-          <button
-            onClick={handleConnect}
-            disabled={!userId || !email || !password}
-            className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50"
-          >
-            <Monitor size={13} />
-            Підключити
-          </button>
-        </div>
-      )}
-
-      {/* Connecting spinner */}
-      {busy && (
-        <div className="flex items-center justify-center gap-2 py-3 text-xs text-muted-foreground">
-          <Loader2 size={13} className="animate-spin" />
-          Входимо у Freelancehunt… (10–20 секунд)
-        </div>
-      )}
-
-      {/* Disconnect — when connected or expired */}
-      {(isConnected || step === 'expired') && !busy && (
-        <div className="flex items-center gap-3">
-          <button
-            onClick={handleDisconnect}
-            className="flex items-center gap-2 text-xs text-red-400/70 hover:text-red-400 transition-colors"
-          >
-            <Trash2 size={12} /> Відключити
-          </button>
-        </div>
-      )}
+        )}
+      </div>
     </div>
   );
 }
