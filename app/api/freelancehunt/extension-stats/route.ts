@@ -66,6 +66,6 @@ export async function GET(req: Request) {
       lastActive: rows[0]?.created_at || null,
       connected: rows.length > 0,
     },
-    recent: bids.slice(0, 12).map((r) => ({ title: r.title, amount: r.amount, days: r.days, ai: r.ai, status: r.status, at: r.created_at })),
+    recent: bids.slice(0, 50).map((r) => ({ title: r.title, amount: r.amount, days: r.days, ai: r.ai, status: r.status, at: r.created_at })),
   }, { headers: CORS });
 }
