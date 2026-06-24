@@ -88,7 +88,9 @@ function createClient(
   return new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
     retryDelay: 2_000,
-    useWSS: true,
+    // useWSS: false is required — raw TCP works on Railway/Vercel;
+    // useWSS: true breaks the MTProto handshake and causes auth.SendCode timeouts.
+    useWSS: false,
     baseLogger: logger,
   });
 }
@@ -180,53 +182,53 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     const client = createClient(apiId, apiHash);
 
     try {
-      console.log(`[telegram/sendCode] START attempt:${attempt} phone:${phone}`);
+      console.log(`SEND_CODE_STARTED — attempt:${attempt} phone:${phone}`);
 
-      await connectClient(client, `sendCode/attempt:${attempt}`);
+      // Step 1: connect
+      console.log(`CLIENT_CONNECT_STARTED — attempt:${attempt}`);
+      await withTimeout(client.connect(), CONNECT_TIMEOUT, `connect/attempt:${attempt}`);
+      console.log(`CLIENT_CONNECT_SUCCESS — attempt:${attempt}`);
 
-      console.log(`[telegram/sendCode] SEND_CODE_START attempt:${attempt}`);
-
-      const result = (await withTimeout(
-        client.invoke(
-          new Api.auth.SendCode({
-            phoneNumber: phone,
-            apiId,
-            apiHash,
-            settings: new Api.CodeSettings({
-              allowFlashcall: false,
-              currentNumber: false,
-              allowAppHash: false,
-            }),
-          })
-        ),
+      // Step 2: send code via GramJS high-level sendCode()
+      // IMPORTANT: use client.sendCode(), NOT client.invoke(Api.auth.SendCode).
+      // The high-level method handles PHONE_MIGRATE_X (DC migration) automatically.
+      // The low-level invoke does NOT handle DC migration on a fresh StringSession('')
+      // which silently causes the code to never be delivered.
+      console.log(`AUTH_SEND_CODE_STARTED — phone:${phone}`);
+      const result = await withTimeout(
+        client.sendCode({ apiId, apiHash }, phone),
         SEND_CODE_TIMEOUT,
         'auth.SendCode'
-      )) as SentCodeLike;
-
-      const sessionString = client.session.save() as unknown as string;
-      const parsed = parseSentCode(result, sessionString);
-
-      console.log(
-        `[telegram/sendCode] SUCCESS phone:${phone} type:${parsed.codeType} hashPrefix:${parsed.phoneHash.slice(
-          0,
-          8
-        )}`
       );
 
-      return parsed;
+      // Serialise session AFTER sendCode so DC routing data is preserved
+      const sessionString = client.session.save() as unknown as string;
+
+      console.log(`AUTH_SEND_CODE_SUCCESS — phone:${phone} isCodeViaApp:${result.isCodeViaApp}`);
+      console.log(`PHONE_CODE_HASH_RECEIVED — hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`);
+
+      const isCodeViaApp = result.isCodeViaApp;
+      const codeType = isCodeViaApp ? 'app' : 'sms';
+
+      if (!result.phoneCodeHash) {
+        throw new Error('PHONE_CODE_HASH_MISSING');
+      }
+
+      return {
+        phoneHash: result.phoneCodeHash,
+        isCodeViaApp,
+        sessionString,
+        codeType,
+        nextType: undefined,
+        timeout: undefined,
+      };
     } catch (err) {
       lastError = err;
       const message = err instanceof Error ? err.message : String(err);
 
-      console.error(
-        `[telegram/sendCode] FAILED attempt:${attempt} phone:${phone} error:${message}`
-      );
+      console.error(`SEND_CODE_FAILED — attempt:${attempt} phone:${phone} reason:${message}`);
 
-      if (
-        /PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT/i.test(
-          message
-        )
-      ) {
+      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT/i.test(message)) {
         throw err;
       }
 
@@ -238,9 +240,7 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     }
   }
 
-  const finalMessage =
-    lastError instanceof Error ? lastError.message : String(lastError);
-
+  const finalMessage = lastError instanceof Error ? lastError.message : String(lastError);
   throw new Error(`SEND_CODE_FAILED: ${finalMessage}`);
 }
 
