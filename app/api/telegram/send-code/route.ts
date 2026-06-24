@@ -8,8 +8,6 @@
  */
 
 // Vercel max function duration — GramJS needs up to 45s (20s connect + 25s SendCode)
-export const maxDuration = 60;
-
 import { NextRequest, NextResponse } from 'next/server';
 import {
   getTelegramAccountById,
@@ -42,6 +40,36 @@ export async function POST(req: NextRequest) {
         { status: 503 }
       );
     }
+export const maxDuration = 60;
+
+export async function POST(req: NextRequest) {
+    const workerUrl = process.env.AUTOMATION_WORKER_URL;
+  const secret = process.env.AUTOMATION_SECRET;
+
+  if (process.env.TELEGRAM_AUTH_VIA_WORKER === 'true') {
+    if (!workerUrl || !secret) {
+      return NextResponse.json(
+        { ok: false, error: 'Worker env missing' },
+        { status: 500 }
+      );
+    }
+
+    const body = await req.json();
+
+    const res = await fetch(`${workerUrl}/telegram/accounts/send-code`, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json',
+        'x-automation-secret': secret,
+      },
+      body: JSON.stringify(body),
+    });
+
+    const data = await res.json();
+    return NextResponse.json(data, { status: res.status });
+  }
+
+
 
     let account = accountId ? await getTelegramAccountById(accountId) : null;
 
