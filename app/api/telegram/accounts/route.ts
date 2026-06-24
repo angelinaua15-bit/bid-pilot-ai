@@ -5,11 +5,19 @@ import {
   upsertTelegramAccount,
   deleteTelegramAccount,
 } from '@/lib/db';
+import { assertAdmin } from '@/lib/auth';
 
-// GET /api/telegram/accounts?userId=...  (omit userId for admin — returns all)
+// GET /api/telegram/accounts?userId=...&requesterId=...  (omit userId for admin — returns all)
 export async function GET(req: NextRequest) {
   try {
     const userId = req.nextUrl.searchParams.get('userId');
+    const requesterId = req.nextUrl.searchParams.get('requesterId');
+
+    const admin = await assertAdmin(requesterId);
+    if (!admin) {
+      return NextResponse.json({ ok: false, error: 'Forbidden: admin access required' }, { status: 403 });
+    }
+
     const accounts = userId
       ? await getTelegramAccounts(userId)
       : await getAllTelegramAccounts();
@@ -21,11 +29,21 @@ export async function GET(req: NextRequest) {
 }
 
 // POST /api/telegram/accounts  — create a new account record (status: pending)
-// Body: { userId, phoneNumber }
+// Body: { userId, phoneNumber, requesterId }
 export async function POST(req: NextRequest) {
   try {
     const body = await req.json();
-    const { userId, phoneNumber } = body as { userId?: string; phoneNumber?: string };
+    const { userId, phoneNumber, requesterId } = body as {
+      userId?: string;
+      phoneNumber?: string;
+      requesterId?: string;
+    };
+
+    const admin = await assertAdmin(requesterId ?? null);
+    if (!admin) {
+      return NextResponse.json({ ok: false, error: 'Forbidden: admin access required' }, { status: 403 });
+    }
+
     if (!userId || !phoneNumber) {
       return NextResponse.json({ ok: false, error: 'userId and phoneNumber are required' }, { status: 400 });
     }
@@ -41,10 +59,17 @@ export async function POST(req: NextRequest) {
   }
 }
 
-// DELETE /api/telegram/accounts?id=...
+// DELETE /api/telegram/accounts?id=...&requesterId=...
 export async function DELETE(req: NextRequest) {
   try {
     const id = req.nextUrl.searchParams.get('id');
+    const requesterId = req.nextUrl.searchParams.get('requesterId');
+
+    const admin = await assertAdmin(requesterId);
+    if (!admin) {
+      return NextResponse.json({ ok: false, error: 'Forbidden: admin access required' }, { status: 403 });
+    }
+
     if (!id) {
       return NextResponse.json({ ok: false, error: 'id is required' }, { status: 400 });
     }

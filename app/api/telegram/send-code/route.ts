@@ -15,6 +15,7 @@ import {
   upsertTelegramAccount,
 } from '@/lib/db';
 import { handleSendCode } from '@/lib/telegram/send-code-handler';
+import { assertAdmin } from '@/lib/auth';
 
 function cleanPhone(phone?: string) {
   return phone?.trim().replace(/\s+/g, '') ?? '';
@@ -28,6 +29,16 @@ export async function POST(req: NextRequest) {
     accountId = body.accountId;
     const phoneNumber = cleanPhone(body.phoneNumber);
     const userId = body.userId;
+
+    // Admin-only — only owner/admin roles may send verification codes
+    const admin = await assertAdmin(userId ?? null);
+    if (!admin) {
+      console.warn(`[telegram/send-code] FORBIDDEN — userId:${userId ?? 'none'}`);
+      return NextResponse.json(
+        { ok: false, error: 'Forbidden: admin access required', phoneHashExists: false },
+        { status: 403 }
+      );
+    }
 
     // ── Resolve or create the account row ─────────────────────────────────
     if (!accountId && phoneNumber) {

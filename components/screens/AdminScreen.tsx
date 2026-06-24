@@ -497,13 +497,13 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
   const load = useCallback(async () => {
     setLoading(true);
     try {
-      const res = await fetch('/api/telegram/accounts');
+      const res = await fetch(`/api/telegram/accounts?requesterId=${encodeURIComponent(user.id)}`);
       const data = await res.json() as { ok: boolean; accounts?: TelegramAccount[] };
       if (data.ok) setAccounts(data.accounts ?? []);
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [user.id]);
 
   useEffect(() => { load(); }, [load]);
 
@@ -523,7 +523,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch('/api/telegram/accounts', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ userId: user.id, phoneNumber: phone.trim() }),
+        body: JSON.stringify({ userId: user.id, phoneNumber: phone.trim(), requesterId: user.id }),
       });
       const data = await res.json() as { ok: boolean; account?: TelegramAccount; error?: string };
       if (!data.ok) { setError(data.error ?? 'Помилка'); return; }
@@ -582,7 +582,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch('/api/telegram/accounts/verify-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: currentAccountId, code: code.trim() }),
+        body: JSON.stringify({ accountId: currentAccountId, code: code.trim(), requesterId: user.id }),
       });
       const data = await res.json() as {
         ok: boolean; requires2fa?: boolean; error?: string;
@@ -613,7 +613,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch('/api/telegram/accounts/verify-code', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: currentAccountId, code: code.trim(), password: password.trim() }),
+        body: JSON.stringify({ accountId: currentAccountId, code: code.trim(), password: password.trim(), requesterId: user.id }),
       });
       const data = await res.json() as { ok: boolean; error?: string };
       if (!data.ok) { setError(data.error ?? 'Невірний пароль 2FA'); return; }
@@ -685,7 +685,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: currentAccountId }),
+        body: JSON.stringify({ accountId: currentAccountId, requesterId: user.id }),
       });
       const data = await res.json() as {
         ok: boolean; error?: string; telegramError?: string;
@@ -699,7 +699,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       if (!data.ok) {
         // OTP session expired — need a full restart
         if (data.sessionExpired) {
-          setError('Сесія авторизації протермінувалась. Натисніть "Скасувати і почати заново".');
+          setError('Сесія авторизації протермінувалась. Натисніть "Скасувати і почати занов��".');
           return;
         }
         setError(data.telegramError ?? data.error ?? 'Не вдалося відправити код');
@@ -725,7 +725,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setSendCodeDebug(null);
     try {
       // 1. Delete the stored OTP session so the next sendCode starts completely fresh
-      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}`, { method: 'DELETE' });
+      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}&requesterId=${encodeURIComponent(user.id)}`, { method: 'DELETE' });
     } catch { /* non-fatal — proceed even if delete fails */ }
 
     try {
@@ -734,7 +734,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
       const res = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ accountId: currentAccountId, forceNewSession: true }),
+        body: JSON.stringify({ accountId: currentAccountId, requesterId: user.id }),
       });
       const data = await res.json() as {
         ok: boolean; error?: string; telegramError?: string;
@@ -764,10 +764,10 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
     setError('');
     if (currentAccountId) {
       // 1. Delete stored OTP session (phoneCodeHash + sessionString) first
-      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}`, { method: 'DELETE' })
+      await fetch(`/api/telegram/accounts/otp-session?accountId=${currentAccountId}&requesterId=${encodeURIComponent(user.id)}`, { method: 'DELETE' })
         .catch(() => {});
       // 2. Delete the account row so next attempt creates a fresh one
-      await fetch(`/api/telegram/accounts?id=${currentAccountId}`, { method: 'DELETE' })
+      await fetch(`/api/telegram/accounts?id=${currentAccountId}&requesterId=${encodeURIComponent(user.id)}`, { method: 'DELETE' })
         .catch(() => {});
     }
     resetWizard();
@@ -812,7 +812,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
 
   async function handleDelete(id: string) {
     haptic.heavy();
-    await fetch(`/api/telegram/accounts?id=${id}`, { method: 'DELETE' });
+    await fetch(`/api/telegram/accounts?id=${id}&requesterId=${encodeURIComponent(user.id)}`, { method: 'DELETE' });
     await load();
   }
 
@@ -885,7 +885,7 @@ function TelegramAccountsTab({ user }: { user: SaaSUser }) {
               ) : codeType.toLowerCase().includes('call') ? (
                 <div className="rounded-xl bg-yellow-500/10 border border-yellow-500/25 px-3 py-2.5">
                   <p className="text-[12px] text-yellow-400 font-medium">
-                    Код надіслано дзвінком &mdash; підніміть слухавку і введіть цифри.
+                    Код надіслано дзвінком &mdash; підніміт�� слухавку і введіть цифри.
                   </p>
                 </div>
               ) : (

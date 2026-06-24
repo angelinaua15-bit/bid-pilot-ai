@@ -9,9 +9,17 @@ export const maxDuration = 10;
 
 import { NextRequest, NextResponse } from 'next/server';
 import { clearTelegramOtpSession } from '@/lib/db';
+import { assertAdmin } from '@/lib/auth';
 
 export async function DELETE(req: NextRequest) {
   const accountId = req.nextUrl.searchParams.get('accountId');
+  const requesterId = req.nextUrl.searchParams.get('requesterId');
+
+  const admin = await assertAdmin(requesterId);
+  if (!admin) {
+    return NextResponse.json({ ok: false, error: 'Forbidden: admin access required' }, { status: 403 });
+  }
+
   if (!accountId) {
     return NextResponse.json({ ok: false, error: 'accountId is required' }, { status: 400 });
   }
