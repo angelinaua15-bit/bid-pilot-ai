@@ -182,21 +182,21 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
   let lastError: unknown;
 
   for (let attempt = 1; attempt <= 3; attempt += 1) {
+    // Always create a brand-new client with empty StringSession — never reuse
+    console.log(`CLIENT_CREATED — attempt:${attempt} phone:${phone}`);
     const client = createClient(apiId, apiHash);
 
     try {
       console.log(`SEND_CODE_STARTED — attempt:${attempt} phone:${phone}`);
 
-      // Step 1: connect
+      // Step 1: explicit connect — must complete before any invoke
       console.log(`CLIENT_CONNECT_STARTED — attempt:${attempt}`);
       await withTimeout(client.connect(), CONNECT_TIMEOUT, `connect/attempt:${attempt}`);
-      console.log(`CLIENT_CONNECT_SUCCESS — attempt:${attempt}`);
+      console.log(`CLIENT_CONNECT_SUCCESS — attempt:${attempt} connected:${client.connected}`);
 
-      // Step 2: send code via GramJS high-level sendCode()
-      // IMPORTANT: use client.sendCode(), NOT client.invoke(Api.auth.SendCode).
-      // The high-level method handles PHONE_MIGRATE_X (DC migration) automatically.
-      // The low-level invoke does NOT handle DC migration on a fresh StringSession('')
-      // which silently causes the code to never be delivered.
+      // Step 2: call auth.SendCode via GramJS high-level sendCode()
+      // client.sendCode() internally calls client.invoke(Api.auth.SendCode) AND
+      // handles PHONE_MIGRATE_X (DC migration) by retrying on the correct DC.
       console.log(`AUTH_SEND_CODE_STARTED — phone:${phone}`);
       const result = await withTimeout(
         client.sendCode({ apiId, apiHash }, phone),
@@ -204,18 +204,19 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
         'auth.SendCode'
       );
 
-      // Serialise session AFTER sendCode so DC routing data is preserved
-      const sessionString = client.session.save() as unknown as string;
+      // Guard: reject empty/missing hash — never return fake success
+      if (!result?.phoneCodeHash) {
+        throw new Error('PHONE_CODE_HASH_MISSING');
+      }
 
-      console.log(`AUTH_SEND_CODE_SUCCESS — phone:${phone} isCodeViaApp:${result.isCodeViaApp}`);
-      console.log(`PHONE_CODE_HASH_RECEIVED — hashPrefix:${result.phoneCodeHash?.slice(0, 8)}`);
+      // Serialise session AFTER sendCode so correct DC data is preserved
+      const sessionString = client.session.save() as unknown as string;
 
       const isCodeViaApp = result.isCodeViaApp;
       const codeType = isCodeViaApp ? 'app' : 'sms';
 
-      if (!result.phoneCodeHash) {
-        throw new Error('PHONE_CODE_HASH_MISSING');
-      }
+      console.log(`AUTH_SEND_CODE_SUCCESS — phone:${phone} isCodeViaApp:${isCodeViaApp} codeType:${codeType}`);
+      console.log(`PHONE_CODE_HASH_RECEIVED — hashPrefix:${result.phoneCodeHash.slice(0, 8)}`);
 
       return {
         phoneHash: result.phoneCodeHash,
@@ -231,7 +232,8 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 
       console.error(`SEND_CODE_FAILED — attempt:${attempt} phone:${phone} reason:${message}`);
 
-      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT/i.test(message)) {
+      // Permanent errors — do not retry
+      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT|TELEGRAM_ENV_MISSING/i.test(message)) {
         throw err;
       }
 
