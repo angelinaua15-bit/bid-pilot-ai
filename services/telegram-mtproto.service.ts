@@ -77,6 +77,11 @@ function normalizePhone(phone: string): string {
   return normalized;
 }
 
+// Vercel and most cloud providers block outbound raw TCP to Telegram's MTProto IPs.
+// useWSS: true routes through WebSocket over HTTPS (port 443) which is always allowed.
+// useWSS: false (raw TCP) causes "auth.SendCode timed out after 60000ms" on Vercel.
+const USE_WSS = true;
+
 function createClient(
   apiId: number,
   apiHash: string,
@@ -88,9 +93,7 @@ function createClient(
   return new TelegramClient(session, apiId, apiHash, {
     connectionRetries: 5,
     retryDelay: 2_000,
-    // useWSS: false is required — raw TCP works on Railway/Vercel;
-    // useWSS: true breaks the MTProto handshake and causes auth.SendCode timeouts.
-    useWSS: false,
+    useWSS: USE_WSS,
     baseLogger: logger,
   });
 }
