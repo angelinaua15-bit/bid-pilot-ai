@@ -3,7 +3,7 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
   Wifi, WifiOff, RefreshCw, Settings2,
-  CheckCircle2, XCircle, ChevronDown, ChevronUp,
+  CheckCircle2, ChevronDown, ChevronUp,
   Monitor, Loader2,
 } from 'lucide-react';
 import { cn } from '@/lib/utils';
@@ -479,181 +479,75 @@ function FilterPanel({ userId, filter, onSaved }: {
 
 // ── Applications panel ────────────────────────────────────────────────────────
 function ApplicationsPanel({ userId }: { userId?: string }) {
-  type AppStatus = 'all' | 'sent' | 'sent_unconfirmed' | 'skipped' | 'failed';
-  const [apps, setApps]     = useState<Array<Record<string, unknown>>>([]);
-  const [tab, setTab]       = useState<AppStatus>('all');
-  const [loading, setLoading] = useState(true);
-  const [error, setError]   = useState<string | null>(null);
+  type Tab = 'all' | 'submitted' | 'filled' | 'failed';
+  interface Bid { title: string | null; amount: number | null; days: number | null; ai: boolean; status: string | null; at: string; }
 
-  const load = useCallback(async (s: AppStatus) => {
-    console.log('[FreelanceScreen] ApplicationsPanel load tab:', s, 'userId:', userId);
+  const [bids, setBids] = useState<Bid[]>([]);
+  const [tab, setTab] = useState<Tab>('all');
+  const [loading, setLoading] = useState(true);
+
+  const load = useCallback(async () => {
     if (!userId) { setLoading(false); return; }
     setLoading(true);
-    setError(null);
     try {
-      const qs = new URLSearchParams({ userId, limit: '50' });
-      if (s !== 'all') qs.set('status', s);
-      const res = await fetch(`/api/applications?${qs}`).then((r) => r.json());
-      if (!res?.ok) {
-        setError(res?.error ?? 'Не вдалося завантажити заявки');
-        setApps([]);
-      } else {
-        setApps(Array.isArray(res.data) ? res.data : []);
-      }
-    } catch (e) {
-      const msg = e instanceof Error ? e.message : 'Помилка мережі';
-      console.log('[FreelanceScreen] ApplicationsPanel fetch error:', msg);
-      setError(msg);
-      setApps([]);
-    } finally {
-      setLoading(false);
-    }
+      const r = await fetch(`/api/freelancehunt/extension-stats?userId=${userId}`).then((x) => x.json()).catch(() => null);
+      setBids(r?.ok && Array.isArray(r.recent) ? r.recent : []);
+    } finally { setLoading(false); }
   }, [userId]);
 
-  const handleTabChange = (id: AppStatus) => {
-    console.log('[FreelanceScreen] tab changed to:', id);
-    haptic.light();
-    setTab(id);
-  };
+  useEffect(() => { load(); const t = setInterval(load, 10000); return () => clearInterval(t); }, [load]);
 
-  useEffect(() => { load(tab); }, [load, tab]);
-
-  const tabs: Array<{ id: AppStatus; label: string }> = [
-    { id: 'all',              label: 'Всі' },
-    { id: 'sent',             label: 'Надіслані' },
-    { id: 'sent_unconfirmed', label: 'Непідтверджені' },
-    { id: 'skipped',          label: 'Пропущені' },
-    { id: 'failed',           label: 'Помилки' },
+  const tabs: Array<{ id: Tab; label: string }> = [
+    { id: 'all', label: 'Всі' },
+    { id: 'submitted', label: 'Подані' },
+    { id: 'filled', label: 'Заповнені' },
+    { id: 'failed', label: 'Помилки' },
   ];
+  const filtered = tab === 'all' ? bids : bids.filter((b) => b.status === tab);
+  const fmtTime = (s: string) => new Date(s).toLocaleString('uk-UA', { day: '2-digit', month: '2-digit', hour: '2-digit', minute: '2-digit' });
+  const meta = (st: string | null) =>
+    st === 'submitted' ? { c: 'text-green-400', d: 'bg-green-400', l: 'Подано' } :
+    st === 'failed'    ? { c: 'text-red-400',   d: 'bg-red-400',   l: 'Помилка' } :
+                         { c: 'text-yellow-400', d: 'bg-yellow-400', l: 'Заповнено' };
 
   return (
     <div className="flex flex-col gap-3">
-      {/* Sub-filter tabs */}
       <div className="flex flex-wrap gap-1">
         {tabs.map(({ id, label }) => (
-          <button
-            key={id}
-            onClick={() => handleTabChange(id)}
-            className={cn(
-              'px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
-              tab === id ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground'
-            )}
-          >
+          <button key={id} onClick={() => { haptic.light(); setTab(id); }}
+            className={cn('px-2.5 py-1 rounded-lg text-[11px] font-medium transition-colors',
+              tab === id ? 'bg-primary text-primary-foreground' : 'bg-secondary text-muted-foreground')}>
             {label}
           </button>
         ))}
       </div>
 
-      {/* Error state — inline, never crashes the page */}
-      {error && !loading && (
-        <div className="glass-card p-4 rounded-2xl border border-red-500/20 bg-red-500/5 flex items-start gap-2.5">
-          <XCircle size={14} className="text-red-400 flex-shrink-0 mt-0.5" />
-          <div className="flex-1 min-w-0">
-            <p className="text-xs font-semibold text-red-400">Помилка завантаження</p>
-            <p className="text-[11px] text-muted-foreground mt-0.5 break-words">{error}</p>
-            <button
-              onClick={() => load(tab)}
-              className="mt-2 text-[11px] text-primary font-semibold"
-            >
-              Спробувати знову
-            </button>
-          </div>
-        </div>
-      )}
-
       {loading ? (
-        <div className="flex items-center justify-center py-10">
-          <RefreshCw size={16} className="animate-spin text-muted-foreground" />
-        </div>
-      ) : !error && apps.length === 0 ? (
+        <div className="flex items-center justify-center py-10"><RefreshCw size={16} className="animate-spin text-muted-foreground" /></div>
+      ) : filtered.length === 0 ? (
         <div className="glass-card p-6 rounded-2xl text-center">
           <p className="text-sm font-medium mb-1">Немає заявок</p>
-          <p className="text-[11px] text-muted-foreground">
-            {tab === 'all'
-              ? 'Запустіть автопошук у вкладці "Підключення", щоб відправити перші заявки.'
-              : `Немає заявок зі статусом "${tabs.find((t) => t.id === tab)?.label ?? tab}".`}
-          </p>
+          <p className="text-[11px] text-muted-foreground">Увімкніть «Автоподача» у розширенні — подані заявки з&apos;являться тут.</p>
         </div>
-      ) : !error ? (
+      ) : (
         <div className="flex flex-col gap-2">
-          {apps.map((app) => {
-            const status = app.status as string;
-            const statusColor =
-              status === 'sent'             ? 'text-green-400' :
-              status === 'sent_unconfirmed' ? 'text-blue-400'  :
-              status === 'skipped'          ? 'text-yellow-400' : 'text-red-400';
-            const statusLabel =
-              status === 'sent'             ? 'Надіслано'  :
-              status === 'sent_unconfirmed' ? 'Надіслано?' :
-              status === 'skipped'          ? 'Пропущено'  : 'Помилка';
-            const projectUrl = typeof app.url === 'string' && app.url.startsWith('https://') ? app.url : null;
-
-            // Extract human label from error code prefix "CODE: human text"
-            const rawError = app.errorReason as string | undefined;
-            const errorDisplay = rawError
-              ? rawError.includes(': ') ? rawError.split(': ').slice(1).join(': ') : rawError
-              : null;
-            const errorCode = rawError
-              ? rawError.split(':')[0].trim()
-              : null;
-
-            const rawSkip = app.skippedReason as string | undefined;
-            const skipDisplay = rawSkip
-              ? rawSkip.includes(': ') ? rawSkip.split(': ').slice(1).join(': ') : rawSkip
-              : null;
-
+          {filtered.map((b: Bid, i: number) => {
+            const m = meta(b.status);
             return (
-              <div key={app.id as string} className="glass-card p-3 rounded-xl">
-                <div className="flex items-start gap-2.5">
-                  <div className="flex-1 min-w-0">
-                    <p className="text-xs font-medium truncate">{app.title as string}</p>
-                    <div className="flex flex-wrap gap-x-2 mt-0.5">
-                      <span className="text-[11px] text-muted-foreground">
-                        {app.budget as number} {app.currency as string}
-                      </span>
-                      {app.aiScore !== undefined && (
-                        <span className="text-[11px] text-muted-foreground">· AI {app.aiScore as number}%</span>
-                      )}
-                    </div>
-                    {skipDisplay && (
-                      <p className="text-[10px] text-yellow-400/80 mt-0.5 truncate" title={rawSkip}>
-                        {skipDisplay}
-                      </p>
-                    )}
-                    {errorDisplay && (
-                      <div className="mt-1 flex flex-col gap-0.5">
-                        {errorCode && errorCode !== 'UNKNOWN_ERROR' && (
-                          <span className="text-[9px] font-mono font-semibold px-1.5 py-0.5 rounded bg-red-500/15 text-red-400 self-start">
-                            {errorCode}
-                          </span>
-                        )}
-                        <p className="text-[10px] text-red-400/90 leading-snug" title={rawError}>
-                          {errorDisplay}
-                        </p>
-                      </div>
-                    )}
-                    {/* Safe open — button with window.open, never <a href> in Telegram WebView */}
-                    {projectUrl && (
-                      <button
-                        onClick={() => {
-                          haptic.light();
-                          window.open(projectUrl, '_blank', 'noopener,noreferrer');
-                        }}
-                        className="text-[10px] text-primary mt-0.5 block truncate text-left"
-                      >
-                        Відкрити проєкт
-                      </button>
-                    )}
-                  </div>
-                  <span className={cn('text-[10px] font-semibold flex-shrink-0', statusColor)}>
-                    {statusLabel}
-                  </span>
+              <div key={i} className="glass-card p-3 rounded-2xl flex items-center gap-2.5">
+                <span className={cn('w-2 h-2 rounded-full flex-shrink-0', m.d)} />
+                <div className="flex-1 min-w-0">
+                  <p className="text-[12px] font-medium truncate">{b.title || 'Проєкт'}</p>
+                  <p className="text-[10px] text-muted-foreground mt-0.5">{fmtTime(b.at)}{b.days ? ` · ${b.days} дн` : ''}</p>
                 </div>
+                {b.amount ? <span className="text-[11px] text-muted-foreground flex-shrink-0">{b.amount} грн</span> : null}
+                {b.ai ? <span className="text-[10px] text-primary font-semibold flex-shrink-0">AI</span> : null}
+                <span className={cn('text-[10px] font-semibold flex-shrink-0', m.c)}>{m.l}</span>
               </div>
             );
           })}
         </div>
-      ) : null}
+      )}
     </div>
   );
 }
