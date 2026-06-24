@@ -13,52 +13,24 @@ import { sendTelegramCode } from '@/services/telegram-mtproto.service';
 
 export const maxDuration = 60;
 
-type SendCodeBody = {
+type Body = {
   accountId?: string;
   phoneNumber?: string;
   userId?: string;
 };
 
-function normalizePhone(phone?: string) {
+function cleanPhone(phone?: string) {
   return phone?.trim().replace(/\s+/g, '') ?? '';
-}
-
-function mapTelegramError(message: string) {
-  let friendlyError = message;
-  let status = 500;
-
-  if (/PHONE_NUMBER_INVALID|INVALID_PHONE/i.test(message)) {
-    friendlyError = 'Invalid phone number format';
-    status = 400;
-  } else if (/PHONE_NUMBER_BANNED/i.test(message)) {
-    friendlyError = 'This phone number is banned by Telegram';
-    status = 403;
-  } else if (/FLOOD_WAIT/i.test(message)) {
-    const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
-    friendlyError = `Too many attempts. Please wait ${seconds} seconds`;
-    status = 429;
-  } else if (/API_ID_INVALID|api_id/i.test(message)) {
-    friendlyError = 'Invalid Telegram API credentials';
-    status = 503;
-  } else if (/timed out|timeout/i.test(message)) {
-    friendlyError = 'Telegram connection timed out. Try again later.';
-    status = 503;
-  } else if (/Cannot send requests while disconnected|disconnect/i.test(message)) {
-    friendlyError = 'Telegram client is disconnected. Try again.';
-    status = 503;
-  }
-
-  return { friendlyError, status };
 }
 
 export async function POST(req: NextRequest) {
   let accountId: string | undefined;
 
   try {
-    const body = (await req.json()) as SendCodeBody;
+    const body = (await req.json()) as Body;
 
     accountId = body.accountId;
-    const phoneNumber = normalizePhone(body.phoneNumber);
+    const phoneNumber = cleanPhone(body.phoneNumber);
     const userId = body.userId;
 
     const apiId = Number(process.env.TELEGRAM_API_ID);
@@ -68,13 +40,9 @@ export async function POST(req: NextRequest) {
       return NextResponse.json(
         {
           ok: false,
-          error: 'Telegram API credentials not configured on server',
+          error: 'Telegram API credentials not configured',
           code: 'TELEGRAM_ENV_MISSING',
-          debug: {
-            apiIdSet: Boolean(process.env.TELEGRAM_API_ID),
-            apiHashSet: Boolean(process.env.TELEGRAM_API_HASH),
-            apiIdIsNumber: !Number.isNaN(apiId) && Boolean(apiId),
-          },
+          phoneHashExists: false,
         },
         { status: 503 }
       );
@@ -85,42 +53,40 @@ export async function POST(req: NextRequest) {
     if (!account && phoneNumber) {
       if (!userId) {
         return NextResponse.json(
-          {
-            ok: false,
-            error: 'userId is required when creating a new account',
-          },
+          { ok: false, error: 'userId is required', phoneHashExists: false },
           { status: 400 }
         );
       }
 
-      const existingAccounts = await getTelegramAccounts(userId);
-      const existingAccount = existingAccounts.find(
-        (item) => normalizePhone(item.phoneNumber) === phoneNumber
+      const accounts = await getTelegramAccounts(userId);
+      const found = accounts.find(
+        (item) => cleanPhone(item.phoneNumber) === phoneNumber
       );
 
-      if (existingAccount) {
-        account = existingAccount;
-        accountId = existingAccount.id;
+      if (found) {
+        account = found;
+        accountId = found.id;
       } else {
-        const createdAccount = await upsertTelegramAccount({
+        const created = await upsertTelegramAccount({
           userId,
           phoneNumber,
           status: 'pending',
           errorMessage: undefined,
         });
 
-        if (!createdAccount) {
+        if (!created) {
           return NextResponse.json(
             {
               ok: false,
-              error: 'Failed to create account record',
+              error: 'Failed to create Telegram account',
+              phoneHashExists: false,
             },
             { status: 500 }
           );
         }
 
-        account = createdAccount;
-        accountId = createdAccount.id;
+        account = created;
+        accountId = created.id;
       }
     }
 
@@ -129,24 +95,21 @@ export async function POST(req: NextRequest) {
         {
           ok: false,
           error: 'accountId or phoneNumber is required',
+          phoneHashExists: false,
         },
         { status: 400 }
       );
     }
 
     console.log(
-      `SEND_CODE_STARTED — accountId:${accountId} phone:${account.phoneNumber}`
+      `SEND_CODE_STARTED accountId:${accountId} phone:${account.phoneNumber}`
     );
 
     const result = await sendTelegramCode(account.phoneNumber);
 
-    if (!result?.phoneHash || !result?.sessionString) {
-      throw new Error('SEND_CODE_FAILED_EMPTY_RESULT');
+    if (!result.phoneHash || !result.sessionString) {
+      throw new Error('SEND_CODE_EMPTY_RESULT');
     }
-
-    console.log(
-      `SEND_CODE_SUCCESS — phone:${account.phoneNumber} isCodeViaApp:${result.isCodeViaApp} hashPrefix:${result.phoneHash.slice(0, 8)}`
-    );
 
     await saveTelegramOtpSession(
       accountId,
@@ -164,17 +127,40 @@ export async function POST(req: NextRequest) {
       ok: true,
       accountId,
       message: 'Code sent',
-      isCodeViaApp: Boolean(result.isCodeViaApp),
+      isCodeViaApp: result.isCodeViaApp,
+      codeType: result.codeType,
+      nextType: result.nextType ?? null,
+      timeout: result.timeout ?? null,
       phoneHashExists: true,
       handledBy: 'vercel',
     });
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    const { friendlyError, status } = mapTelegramError(message);
 
     console.error(
-      `SEND_CODE_FAILED — accountId:${accountId ?? 'unknown'} error:${message}`
+      `SEND_CODE_FAILED accountId:${accountId ?? 'unknown'} error:${message}`
     );
+
+    let error = message;
+    let status = 500;
+
+    if (/PHONE_NUMBER_INVALID/i.test(message)) {
+      error = 'Невірний формат номера телефону';
+      status = 400;
+    } else if (/PHONE_NUMBER_BANNED/i.test(message)) {
+      error = 'Цей номер заблокований Telegram';
+      status = 403;
+    } else if (/FLOOD_WAIT/i.test(message)) {
+      const seconds = message.match(/FLOOD_WAIT_(\d+)/)?.[1] ?? '60';
+      error = `Забагато спроб. Зачекайте ${seconds} сек.`;
+      status = 429;
+    } else if (/API_ID_INVALID|TELEGRAM_ENV_MISSING/i.test(message)) {
+      error = 'Невірні Telegram API дані';
+      status = 503;
+    } else if (/timeout|timed out/i.test(message)) {
+      error = 'Не вдалося з’єднатися з Telegram. Спробуйте ще раз.';
+      status = 503;
+    }
 
     if (accountId) {
       const account = await getTelegramAccountById(accountId).catch(() => null);
@@ -183,7 +169,7 @@ export async function POST(req: NextRequest) {
         await upsertTelegramAccount({
           ...account,
           status: /FLOOD_WAIT/i.test(message) ? 'flood_wait' : 'invalid',
-          errorMessage: friendlyError,
+          errorMessage: error,
         }).catch(() => {});
       }
     }
@@ -191,7 +177,7 @@ export async function POST(req: NextRequest) {
     return NextResponse.json(
       {
         ok: false,
-        error: friendlyError,
+        error,
         telegramError: message,
         phoneHashExists: false,
         handledBy: 'vercel',
