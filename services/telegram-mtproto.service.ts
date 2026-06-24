@@ -13,10 +13,11 @@ import { StringSession } from 'telegram/sessions/index.js';
 import { Api } from 'telegram/tl/index.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 
-const CONNECT_TIMEOUT = 60_000;
-const SEND_CODE_TIMEOUT = 60_000;
-const SIGN_IN_TIMEOUT = 60_000;
+const CONNECT_TIMEOUT = 30_000;   // per-attempt connect cap
+const SEND_CODE_TIMEOUT = 30_000;  // per-attempt sendCode cap
+const SIGN_IN_TIMEOUT = 30_000;
 const MESSAGE_TIMEOUT = 30_000;
+const MAX_ATTEMPTS = 3;
 
 type SentCodeLike = Api.auth.SentCode & {
   nextType?: { className?: string };
@@ -91,8 +92,8 @@ function createClient(
   const logger = new Logger(LogLevel.ERROR);
 
   return new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 5,
-    retryDelay: 2_000,
+    connectionRetries: 3,
+    retryDelay: 1_000,
     useWSS: USE_WSS,
     baseLogger: logger,
   });
@@ -181,42 +182,33 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
 
   let lastError: unknown;
 
-  for (let attempt = 1; attempt <= 3; attempt += 1) {
-    // Always create a brand-new client with empty StringSession — never reuse
-    console.log(`CLIENT_CREATED — attempt:${attempt} phone:${phone}`);
+  for (let attempt = 1; attempt <= MAX_ATTEMPTS; attempt += 1) {
+    // Fresh client + empty StringSession on every attempt
     const client = createClient(apiId, apiHash);
+    console.log(`SEND_CODE_ATTEMPT:${attempt}/${MAX_ATTEMPTS} phone:${phone}`);
 
     try {
-      console.log(`SEND_CODE_STARTED — attempt:${attempt} phone:${phone}`);
-
-      // Step 1: explicit connect — must complete before any invoke
-      console.log(`CLIENT_CONNECT_STARTED — attempt:${attempt}`);
+      // connect() — let GramJS manage its own internal retries (connectionRetries:3)
+      // We wrap with our own cap only to prevent a single attempt from hanging forever
       await withTimeout(client.connect(), CONNECT_TIMEOUT, `connect/attempt:${attempt}`);
-      console.log(`CLIENT_CONNECT_SUCCESS — attempt:${attempt} connected:${client.connected}`);
+      console.log(`CONNECTED — attempt:${attempt}`);
 
-      // Step 2: call auth.SendCode via GramJS high-level sendCode()
-      // client.sendCode() internally calls client.invoke(Api.auth.SendCode) AND
-      // handles PHONE_MIGRATE_X (DC migration) by retrying on the correct DC.
-      console.log(`AUTH_SEND_CODE_STARTED — phone:${phone}`);
+      // client.sendCode() handles PHONE_MIGRATE_X (DC migration) automatically
       const result = await withTimeout(
         client.sendCode({ apiId, apiHash }, phone),
         SEND_CODE_TIMEOUT,
         'auth.SendCode'
       );
 
-      // Guard: reject empty/missing hash — never return fake success
       if (!result?.phoneCodeHash) {
         throw new Error('PHONE_CODE_HASH_MISSING');
       }
 
-      // Serialise session AFTER sendCode so correct DC data is preserved
       const sessionString = client.session.save() as unknown as string;
-
       const isCodeViaApp = result.isCodeViaApp;
       const codeType = isCodeViaApp ? 'app' : 'sms';
 
-      console.log(`AUTH_SEND_CODE_SUCCESS — phone:${phone} isCodeViaApp:${isCodeViaApp} codeType:${codeType}`);
-      console.log(`PHONE_CODE_HASH_RECEIVED — hashPrefix:${result.phoneCodeHash.slice(0, 8)}`);
+      console.log(`SEND_CODE_SUCCESS phone:${phone} codeType:${codeType} hashPrefix:${result.phoneCodeHash.slice(0, 8)}`);
 
       return {
         phoneHash: result.phoneCodeHash,
@@ -229,16 +221,18 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     } catch (err) {
       lastError = err;
       const message = err instanceof Error ? err.message : String(err);
+      console.error(`SEND_CODE_ATTEMPT:${attempt} FAILED reason:${message}`);
 
-      console.error(`SEND_CODE_FAILED — attempt:${attempt} phone:${phone} reason:${message}`);
-
-      // Permanent errors — do not retry
-      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT|TELEGRAM_ENV_MISSING/i.test(message)) {
+      // Permanent Telegram errors — never retry
+      if (/PHONE_NUMBER_INVALID|PHONE_NUMBER_BANNED|API_ID_INVALID|FLOOD_WAIT_\d|TELEGRAM_ENV_MISSING/i.test(message)) {
         throw err;
       }
 
-      if (attempt < 3) {
-        await new Promise((resolve) => setTimeout(resolve, 2_000));
+      // Retry transient errors (timeout, network, DC migration failures)
+      if (attempt < MAX_ATTEMPTS) {
+        const delay = attempt * 2_000; // 2s, 4s
+        console.log(`SEND_CODE_RETRY in ${delay}ms`);
+        await new Promise((resolve) => setTimeout(resolve, delay));
       }
     } finally {
       await safeDisconnect(client);

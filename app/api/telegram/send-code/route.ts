@@ -6,7 +6,7 @@
  * then delegates to the shared handleSendCode handler.
  * ok:true is returned ONLY when Telegram confirms a real phoneCodeHash.
  */
-export const maxDuration = 60;
+export const maxDuration = 120;
 
 import { NextRequest, NextResponse } from 'next/server';
 import {
