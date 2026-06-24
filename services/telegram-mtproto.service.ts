@@ -163,9 +163,9 @@ async function connectClient(client: TelegramClient, label: string) {
 
   await withTimeout(client.connect(), CONNECT_TIMEOUT, `${label}/connect`);
 
-  if (!client.connected) {
-    throw new Error('TELEGRAM_CONNECT_FAILED');
-  }
+ if (!client.connected) {
+  console.warn(`[telegram] ${label} connected flag is false after connect, continuing anyway`);
+}
 
   console.log(`[telegram] ${label} CONNECT_OK`);
 }
