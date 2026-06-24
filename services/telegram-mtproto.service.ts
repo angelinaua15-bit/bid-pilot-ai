@@ -13,11 +13,9 @@ import { StringSession } from 'telegram/sessions/index.js';
 import { Api } from 'telegram/tl/index.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 
-// Do NOT set a tight timeout on connect() separately —
-// GramJS calls connect() internally inside sendCode() too,
-// so two competing timeouts fight each other and the first one wins at 30s.
-// Instead we set one generous outer timeout on the entire sendCode operation.
-const SEND_CODE_TIMEOUT = 55_000;  // single outer timeout per attempt — leave room for 2 attempts inside maxDuration:120
+// connect() + sendCode() are chained into a single Promise covered by one outer timeout.
+// This avoids two competing timers racing each other on cold starts.
+const SEND_CODE_TIMEOUT = 55_000;  // single outer timeout covering connect + sendCode per attempt
 const SIGN_IN_TIMEOUT = 30_000;
 const MESSAGE_TIMEOUT = 30_000;
 const MAX_ATTEMPTS = 2;             // 2 × 55s = 110s < maxDuration:120
@@ -185,13 +183,15 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     console.log(`SEND_CODE_ATTEMPT:${attempt}/${MAX_ATTEMPTS} phone:${phone}`);
 
     try {
-      // Do NOT call client.connect() manually — GramJS calls it inside sendCode()
-      // and calling it twice with competing timeouts causes the 30s timeout to fire
-      // before the connection + MTProto key exchange completes on Vercel cold starts.
-      // One outer timeout on the whole operation is enough.
+      // GramJS does NOT auto-connect inside sendCode() — explicit connect() is required.
+      // We chain connect().then(sendCode()) into a single Promise so there is only one
+      // outer timeout covering the full operation (no two competing timeouts).
       console.log(`SEND_CODE_CALLING — attempt:${attempt} phone:${phone}`);
       const result = await withTimeout(
-        client.sendCode({ apiId, apiHash }, phone),
+        client.connect().then(() => {
+          console.log(`CONNECTED — attempt:${attempt}`);
+          return client.sendCode({ apiId, apiHash }, phone);
+        }),
         SEND_CODE_TIMEOUT,
         'auth.SendCode'
       );
