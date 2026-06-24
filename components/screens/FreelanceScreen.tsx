@@ -132,6 +132,18 @@ function ConnectPanel({ userId }: {
   const [showGuide, setShowGuide] = useState(false);
 
   const code = userId || '';
+  // Chrome Web Store link — replace with the real one after publishing.
+  const STORE_URL = 'https://chromewebstore.google.com/detail/YOUR-EXTENSION-ID';
+
+  // Expose the connect code so the installed extension can auto-capture it
+  // (no manual copy/paste needed).
+  useEffect(() => {
+    if (!code) return;
+    try {
+      document.documentElement.dataset.bidpilotCode = code;
+      window.postMessage({ type: 'BIDPILOT_CODE', code }, '*');
+    } catch { /* ignore */ }
+  }, [code]);
 
   const fetchStats = useCallback(async () => {
     if (!userId) { setLoading(false); return; }
@@ -171,6 +183,12 @@ function ConnectPanel({ userId }: {
         </div>
         {connected && <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />}
       </div>
+
+      {/* Install button */}
+      <a href={STORE_URL} target="_blank" rel="noopener noreferrer"
+        className="w-full rounded-2xl bg-primary text-primary-foreground px-4 py-3 flex items-center justify-center gap-2 font-semibold text-sm active:scale-[0.99] transition-all">
+        <Monitor size={16} /> {connected ? 'Розширення у Chrome Web Store' : 'Встановити розширення'}
+      </a>
 
       {/* Analytics */}
       {connected && (
@@ -225,13 +243,10 @@ function ConnectPanel({ userId }: {
         {showGuide && (
           <div className="px-4 pb-4">
             <ol className="flex flex-col gap-2 text-[11px] text-muted-foreground leading-relaxed list-decimal list-inside">
-              <li>Завантажте теку розширення <b>BidPilot</b> (надамо файли/посилання).</li>
-              <li>У Chrome відкрийте <b>chrome://extensions</b>.</li>
-              <li>Увімкніть <b>Developer mode</b> (перемикач справа вгорі).</li>
-              <li>Натисніть <b>Load unpacked</b> і виберіть теку розширення.</li>
-              <li>Залогіньтесь на <b>freelancehunt.com</b> у цьому ж Chrome.</li>
-              <li>Відкрийте розширення → <b>Налаштування</b> → вставте код підключення вище → Зберегти.</li>
-              <li>Увімкніть <b>Автоподача</b> — і статистика з'явиться тут.</li>
+              <li>Натисніть <b>«Встановити розширення»</b> вище → <b>Add to Chrome</b>.</li>
+              <li>Залогіньтесь на <b>freelancehunt.com</b> у цьому ж Chrome (разово, як завжди).</li>
+              <li>Відкрийте цю сторінку застосунку — код підключення <b>підставиться автоматично</b>.</li>
+              <li>У розширенні увімкніть <b>Автоподача</b> — і статистика з'явиться тут.</li>
             </ol>
             <p className="text-[10px] text-muted-foreground/70 mt-3 leading-relaxed">Розширення працює лише в десктопному Chrome і поки відкрите вікно браузера. Вхід виконується у вашому браузері — пароль ми не бачимо.</p>
           </div>
