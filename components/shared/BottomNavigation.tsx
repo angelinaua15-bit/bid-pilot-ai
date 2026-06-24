@@ -1,6 +1,6 @@
 'use client';
 
-import { Home, Briefcase, Send, ScrollText, User2, Shield } from 'lucide-react';
+import { Home, Briefcase, Send, User2, Shield } from 'lucide-react';
 import { cn } from '@/lib/utils';
 import { haptic } from '@/lib/telegram';
 import type { NavTab } from '@/types';
@@ -16,7 +16,6 @@ const NAV_ITEMS: NavItem[] = [
   { id: 'home',      label: 'Dashboard', icon: Home },
   { id: 'freelance', label: 'Freelance', icon: Briefcase },
   { id: 'campaigns', label: 'Campaigns', icon: Send },
-  { id: 'logs',      label: 'Logs',      icon: ScrollText },
   { id: 'account',   label: 'Account',   icon: User2 },
   { id: 'admin',     label: 'Admin',     icon: Shield, adminOnly: true },
 ];

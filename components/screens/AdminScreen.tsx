@@ -2,7 +2,7 @@
 
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Users, CreditCard, Settings2, ScrollText, ChevronRight,
+  Users, CreditCard, Settings2, ChevronRight,
   Crown, CheckCircle2, XCircle, Clock, Trash2, Plus,
   RefreshCw, Shield, ToggleLeft, ToggleRight, Wallet,
   Smartphone, PhoneCall, KeyRound, AlertTriangle, WifiOff,
@@ -14,7 +14,7 @@ import type { SaaSUser, PaymentSetting, ManualPayment, ManualPaymentPlan, Paymen
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
-type AdminTab = 'users' | 'payments' | 'payment-settings' | 'tg-accounts' | 'logs';
+type AdminTab = 'users' | 'payments' | 'payment-settings' | 'tg-accounts';
 
 interface AdminScreenProps {
   user: SaaSUser | null;
@@ -40,7 +40,6 @@ export function AdminScreen({ user }: AdminScreenProps) {
     { id: 'payments',         label: 'Платежі',     icon: CreditCard },
     { id: 'payment-settings', label: 'Гаманці',     icon: Wallet },
     { id: 'tg-accounts',      label: 'TG Аккаунти', icon: Smartphone },
-    { id: 'logs',             label: 'Логи',        icon: ScrollText },
   ];
 
   return (
@@ -83,7 +82,6 @@ export function AdminScreen({ user }: AdminScreenProps) {
         {tab === 'payments'         && <PaymentsTab user={user} />}
         {tab === 'payment-settings' && <PaymentSettingsTab user={user} />}
         {tab === 'tg-accounts'      && <TelegramAccountsTab user={user} />}
-        {tab === 'logs'             && <AdminLogsTab user={user} />}
       </div>
     </div>
   );
@@ -450,64 +448,6 @@ function PaymentSettingsTab({ user }: { user: SaaSUser }) {
     </div>
   );
 }
-
-// ── Admin Logs Tab ────────────────────────────────────────────────────────────
-
-function AdminLogsTab({ user }: { user: SaaSUser }) {
-  const [logs, setLogs] = useState<Array<{ id: string; level: string; message: string; timestamp: string }>>([]);
-  const [loading, setLoading] = useState(true);
-
-  const load = useCallback(async () => {
-    setLoading(true);
-    const res = await fetch(`/api/logs?userId=${user.id}&limit=100`).then((r) => r.json()).catch(() => null);
-    const rawLogs: Array<Record<string, unknown>> = res?.ok ? (res.logs ?? res.data ?? []) : [];
-    setLogs(rawLogs.map((entry) => ({
-      id:        String(entry.id ?? Math.random()),
-      level:     String(entry.level ?? 'info'),
-      message:   typeof entry.message === 'string'
-                   ? entry.message
-                   : entry.message != null ? JSON.stringify(entry.message) : '(no message)',
-      timestamp: String(entry.timestamp ?? entry.created_at ?? new Date().toISOString()),
-    })));
-    setLoading(false);
-  }, [user.id]);
-
-  useEffect(() => { load(); }, [load]);
-
-  const LEVEL_COLORS: Record<string, string> = {
-    info:    'text-blue-400',
-    success: 'text-green-400',
-    warning: 'text-yellow-400',
-    error:   'text-red-400',
-  };
-
-  return (
-    <div className="flex flex-col gap-2">
-      <button onClick={load} className="flex items-center gap-1.5 text-xs text-muted-foreground self-end px-3 py-1.5 bg-secondary rounded-lg active:scale-90">
-        <RefreshCw size={11} className={loading ? 'animate-spin' : ''} /> Оновити
-      </button>
-      {loading ? <Spinner /> : logs.length === 0 ? (
-        <div className="glass-card p-6 rounded-2xl text-center">
-          <p className="text-xs text-muted-foreground">Логів немає</p>
-        </div>
-      ) : (
-        logs.map((log) => (
-          <div key={log.id} className="glass-card px-3 py-2 rounded-xl flex gap-2">
-            <span className={cn('text-[10px] font-semibold uppercase w-14 flex-shrink-0 pt-px', LEVEL_COLORS[log.level] ?? 'text-muted-foreground')}>
-              {log.level}
-            </span>
-            <div className="flex-1 min-w-0">
-              <p className="text-[11px] text-foreground leading-snug">{typeof log.message === 'string' ? log.message : JSON.stringify(log.message)}</p>
-              <p className="text-[10px] text-muted-foreground/50">{new Date(log.timestamp).toLocaleString('uk-UA')}</p>
-            </div>
-          </div>
-        ))
-      )}
-    </div>
-  );
-}
-
-// ── Telegram Accounts Tab ────────────────��──�����─────────────────────────────────
 
 type WizardStep = 'idle' | 'phone' | 'code' | 'password' | 'done';
 
