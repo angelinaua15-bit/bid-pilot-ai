@@ -17,18 +17,30 @@ import {
   upsertTelegramAccount,
 } from '@/lib/db';
 import { signInWithCode } from '@/services/telegram-mtproto.service';
+import { assertAdmin } from '@/lib/auth';
 
 export async function POST(req: NextRequest) {
   let accountId: string | undefined;
 
   try {
     const body = await req.json();
-    const { accountId: aid, code, password } = body as {
-      accountId?: string;
-      code?:      string;
-      password?:  string;
+    const { accountId: aid, code, password, requesterId } = body as {
+      accountId?:   string;
+      code?:        string;
+      password?:    string;
+      requesterId?: string;
     };
     accountId = aid;
+
+    // Admin-only
+    const admin = await assertAdmin(requesterId ?? null);
+    if (!admin) {
+      console.warn(`[verify-code] FORBIDDEN — requesterId:${requesterId ?? 'none'}`);
+      return NextResponse.json(
+        { ok: false, error: 'Forbidden: admin access required' },
+        { status: 403 }
+      );
+    }
 
     if (!accountId || !code) {
       return NextResponse.json(

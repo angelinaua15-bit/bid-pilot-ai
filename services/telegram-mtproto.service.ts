@@ -13,11 +13,12 @@ import { StringSession } from 'telegram/sessions/index.js';
 import { Api } from 'telegram/tl/index.js';
 import { Logger, LogLevel } from 'telegram/extensions/Logger.js';
 
-const CONNECT_TIMEOUT = 30_000;   // per-attempt connect cap
-const SEND_CODE_TIMEOUT = 30_000;  // per-attempt sendCode cap
+// connect() + sendCode() are chained into a single Promise covered by one outer timeout.
+// This avoids two competing timers racing each other on cold starts.
+const SEND_CODE_TIMEOUT = 55_000;  // single outer timeout covering connect + sendCode per attempt
 const SIGN_IN_TIMEOUT = 30_000;
 const MESSAGE_TIMEOUT = 30_000;
-const MAX_ATTEMPTS = 3;
+const MAX_ATTEMPTS = 2;             // 2 × 55s = 110s < maxDuration:120
 
 type SentCodeLike = Api.auth.SentCode & {
   nextType?: { className?: string };
@@ -92,7 +93,7 @@ function createClient(
   const logger = new Logger(LogLevel.ERROR);
 
   return new TelegramClient(session, apiId, apiHash, {
-    connectionRetries: 3,
+    connectionRetries: 5,  // GramJS retries at socket level — more chances within the 55s window
     retryDelay: 1_000,
     useWSS: USE_WSS,
     baseLogger: logger,
@@ -166,13 +167,7 @@ async function safeDisconnect(client: TelegramClient) {
 
 async function connectClient(client: TelegramClient, label: string) {
   console.log(`[telegram] ${label} CONNECT_START`);
-
-  await withTimeout(client.connect(), CONNECT_TIMEOUT, `${label}/connect`);
-
- if (!client.connected) {
-  console.warn(`[telegram] ${label} connected flag is false after connect, continuing anyway`);
-}
-
+  await withTimeout(client.connect(), SIGN_IN_TIMEOUT, `${label}/connect`);
   console.log(`[telegram] ${label} CONNECT_OK`);
 }
 
@@ -188,14 +183,15 @@ export async function sendTelegramCode(phoneNumber: string): Promise<SendCodeRes
     console.log(`SEND_CODE_ATTEMPT:${attempt}/${MAX_ATTEMPTS} phone:${phone}`);
 
     try {
-      // connect() — let GramJS manage its own internal retries (connectionRetries:3)
-      // We wrap with our own cap only to prevent a single attempt from hanging forever
-      await withTimeout(client.connect(), CONNECT_TIMEOUT, `connect/attempt:${attempt}`);
-      console.log(`CONNECTED — attempt:${attempt}`);
-
-      // client.sendCode() handles PHONE_MIGRATE_X (DC migration) automatically
+      // GramJS does NOT auto-connect inside sendCode() — explicit connect() is required.
+      // We chain connect().then(sendCode()) into a single Promise so there is only one
+      // outer timeout covering the full operation (no two competing timeouts).
+      console.log(`SEND_CODE_CALLING — attempt:${attempt} phone:${phone}`);
       const result = await withTimeout(
-        client.sendCode({ apiId, apiHash }, phone),
+        client.connect().then(() => {
+          console.log(`CONNECTED — attempt:${attempt}`);
+          return client.sendCode({ apiId, apiHash }, phone);
+        }),
         SEND_CODE_TIMEOUT,
         'auth.SendCode'
       );
