@@ -30,7 +30,7 @@ export async function notifyPaymentApproved(
   plan: SubscriptionPlanSaaS,
 ): Promise<void> {
   const planLabel: Record<SubscriptionPlanSaaS, string> = {
-    free: 'Безкоштовний', pro: 'Pro', agency: 'Agency', unlimited: 'Unlimited',
+    free: 'Безкоштовний', basic: 'Базовий', pro: 'Преміум', premium: 'Преміум', agency: 'Агентський', unlimited: 'Необмежений',
   };
   await sendTelegramMessage(
     telegramId,

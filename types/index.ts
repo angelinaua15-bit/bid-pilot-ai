@@ -312,7 +312,7 @@ export type NavTab = 'home' | 'freelance' | 'campaigns' | 'logs' | 'account' | '
 // ─── SaaS User ────────────────────────────────────────────────────────────────
 
 export type UserRole = 'user' | 'admin' | 'owner';
-export type SubscriptionPlanSaaS = 'free' | 'pro' | 'agency' | 'unlimited';
+export type SubscriptionPlanSaaS = 'free' | 'basic' | 'pro' | 'premium' | 'agency' | 'unlimited';
 export type SubscriptionStatusSaaS = 'active' | 'expired' | 'cancelled';
 
 export interface SaaSUser {
@@ -503,13 +503,17 @@ export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   campaigns: boolean;
   adminAccess: boolean;
 }> = {
-  // free: very limited access for unapproved users
+  // free: дуже обмежений доступ
   free:      { applicationsPerMonth: 5,       telegramAccounts: 1,   channels: 0,       campaigns: false, adminAccess: false },
-  // pro = Premium $20: solo freelancers
+  // basic: базовий план — 100 каналів
+  basic:     { applicationsPerMonth: 10,      telegramAccounts: 1,   channels: 100,     campaigns: true,  adminAccess: false },
+  // pro (legacy alias for premium)
   pro:       { applicationsPerMonth: 20,      telegramAccounts: 3,   channels: 300,     campaigns: true,  adminAccess: false },
-  // agency = Agency $30: teams
+  // premium: преміум план — 300 каналів
+  premium:   { applicationsPerMonth: 20,      telegramAccounts: 3,   channels: 300,     campaigns: true,  adminAccess: false },
+  // agency: агентський план — 1000 каналів
   agency:    { applicationsPerMonth: 100,     telegramAccounts: 10,  channels: 1000,    campaigns: true,  adminAccess: false },
-  // unlimited = Enterprise $50: unlimited
+  // unlimited: без обмежень (admin/owner)
   unlimited: { applicationsPerMonth: 999999,  telegramAccounts: 999, channels: 999999,  campaigns: true,  adminAccess: true  },
 };
 

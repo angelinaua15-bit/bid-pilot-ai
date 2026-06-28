@@ -10,7 +10,9 @@ import { getUserById, updateUserPlan } from '@/lib/db';
 /** Monthly bid-generation limits per plan */
 export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, number> = {
   free:      10,
+  basic:     50,
   pro:       200,
+  premium:   200,
   agency:    1000,
   unlimited: Infinity,
 };

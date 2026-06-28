@@ -12,10 +12,12 @@ import type { SaaSUser, SubscriptionPlanSaaS } from '@/types';
 
 // Plan display names and colors
 const PLAN_META: Record<SubscriptionPlanSaaS, { label: string; color: string; bg: string }> = {
-  free:      { label: 'Free',      color: 'text-muted-foreground', bg: 'bg-secondary' },
-  pro:       { label: 'Pro',       color: 'text-primary',          bg: 'bg-primary/15' },
-  agency:    { label: 'Agency',    color: 'text-yellow-400',       bg: 'bg-yellow-500/15' },
-  unlimited: { label: 'Unlimited', color: 'text-red-400',          bg: 'bg-red-500/15' },
+  free:      { label: 'Безкоштовний', color: 'text-muted-foreground', bg: 'bg-secondary' },
+  basic:     { label: 'Базовий',      color: 'text-blue-400',         bg: 'bg-blue-500/15' },
+  pro:       { label: 'Преміум',      color: 'text-primary',          bg: 'bg-primary/15' },
+  premium:   { label: 'Преміум',      color: 'text-primary',          bg: 'bg-primary/15' },
+  agency:    { label: 'Агентський',   color: 'text-yellow-400',       bg: 'bg-yellow-500/15' },
+  unlimited: { label: 'Необмежений',  color: 'text-red-400',          bg: 'bg-red-500/15' },
 };
 
 interface AccountScreenProps {
@@ -149,35 +151,38 @@ export function AccountScreen({ user, onUserUpdate, onAdminPanel }: AccountScree
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="applications"
-            label="Bids / month"
-            values={{ free: '—', pro: '20', agency: '100', unlimited: 'Unlimited' }}
+            label="Заявок / місяць"
+            values={{ free: '5', basic: '10', pro: '20', premium: '20', agency: '100', unlimited: 'Необмежено' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="accounts"
-            label="Telegram accounts"
-            values={{ free: '1', pro: '3', agency: '10', unlimited: 'Unlimited' }}
+            label="Telegram акаунти"
+            values={{ free: '1', basic: '1', pro: '3', premium: '3', agency: '10', unlimited: 'Необмежено' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="channels"
-            label="Channels / groups"
-            values={{ free: '—', pro: '300', agency: '1 000+', unlimited: 'Unlimited' }}
+            label="Канали / групи"
+            values={{ free: '—', basic: '100', pro: '300', premium: '300', agency: '1 000', unlimited: 'Необмежено' }}
           />
           <PlanFeatureRow
             plan={user.subscriptionPlan}
             feature="campaigns"
-            label="Telegram campaigns"
-            values={{ free: '—', pro: 'Yes', agency: 'Yes', unlimited: 'Yes' }}
+            label="Telegram розсилки"
+            values={{ free: '—', basic: 'Доступно', pro: 'Доступно', premium: 'Доступно', agency: 'Доступно', unlimited: 'Доступно' }}
           />
         </div>
 
-        {!userIsOwner && (user.subscriptionPlan === 'free' || user.subscriptionPlan === 'pro') && (
+        {!userIsOwner && user.subscriptionPlan !== 'unlimited' && user.subscriptionPlan !== 'agency' && (
           <button
             onClick={() => { haptic.medium(); setShowUpgrade(true); }}
             className="w-full py-2.5 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-transform"
           >
-            <Crown size={13} /> {user.subscriptionPlan === 'free' ? 'Upgrade to Premium' : 'Upgrade to Agency'}
+            <Crown size={13} />
+            {user.subscriptionPlan === 'free' || user.subscriptionPlan === 'basic'
+              ? 'Оновити до Преміум'
+              : 'Оновити до Агентського'}
           </button>
         )}
       </div>
