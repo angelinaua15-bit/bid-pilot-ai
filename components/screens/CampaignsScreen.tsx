@@ -704,9 +704,22 @@ function CreateCampaignForm({ userId, user, onCreated }: {
   userId?: string; user: SaaSUser | null; onCreated: () => void;
 }) {
   const plan       = user?.subscriptionPlan ?? 'free';
+  const isAdmin    = user?.role === 'owner' || user?.role === 'admin';
   const limits     = PLAN_LIMITS[plan] ?? PLAN_LIMITS.free;
-  const channelCap = limits.channels >= 999999 ? Infinity : limits.channels;
+  // admin/owner and unlimited plan get Infinity — no cap at all
+  const channelCap = (isAdmin || plan === 'unlimited' || limits.channels >= 999999) ? Infinity : limits.channels;
   const accountCap = limits.telegramAccounts >= 999 ? Infinity : limits.telegramAccounts;
+
+  // Ukrainian display names for plans
+  const PLAN_NAMES_UA: Record<string, string> = {
+    free:      'Безкоштовний',
+    basic:     'Базовий',
+    pro:       'Преміум',
+    premium:   'Преміум',
+    agency:    'Агентський',
+    unlimited: 'Необмежений',
+  };
+  const planNameUA = PLAN_NAMES_UA[plan] ?? plan;
 
   const [activeChannels, setActiveChannels] = useState<TelegramChannel[]>([]);
   const [chLoading, setChLoading]           = useState(true);
@@ -890,7 +903,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
                 <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
                   <AlertTriangle size={11} className="text-yellow-400 flex-shrink-0 mt-0.5" />
                   <p className="text-[11px] text-yellow-400">
-                    Досягнуто ліміт акаунтів для плану {plan} ({accountCap}). Для більшої кількості оновіть план.
+                    Досягнуто ліміт акаунтів для плану &laquo;{planNameUA}&raquo; ({accountCap}). Для більшої кількості оновіть підписку.
                   </p>
                 </div>
               )}
@@ -940,7 +953,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
               className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none" />
           </div>
           <div className="flex flex-col gap-1">
-            <label className="text-[10px] text-muted-foreground">Макс. затримка (сек)</label>
+            <label className="text-[10px] text-muted-foreground">Макс. затримка (с��к)</label>
             <input type="number" min={1} value={form.delayMaxSeconds}
               onChange={(e) => setForm((f) => ({ ...f, delayMaxSeconds: Number(e.target.value) }))}
               className="bg-secondary rounded-lg px-2.5 py-2 text-xs outline-none" />
@@ -965,7 +978,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
         {/* Plan channel limit badge */}
         <div className="flex items-center gap-2 px-2.5 py-1.5 rounded-lg bg-secondary/60">
           <span className="text-[10px] text-muted-foreground">
-            Ліміт плану <span className="font-semibold text-foreground">{plan}</span>:
+            Ліміт плану <span className="font-semibold text-foreground">{planNameUA}</span>:
           </span>
           <span className="text-[10px] font-semibold text-primary">
             {channelCap === Infinity ? 'Необмежено' : `${channelCap.toLocaleString('uk-UA')} каналів`}
@@ -1003,7 +1016,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
               <div className="flex items-start gap-2 px-3 py-2 rounded-lg bg-yellow-500/10 border border-yellow-500/20">
                 <AlertTriangle size={11} className="text-yellow-400 flex-shrink-0 mt-0.5" />
                 <p className="text-[11px] text-yellow-400">
-                  Досягнуто ліміт {channelCap} каналів для плану {plan}. Оновіть підписку щоб розсилати в більше каналів.
+                  Досягнуто ліміт {channelCap.toLocaleString('uk-UA')} каналів для плану &laquo;{planNameUA}&raquo;. Оновіть підписку, щоб розсилати в більше каналів.
                 </p>
               </div>
             )}

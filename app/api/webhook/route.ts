@@ -112,7 +112,7 @@ async function handleStatus(chatId: number): Promise<void> {
   if (user) {
     const limits = PLAN_LIMITS[user.subscriptionPlan];
     const remaining = Math.max(0, limits.applicationsPerMonth - user.applicationsThisMonth);
-    const planLabel = { free: 'Безкоштовний', pro: 'Pro', agency: 'Agency', unlimited: 'Unlimited' }[user.subscriptionPlan];
+    const planLabel = { free: 'Безкоштовний', basic: 'Базовий', pro: 'Преміум', premium: 'Преміум', agency: 'Агентський', unlimited: 'Необмежений' }[user.subscriptionPlan];
     text = [
       '<b>Ваш статус:</b>',
       '',
