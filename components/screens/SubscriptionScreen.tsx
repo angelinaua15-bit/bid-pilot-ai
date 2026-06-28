@@ -12,8 +12,8 @@ interface SubscriptionScreenProps {
 }
 
 const PLAN_META: Record<ManualPaymentPlan, { label: string; color: string; price: string }> = {
-  pro:    { label: 'Pro',    color: 'text-primary',       price: '300 UAH/міс' },
-  agency: { label: 'Agency', color: 'text-yellow-400',    price: '800 UAH/міс' },
+  pro:    { label: 'Premium', color: 'text-primary',    price: '300 грн/міс' },
+  agency: { label: 'Agency',  color: 'text-yellow-400', price: '800 грн/міс' },
 };
 
 export function SubscriptionScreen({ user, onBack }: SubscriptionScreenProps) {
@@ -84,6 +84,12 @@ export function SubscriptionScreen({ user, onBack }: SubscriptionScreenProps) {
     rejected: 'text-red-400 bg-red-500/15',
   };
 
+  const STATUS_LABELS: Record<string, string> = {
+    pending:  'Очікує',
+    approved: 'Схвалено',
+    rejected: 'Відхилено',
+  };
+
   return (
     <div className="flex flex-col h-dvh">
       {/* Header */}
@@ -93,7 +99,7 @@ export function SubscriptionScreen({ user, onBack }: SubscriptionScreenProps) {
           <ArrowLeft size={18} />
         </button>
         <div>
-          <h1 className="text-xl font-bold leading-tight">Upgrade</h1>
+          <h1 className="text-xl font-bold leading-tight">Підписка</h1>
           <p className="text-xs text-muted-foreground">Ручна оплата через адміна</p>
         </div>
       </div>
@@ -232,7 +238,7 @@ export function SubscriptionScreen({ user, onBack }: SubscriptionScreenProps) {
                   <p className="text-[10px] text-muted-foreground">{new Date(p.createdAt).toLocaleDateString('uk-UA')}</p>
                 </div>
                 <span className={cn('text-[10px] px-2 py-0.5 rounded-full font-semibold', STATUS_COLORS[p.status])}>
-                  {p.status}
+                  {STATUS_LABELS[p.status] ?? p.status}
                 </span>
               </div>
             ))}

@@ -34,24 +34,24 @@ const PLANS: PlanDef[] = [
     label:       'Premium',
     price:       '$20',
     priceUsd:    20,
-    period:      '/month',
-    description: 'Best for solo freelancers and small outreach.',
+    period:      '/місяць',
+    description: 'Для фрілансерів-одинаків та невеликих розсилок.',
     icon:        <Zap size={18} />,
     accentClass: 'text-primary',
     borderClass: 'border-primary/40',
     badgeClass:  'bg-primary/15 text-primary',
     ctaClass:    'bg-primary text-primary-foreground',
     benefits: [
-      'Telegram campaigns for small-scale outreach',
-      'Freelancehunt auto-bid for basic lead generation',
-      'Safe daily sending schedule',
-      'Basic campaign logs',
-      'Manual payment request',
+      'Telegram-розсилки для невеликих кампаній',
+      'Авто-ставки на Freelancehunt для базової генерації лідів',
+      'Безпечний розклад надсилання на день',
+      'Базові логи кампаній',
+      'Ручна заявка на оплату',
     ],
     limits: [
-      { label: 'Telegram accounts', value: 'Up to 3' },
-      { label: 'Channels / groups', value: 'Up to 300' },
-      { label: 'Freelancehunt bids', value: '20 / month' },
+      { label: 'Telegram-акаунти', value: 'До 3' },
+      { label: 'Канали / групи',   value: 'До 300' },
+      { label: 'Ставки Freelancehunt', value: '20 / місяць' },
     ],
   },
   {
@@ -59,8 +59,8 @@ const PLANS: PlanDef[] = [
     label:       'Agency',
     price:       '$30',
     priceUsd:    30,
-    period:      '/month',
-    description: 'Best for agencies and teams who need more volume.',
+    period:      '/місяць',
+    description: 'Для агентств та команд, яким потрібен більший об\'єм.',
     icon:        <Crown size={18} />,
     accentClass: 'text-yellow-400',
     borderClass: 'border-yellow-400/40',
@@ -68,17 +68,17 @@ const PLANS: PlanDef[] = [
     ctaClass:    'bg-yellow-400 text-black',
     recommended: true,
     benefits: [
-      'More Telegram sender accounts',
-      'Access to larger channel / group database',
-      'Higher Freelancehunt bid limit',
-      'Advanced campaign logs',
-      'Better account rotation',
-      'Priority review of payment requests',
+      'Більше акаунтів-відправників у Telegram',
+      'Доступ до більшої бази каналів та груп',
+      'Підвищений ліміт ставок на Freelancehunt',
+      'Розширені логи кампаній',
+      'Покращена ротація акаунтів',
+      'Пріоритетна перевірка заявок на оплату',
     ],
     limits: [
-      { label: 'Telegram accounts', value: 'Up to 10' },
-      { label: 'Channels / groups', value: '1 000+' },
-      { label: 'Freelancehunt bids', value: '100 / month' },
+      { label: 'Telegram-акаунти',     value: 'До 10' },
+      { label: 'Канали / групи',        value: '1 000+' },
+      { label: 'Ставки Freelancehunt', value: '100 / місяць' },
     ],
   },
   {
@@ -86,25 +86,25 @@ const PLANS: PlanDef[] = [
     label:       'Enterprise',
     price:       '$50',
     priceUsd:    50,
-    period:      '/month',
-    description: 'Best for high-volume automation and full access.',
+    period:      '/місяць',
+    description: 'Для масштабної автоматизації та повного доступу.',
     icon:        <Building2 size={18} />,
     accentClass: 'text-red-400',
     borderClass: 'border-red-400/40',
     badgeClass:  'bg-red-500/15 text-red-400',
     ctaClass:    'bg-red-500 text-white',
     benefits: [
-      'Unlimited Telegram accounts',
-      'Unlimited channels / groups',
-      'Unlimited Freelancehunt bids',
-      'Full automation access',
-      'Priority support',
-      'Admin-level limits can be adjusted manually',
+      'Необмежена кількість Telegram-акаунтів',
+      'Необмежена кількість каналів та груп',
+      'Необмежені ставки на Freelancehunt',
+      'Повний доступ до автоматизації',
+      'Пріоритетна підтримка',
+      'Ліміти адмін-рівня регулюються вручну',
     ],
     limits: [
-      { label: 'Telegram accounts', value: 'Unlimited' },
-      { label: 'Channels / groups', value: 'Unlimited' },
-      { label: 'Freelancehunt bids', value: 'Unlimited' },
+      { label: 'Telegram-акаунти',     value: 'Необмежено' },
+      { label: 'Канали / групи',        value: 'Необмежено' },
+      { label: 'Ставки Freelancehunt', value: 'Необмежено' },
     ],
   },
 ];
@@ -112,13 +112,13 @@ const PLANS: PlanDef[] = [
 // ─── Comparison table rows ─────────────────────────────────────────────────────
 
 const COMPARE_ROWS = [
-  { label: 'Telegram accounts', free: '1',   premium: '3',   agency: '10',  enterprise: '∞' },
-  { label: 'Channels / groups', free: '—',   premium: '300', agency: '1000+', enterprise: '∞' },
-  { label: 'Bids / month',      free: '—',   premium: '20',  agency: '100', enterprise: '∞' },
-  { label: 'AI proposals',      free: '—',   premium: '+',   agency: '+',   enterprise: '+' },
-  { label: 'Daily schedule',    free: '—',   premium: '+',   agency: '+',   enterprise: '+' },
-  { label: 'Advanced logs',     free: '—',   premium: '—',   agency: '+',   enterprise: '+' },
-  { label: 'Priority support',  free: '—',   premium: '—',   agency: '+',   enterprise: '+' },
+  { label: 'Telegram-акаунти',      free: '1',  premium: '3',   agency: '10',   enterprise: '∞' },
+  { label: 'Канали / групи',        free: '—',  premium: '300', agency: '1000+',enterprise: '∞' },
+  { label: 'Ставок / місяць',       free: '—',  premium: '20',  agency: '100',  enterprise: '∞' },
+  { label: 'AI-пропозиції',         free: '—',  premium: '+',   agency: '+',    enterprise: '+' },
+  { label: 'Розклад надсилання',    free: '—',  premium: '+',   agency: '+',    enterprise: '+' },
+  { label: 'Розширені логи',        free: '—',  premium: '—',   agency: '+',    enterprise: '+' },
+  { label: 'Пріоритетна підтримка', free: '—',  premium: '—',   agency: '+',    enterprise: '+' },
 ];
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -270,7 +270,7 @@ function PlanCard({
               <p className={cn('text-sm font-bold', plan.accentClass)}>{plan.label}</p>
               {plan.recommended && (
                 <span className="text-[9px] font-bold px-1.5 py-0.5 rounded-full bg-yellow-400/20 text-yellow-400">
-                  POPULAR
+                  ПОПУЛЯРНИЙ
                 </span>
               )}
               {isCurrent && (
@@ -290,9 +290,9 @@ function PlanCard({
 
       {selected && (
         <div className="mt-3 pt-3 border-t border-border flex flex-col gap-3">
-          {/* Benefits */}
+          {/* Переваги */}
           <div className="flex flex-col gap-1.5">
-            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Benefits</p>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Переваги</p>
             {plan.benefits.map((b) => (
               <div key={b} className="flex items-start gap-1.5">
                 <CheckCircle2 size={11} className="text-green-400 flex-shrink-0 mt-0.5" />
@@ -300,9 +300,9 @@ function PlanCard({
               </div>
             ))}
           </div>
-          {/* Limits */}
+          {/* Ліміти */}
           <div className="flex flex-col gap-1.5">
-            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Limits</p>
+            <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Ліміти</p>
             {plan.limits.map((l) => (
               <div key={l.label} className="flex items-center justify-between gap-2">
                 <span className="text-[11px] text-muted-foreground">{l.label}</span>
@@ -321,18 +321,18 @@ function PlanCard({
 function CompareTable() {
   return (
     <div className="glass-card rounded-2xl overflow-hidden">
-      {/* Header */}
+      {/* Заголовок */}
       <div className="grid grid-cols-8 bg-secondary/60 border-b border-border">
-        <div className="col-span-2 px-3 py-2.5 text-[10px] font-semibold text-muted-foreground">Feature</div>
-        <div className="col-span-2 px-1 py-2.5 text-[10px] font-semibold text-muted-foreground text-center">Free</div>
+        <div className="col-span-2 px-3 py-2.5 text-[10px] font-semibold text-muted-foreground">Функція</div>
+        <div className="col-span-2 px-1 py-2.5 text-[10px] font-semibold text-muted-foreground text-center">Безкоштовно</div>
         <div className="col-span-2 px-1 py-2.5 text-[10px] font-semibold text-primary text-center">Premium</div>
         <div className="col-span-1 px-1 py-2.5 text-[10px] font-semibold text-yellow-400 text-center">Agency</div>
         <div className="col-span-1 px-1 py-2.5 text-[10px] font-semibold text-red-400 text-center">Ent.</div>
       </div>
-      {/* Price row */}
+      {/* Рядок ціни */}
       <div className="grid grid-cols-8 border-b border-border bg-secondary/20">
-        <div className="col-span-2 px-3 py-2 text-[10px] text-muted-foreground font-medium">Price / mo</div>
-        <div className="col-span-2 px-1 py-2 text-[10px] text-center text-muted-foreground">Free</div>
+        <div className="col-span-2 px-3 py-2 text-[10px] text-muted-foreground font-medium">Ціна / міс</div>
+        <div className="col-span-2 px-1 py-2 text-[10px] text-center text-muted-foreground">Безкоштовно</div>
         <div className="col-span-2 px-1 py-2 text-[10px] text-center font-bold text-primary">$20</div>
         <div className="col-span-1 px-1 py-2 text-[10px] text-center font-bold text-yellow-400">$30</div>
         <div className="col-span-1 px-1 py-2 text-[10px] text-center font-bold text-red-400">$50</div>
@@ -538,7 +538,7 @@ function PaymentFlow({
                 {submitted ? (
                   <div className="flex items-center gap-2 py-3 px-4 rounded-xl bg-green-500/10 border border-green-500/20">
                     <CheckCircle2 size={16} className="text-green-400 flex-shrink-0" />
-                    <p className="text-xs text-green-400 font-medium">Заявку надіслано! Адмін перевірить найближчим часом.</p>
+                    <p className="text-xs text-green-400 font-medium">Заявку надіслано! Адмін перевірить н��йближчим часом.</p>
                   </div>
                 ) : (
                   <button
