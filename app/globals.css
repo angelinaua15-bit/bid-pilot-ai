@@ -199,4 +199,12 @@
   /* Bottom navigation height helper */
   .nav-h { height: 64px; }
   .pb-nav { padding-bottom: calc(64px + var(--tg-safe-bottom, 0px)); }
+
+  /* Hide the "Built with v0" badge */
+  [data-testid="v0-badge"],
+  a[href*="v0.dev"],
+  div[class*="v0-badge"],
+  div[class*="built-with"] {
+    display: none !important;
+  }
 }

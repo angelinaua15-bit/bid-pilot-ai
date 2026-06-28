@@ -54,7 +54,7 @@ export function DashboardScreen({ user, onNavigate }: DashboardScreenProps) {
   const metrics = [
     { label: 'Подано сьогодні', value: stats?.bidsToday ?? 0 },
     { label: 'Подано всього', value: stats?.bidsTotal ?? 0 },
-    { label: 'Заповнено форм', value: stats?.filled ?? 0 },
+    { label: 'Підтверджено', value: stats?.filled ?? 0 },
     { label: 'Частка AI', value: (stats?.aiShare ?? 0) + '%' },
   ];
 

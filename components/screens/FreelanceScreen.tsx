@@ -196,7 +196,7 @@ function ConnectPanel({ userId }: {
           {[
             { label: 'Подано сьогодні', value: stats?.bidsToday ?? 0 },
             { label: 'Подано всього', value: stats?.bidsTotal ?? 0 },
-            { label: 'Заповнено форм', value: stats?.filled ?? 0 },
+            { label: 'Підтверджено', value: stats?.filled ?? 0 },
             { label: 'Частка AI', value: (stats?.aiShare ?? 0) + '%' },
           ].map(({ label, value }) => (
             <div key={label} className="rounded-2xl bg-secondary border border-border p-3">
@@ -550,4 +550,4 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
       )}
     </div>
   );
-} 
+}

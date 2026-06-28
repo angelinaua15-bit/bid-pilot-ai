@@ -51,17 +51,18 @@ export async function GET(req: Request) {
   );
   const rows: any[] = await res.json().catch(() => []);
   const bids = rows.filter((r) => r.event === 'bid');
-  const submitted = bids.filter((r) => r.status === 'submitted');
+  const valid = bids.filter((r) => r.status !== 'failed');           // подано = заповнено або підтверджено
+  const submitted = bids.filter((r) => r.status === 'submitted');     // фактично натиснуто «Додати»
   const startOfDay = new Date(); startOfDay.setHours(0, 0, 0, 0);
-  const today = submitted.filter((r) => new Date(r.created_at) >= startOfDay);
+  const today = valid.filter((r) => new Date(r.created_at) >= startOfDay);
   const aiCount = bids.filter((r) => r.ai).length;
 
   return NextResponse.json({
     ok: true,
     stats: {
-      bidsTotal: submitted.length,
+      bidsTotal: valid.length,
       bidsToday: today.length,
-      filled: bids.length,
+      filled: submitted.length,
       aiShare: bids.length ? Math.round((aiCount / bids.length) * 100) : 0,
       lastActive: rows[0]?.created_at || null,
       connected: rows.length > 0,
