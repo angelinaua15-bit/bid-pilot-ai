@@ -133,7 +133,7 @@ function ConnectPanel({ userId }: {
 
   const code = userId || '';
   // Chrome Web Store link — replace with the real one after publishing.
-  const STORE_URL = 'https://chromewebstore.google.com/detail/YOUR-EXTENSION-ID';
+  const STORE_URL = 'https://chromewebstore.google.com/detail/fbbgkejglpoklgflkfleleinbmemimbb';
 
   // Expose the connect code so the installed extension can auto-capture it
   // (no manual copy/paste needed).
@@ -550,4 +550,4 @@ function ApplicationsPanel({ userId }: { userId?: string }) {
       )}
     </div>
   );
-}
+} 
