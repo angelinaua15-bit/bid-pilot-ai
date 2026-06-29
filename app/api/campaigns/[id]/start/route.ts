@@ -21,8 +21,10 @@ export async function POST(
     // Prefer campaign.accountIds, fall back to accountId, then any active account for the user.
     const allUserAccounts = await getTelegramAccounts(campaign.userId);
     const activeAll = allUserAccounts.filter(
-      (a) => a.status === 'active' && a.sessionString &&
-      (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
+      // Do NOT gate on sessionString — getTelegramAccounts now includes session_string
+      // in the SELECT, so this was previously always undefined and filtered everyone out.
+      (a) => a.status === 'active' &&
+             (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
     );
 
     let usableAccounts = activeAll;

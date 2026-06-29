@@ -72,10 +72,16 @@ function normalisePeer(raw: string): string | null {
 }
 
 /** Build a connected GramJS client from a session string. */
-async function makeClient(sessionString: string): Promise<TelegramClient> {
+async function makeClient(sessionString: string | undefined): Promise<TelegramClient> {
   const apiId   = Number(process.env.TELEGRAM_API_ID)
   const apiHash = process.env.TELEGRAM_API_HASH ?? ''
   if (!apiId || !apiHash) throw new Error('TELEGRAM_API_ID or TELEGRAM_API_HASH env var is missing')
+
+  // If session string is missing the account was never authorised — throw a clear error
+  // so the caller logs CONNECT_FAILED and moves on to the next account.
+  if (!sessionString || sessionString.trim() === '') {
+    throw new Error('SESSION_MISSING: account has no saved session — please re-authorise the account')
+  }
 
   const logger = new Logger(LogLevel.ERROR)
   const client = new TelegramClient(
@@ -569,8 +575,12 @@ export async function dispatchCampaign(campaignId: string): Promise<{
   // ── Resolve active sender accounts ────────────────────────────────────────
   const allUserAccounts = await getTelegramAccounts(campaign.userId)
   const activeAll = allUserAccounts.filter(
-    (a) => a.status === 'active' && a.sessionString &&
-    (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
+    // Do NOT gate on `a.sessionString` here — accounts without a persisted session
+    // will fail gracefully in makeClient and produce a CONNECT_FAILED log entry.
+    // Gating here would silently drop all accounts when session_string was missing
+    // from the SELECT (the root cause of "Немає активного Telegram-акаунту").
+    (a) => a.status === 'active' &&
+           (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
   )
 
   let activeAccounts = activeAll

@@ -660,7 +660,8 @@ export async function getTelegramAccounts(userId: string): Promise<TelegramAccou
     const db = getDb(); if (!db) return [];
     const { data } = await db
       .from('telegram_accounts')
-      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      // session_string is required for campaign dispatch — must be included here
+      .select('id, user_id, phone_number, status, session_string, flood_wait_until, last_active_at, error_message, created_at, updated_at')
       .eq('user_id', userId)
       .order('created_at', { ascending: false });
     return (data ?? []).map(mapTelegramAccount);
@@ -673,7 +674,8 @@ export async function getAllTelegramAccounts(): Promise<TelegramAccount[]> {
     const db = getDb(); if (!db) return [];
     const { data } = await db
       .from('telegram_accounts')
-      .select('id, user_id, phone_number, status, flood_wait_until, last_active_at, error_message, created_at, updated_at')
+      // session_string is required for campaign dispatch — must be included here
+      .select('id, user_id, phone_number, status, session_string, flood_wait_until, last_active_at, error_message, created_at, updated_at')
       .order('created_at', { ascending: false });
     return (data ?? []).map(mapTelegramAccount);
   } catch (err) { console.error('[db] getAllTelegramAccounts error:', err); return []; }
