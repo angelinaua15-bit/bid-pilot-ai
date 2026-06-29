@@ -27,8 +27,10 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ ok: true, total });
     }
 
-    const page     = Math.max(1,   Number(sp.get('page'))     || 1);
-    const pageSize = Math.min(100, Number(sp.get('pageSize')) || 50);
+    const page     = Math.max(1,      Number(sp.get('page'))     || 1);
+    // Allow up to 10 000 rows so Unlimited-plan users can load all channels
+    // for the campaign picker. Default remains 50 for normal paginated views.
+    const pageSize = Math.min(10_000, Number(sp.get('pageSize')) || 50);
     const search   = sp.get('search')   ?? undefined;
     const category = sp.get('category') ?? undefined;
     const status   = sp.get('status')   ?? undefined;
