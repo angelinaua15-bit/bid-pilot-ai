@@ -1,20 +1,20 @@
 /**
  * services/campaign-dispatch.service.ts
  *
- * Full join-then-send campaign dispatch using GramJS (MTProto).
+ * Join-then-send campaign dispatch via GramJS (MTProto).
  *
- * Key fixes vs. previous version:
- *  - Uses client.getInputEntity() before every invoke() — GramJS invoke() does NOT
- *    auto-resolve string peers; only high-level methods (sendMessage, etc.) do.
- *  - Uses client.sendMessage() (high-level) for sending — handles peer resolution
- *    and message formatting correctly.
- *  - Loads only the channels selected in the campaign (getTelegramChannelsByIds)
- *    instead of all 20 000 channels — avoids the ch.status check blocking all channels.
- *  - Channel status check is now a warning, not a hard block — lets the dispatch
- *    attempt the channel and fail gracefully if the link is invalid.
- *  - getMembershipStatus uses GetParticipant (not GetFullChannel) with a resolved entity.
- *  - Per-account sequential dispatch (not Promise.all) to avoid Telegram rate limits.
- *  - Detailed logs saved per channel: joinStatus + telegramErrorCode + errorReason.
+ * Flow per channel:
+ *  1. Resolve entity (getInputEntity)
+ *  2. Check membership (GetParticipant for channels, getMessages probe for groups)
+ *  3. Join if not a member, wait 3-10 s, re-resolve entity
+ *  4. Check broadcast rights (channels only — cannot post unless admin)
+ *  5. Send message — sendMessage() high-level API with fresh resolved entity
+ *  6. Save detailed log row for every step outcome
+ *
+ * Log phases visible in DB:
+ *  join_started / join_success / join_failed / approval_pending
+ *  send_started / send_success / send_failed
+ *  CHAT_WRITE_FORBIDDEN → "Немає прав на відправку в канал"
  */
 
 import {
@@ -25,7 +25,7 @@ import {
   saveCampaignMessage,
   incrementCampaignCounters,
 } from '../lib/db'
-import { CAMPAIGN_ACCOUNT_LIMITS, CampaignJoinStatus, CampaignMembershipStatus } from '../types'
+import { CAMPAIGN_ACCOUNT_LIMITS, type CampaignJoinStatus, type CampaignMembershipStatus } from '../types'
 import { TelegramClient } from 'telegram'
 import { StringSession } from 'telegram/sessions'
 import { Api } from 'telegram/tl'
@@ -45,28 +45,20 @@ function extractFloodWaitSeconds(msg: string): number | null {
 }
 
 function extractErrorCode(msg: string): string {
+  // Pull the first ALL_CAPS_WITH_UNDERSCORES token that looks like a Telegram error
   const m = msg.match(/([A-Z][A-Z0-9_]{4,})/)
   return m ? m[1] : 'UNKNOWN_ERROR'
 }
 
-/** Normalise a channel/group username or link into a string GramJS can getInputEntity() on. */
+/** Normalise a channel/group username or link to something getInputEntity() accepts. */
 function normalisePeer(raw: string): string | null {
   const s = (raw ?? '').trim()
   if (!s) return null
-
-  // Private invite links (t.me/+ or t.me/joinchat/)
   if (s.includes('t.me/+') || s.includes('t.me/joinchat/')) return s
-
-  // t.me/username → @username
   const tme = s.match(/t\.me\/([A-Za-z0-9_]{3,})/)
   if (tme) return `@${tme[1]}`
-
-  // Already @username
   if (s.startsWith('@')) return s
-
-  // Bare username without @
   if (/^[A-Za-z0-9_]{3,}$/.test(s)) return `@${s}`
-
   return null
 }
 
@@ -79,9 +71,8 @@ async function makeClient(sessionString: string | undefined): Promise<TelegramCl
     throw new Error('TELEGRAM_API_ID або TELEGRAM_API_HASH не задано в змінних середовища')
   }
   if (!sessionString || sessionString.trim() === '') {
-    throw new Error('SESSION_MISSING: акаунт не авторизований — необхідно повторно пройти авторизацію')
+    throw new Error('SESSION_MISSING: акаунт не авторизований — повторіть авторизацію')
   }
-
   const logger = new Logger(LogLevel.NONE)
   const client = new TelegramClient(
     new StringSession(sessionString),
@@ -92,29 +83,34 @@ async function makeClient(sessionString: string | undefined): Promise<TelegramCl
   return client
 }
 
-// ── Membership helpers ───────────────────────────────────────────────────────
+// ── Entity resolution ────────────────────────────────────────────────────────
 
 /**
- * Resolve a peer to a GramJS entity.
- * Returns null if the peer cannot be resolved (invalid username / private channel).
+ * Resolve peer to a GramJS InputPeer. Returns null if unresolvable.
+ * Always fetches fresh — never rely on the cached entity after a join.
  */
 async function resolveEntity(
   client: TelegramClient,
   peer: string,
 ): Promise<Api.TypeInputPeer | null> {
   try {
-    // getInputEntity handles @usernames, t.me links, invite links, etc.
-    const entity = await client.getInputEntity(peer)
-    return entity as unknown as Api.TypeInputPeer
+    const e = await client.getInputEntity(peer)
+    return e as unknown as Api.TypeInputPeer
   } catch {
     return null
   }
 }
 
+// ── Membership check ─────────────────────────────────────────────────────────
+
 /**
- * Check whether the current account is a participant of the channel/group.
- * Uses GetParticipant which works for both channels and groups.
  * Returns 'member' | 'not_member' | 'approval_pending'.
+ *
+ * Strategy:
+ *  - For channels/supergroups: use GetParticipant (requires channels.GetParticipant)
+ *  - For basic groups:         GetParticipant doesn't work — use GetFullChat; if the
+ *    account can see the chat it's a member, otherwise not_member.
+ * Throws on FloodWait so the caller can abort the account loop.
  */
 async function getMembershipStatus(
   client: TelegramClient,
@@ -130,20 +126,83 @@ async function getMembershipStatus(
     return 'member'
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('FLOOD_WAIT')) throw err
     if (msg.includes('USER_NOT_PARTICIPANT') || msg.includes('CHANNEL_PRIVATE')) {
       return 'not_member'
     }
     if (msg.includes('INVITE_REQUEST_SENT')) return 'approval_pending'
-    if (msg.includes('FLOOD_WAIT'))          throw err
-    // For regular groups, GetParticipant might throw — treat as not_member
+    // GetParticipant fails on basic groups — try GetFullChat as a fallback
+    if (entity instanceof Api.InputPeerChat) {
+      try {
+        await client.invoke(new Api.messages.GetFullChat({ chatId: (entity as Api.InputPeerChat).chatId }))
+        return 'member' // If we can see the full chat, we're a member
+      } catch {
+        return 'not_member'
+      }
+    }
+    // For any other unexpected error treat as not_member so we attempt to join
     return 'not_member'
   }
 }
 
+// ── Broadcast-channel write rights check ─────────────────────────────────────
+
+/**
+ * Returns true if the account can post to this entity.
+ * Broadcast channels require the account to be an admin with post rights.
+ * Supergroups and basic groups allow any member to send messages.
+ */
+async function canPostToEntity(
+  client: TelegramClient,
+  entity: Api.TypeInputPeer,
+): Promise<{ canPost: boolean; isBroadcast: boolean }> {
+  try {
+    // GetFullChannel works for both channels and supergroups
+    const result = await client.invoke(
+      new Api.channels.GetFullChannel({
+        channel: entity as unknown as Api.TypeInputChannel,
+      }),
+    )
+    const fullChat = result.fullChat as Api.ChannelFull
+    const chats = result.chats as Api.TypeChat[]
+    const channel = chats.find((c): c is Api.Channel => c instanceof Api.Channel)
+
+    if (!channel) return { canPost: true, isBroadcast: false }
+
+    const isBroadcast = channel.broadcast === true
+    if (!isBroadcast) {
+      // Supergroup — any member can post (unless slowMode/restricted, but that's a send-time error)
+      return { canPost: true, isBroadcast: false }
+    }
+
+    // Broadcast channel — only admins with post rights can send
+    const participant = await client.invoke(
+      new Api.channels.GetParticipant({
+        channel:     entity as unknown as Api.TypeInputChannel,
+        participant: new Api.InputUserSelf(),
+      }),
+    )
+    const p = participant.participant
+    const isAdmin    = p instanceof Api.ChannelParticipantAdmin
+    const isCreator  = p instanceof Api.ChannelParticipantCreator
+    const postRights = isCreator ||
+      (isAdmin && (p as Api.ChannelParticipantAdmin).adminRights?.postMessages === true)
+
+    return { canPost: postRights, isBroadcast: true }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    if (msg.includes('FLOOD_WAIT')) throw err
+    // If we can't check rights, attempt the send and let Telegram return the error
+    return { canPost: true, isBroadcast: false }
+  }
+}
+
+// ── Join helper ──────────────────────────────────────────────────────────────
+
 /**
  * Join a public channel/group or accept a private invite link.
  * Returns the resulting membership status.
- * Throws on FloodWait or CHANNELS_TOO_MUCH (caller aborts the account).
+ * Throws on FloodWait or CHANNELS_TOO_MUCH so the caller can abort the account.
  */
 async function tryJoin(
   client: TelegramClient,
@@ -154,11 +213,14 @@ async function tryJoin(
 
   try {
     if (isInvite) {
-      // Private invite: extract hash
       const hash = peer.replace(/.*t\.me\/(?:joinchat\/|\+)/, '').split('?')[0]
       await client.invoke(new Api.messages.ImportChatInvite({ hash }))
+    } else if (entity instanceof Api.InputPeerChat) {
+      // Basic group — JoinChannel doesn't work for basic groups.
+      // The user must be invited; if they somehow got the link, there's no
+      // self-join API. Treat as join_failed with a clear message.
+      throw new Error('BASIC_GROUP_NO_JOIN: базові групи не підтримують самостійний вступ через MTProto — використовуйте запрошення або перенесіть групу в супергрупу')
     } else {
-      // Public channel/group: use resolved entity
       await client.invoke(new Api.channels.JoinChannel({
         channel: entity as unknown as Api.TypeInputChannel,
       }))
@@ -202,6 +264,24 @@ async function dispatchAccountSlice(
     floodWait: false, floodWaitSec: 0,
   }
 
+  // Guard: message text must be non-empty
+  const trimmedText = (messageText ?? '').trim()
+  if (!trimmedText) {
+    console.error(`[dispatch] account:${account.phoneNumber} — текст повідомлення порожній, кампанія не буде виконана`)
+    for (const channelId of channelIds) {
+      const ch = channelMap.get(channelId)
+      await saveCampaignMessage({
+        campaignId, channelId, channelTitle: ch?.title,
+        telegramAccountId: account.id, accountPhone: account.phoneNumber,
+        status: 'skipped',
+        telegramErrorCode: 'EMPTY_MESSAGE',
+        errorReason: 'Текст повідомлення кампанії порожній — нічого відправляти',
+      })
+      res.skipped++
+    }
+    return res
+  }
+
   // ── 1. Connect ───────────────────────────────────────────────────────────────
   let client: TelegramClient
   try {
@@ -213,14 +293,11 @@ async function dispatchAccountSlice(
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
       await saveCampaignMessage({
-        campaignId,
-        channelId,
-        channelTitle:      ch?.title,
-        telegramAccountId: account.id,
-        accountPhone:      account.phoneNumber,
-        status:            'failed',
+        campaignId, channelId, channelTitle: ch?.title,
+        telegramAccountId: account.id, accountPhone: account.phoneNumber,
+        status: 'failed',
         telegramErrorCode: 'CONNECT_FAILED',
-        errorReason:       `Не вдалося підключити акаунт ${account.phoneNumber}: ${reason}`,
+        errorReason: `Не вдалося підключити акаунт ${account.phoneNumber}: ${reason}`,
       })
       await incrementCampaignCounters(campaignId, 'failed_count')
       res.failedSend++
@@ -238,14 +315,11 @@ async function dispatchAccountSlice(
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
       await saveCampaignMessage({
-        campaignId,
-        channelId,
-        channelTitle:      ch?.title,
-        telegramAccountId: account.id,
-        accountPhone:      account.phoneNumber,
-        status:            'skipped',
+        campaignId, channelId, channelTitle: ch?.title,
+        telegramAccountId: account.id, accountPhone: account.phoneNumber,
+        status: 'skipped',
         telegramErrorCode: extractErrorCode(reason),
-        errorReason:       `Сесія акаунту ${account.phoneNumber} недійсна: ${reason}`,
+        errorReason: `Сесія акаунту ${account.phoneNumber} недійсна: ${reason}`,
       })
       res.skipped++
     }
@@ -261,16 +335,14 @@ async function dispatchAccountSlice(
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
 
+      // ── 3a. Validate channel record ───────────────────────────────────────────
       if (!ch) {
-        // Channel ID not found in our DB — could have been deleted
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
-          status:            'invalid_channel',
+          campaignId, channelId,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
+          status: 'invalid_channel',
           telegramErrorCode: 'CHANNEL_NOT_IN_DB',
-          errorReason:       `Канал ${channelId} не знайдено в базі даних`,
+          errorReason: `Канал ${channelId} не знайдено в базі даних`,
         })
         res.invalidChannel++
         await incrementCampaignCounters(campaignId, 'failed_count')
@@ -280,64 +352,69 @@ async function dispatchAccountSlice(
       const peer = normalisePeer(ch.usernameOrLink)
       if (!peer) {
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
-          status:            'invalid_channel',
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
+          status: 'invalid_channel',
           telegramErrorCode: 'INVALID_LINK',
-          errorReason:       `Не вдається розпізнати посилання: "${ch.usernameOrLink}"`,
+          errorReason: `Не вдається розпізнати посилання: "${ch.usernameOrLink}"`,
         })
         res.invalidChannel++
         await incrementCampaignCounters(campaignId, 'failed_count')
         continue
       }
 
-      console.log(`[dispatch] account:${account.phoneNumber} processing channel:${peer}`)
+      console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} — START`)
 
-      // ── 3a. Resolve entity ────────────────────────────────────────────────────
-      const entity = await resolveEntity(client, peer)
+      // ── 3b. Initial entity resolution ─────────────────────────────────────────
+      let entity = await resolveEntity(client, peer)
       if (!entity) {
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
-          status:            'invalid_channel',
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
+          status: 'invalid_channel',
           telegramErrorCode: 'ENTITY_NOT_FOUND',
-          errorReason:       `Не вдалося знайти канал у Telegram: "${peer}"`,
+          errorReason: `Не вдалося знайти канал у Telegram: "${peer}"`,
         })
         res.invalidChannel++
         await incrementCampaignCounters(campaignId, 'failed_count')
         continue
       }
 
-      // ── 3b. Check / Join ──────────────────────────────────────────────────────
+      // ── 3c. Check membership → join if needed ──────────────────────────────────
       let joinStatus: CampaignJoinStatus = 'already_member'
 
       try {
         const membership = await getMembershipStatus(client, entity)
         console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} membership:${membership}`)
 
+        if (membership === 'approval_pending') {
+          // Previously sent a join request — cannot send, still waiting
+          await saveCampaignMessage({
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus: 'approval_pending', membershipStatus: 'approval_pending',
+            status: 'waiting_approval',
+            errorReason: 'Запит на вступ вже надіслано раніше — очікується підтвердження адміна',
+          })
+          res.waitingApproval++
+          continue // Cannot send — must wait for admin approval
+        }
+
         if (membership === 'not_member') {
+          // ── join_started ──
           if (joinsThisRun >= CAMPAIGN_ACCOUNT_LIMITS.maxJoinsPerCampaign) {
             await saveCampaignMessage({
-              campaignId,
-              channelId,
-              channelTitle:      ch.title,
-              telegramAccountId: account.id,
-              accountPhone:      account.phoneNumber,
-              joinStatus:        'join_failed',
-              status:            'skipped',
+              campaignId, channelId, channelTitle: ch.title,
+              telegramAccountId: account.id, accountPhone: account.phoneNumber,
+              joinStatus: 'join_failed', status: 'skipped',
               telegramErrorCode: 'JOIN_LIMIT_REACHED',
-              errorReason:       `Акаунт досяг ліміту вступів (${CAMPAIGN_ACCOUNT_LIMITS.maxJoinsPerCampaign}) за одну кампанію`,
+              errorReason: `Акаунт досяг ліміту вступів (${CAMPAIGN_ACCOUNT_LIMITS.maxJoinsPerCampaign}) за одну кампанію`,
             })
             res.skipped++
             continue
           }
 
+          console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} join_started`)
           await sleep(randDelay(
             CAMPAIGN_ACCOUNT_LIMITS.joinDelayMinMs,
             CAMPAIGN_ACCOUNT_LIMITS.joinDelayMaxMs,
@@ -346,34 +423,40 @@ async function dispatchAccountSlice(
           try {
             const afterJoin = await tryJoin(client, peer, entity)
             joinsThisRun++
-            console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} joined (${afterJoin})`)
+            console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} join_success (${afterJoin})`)
 
             if (afterJoin === 'approval_pending') {
+              // Join request submitted — cannot send until approved
               await saveCampaignMessage({
-                campaignId,
-                channelId,
-                channelTitle:      ch.title,
-                telegramAccountId: account.id,
-                accountPhone:      account.phoneNumber,
-                joinStatus:        'approval_pending',
-                membershipStatus:  'approval_pending',
-                status:            'waiting_approval',
-                errorReason:       'Запит на вступ надіслано — очікується підтвердження адміна каналу',
+                campaignId, channelId, channelTitle: ch.title,
+                telegramAccountId: account.id, accountPhone: account.phoneNumber,
+                joinStatus: 'approval_pending', membershipStatus: 'approval_pending',
+                status: 'waiting_approval',
+                errorReason: 'Запит на вступ надіслано — очікується підтвердження адміна каналу',
               })
               res.waitingApproval++
-              continue
+              continue // Must wait for approval — skip send for this channel
             }
 
+            // join_success — update counters and fall through to SEND
             joinStatus = 'joined'
             res.joined++
-            // Pause after joining before sending
-            await sleep(randDelay(
+
+            // Re-resolve entity after join — entity cache may have changed
+            const freshEntity = await resolveEntity(client, peer)
+            if (freshEntity) entity = freshEntity
+
+            // Pause after join before sending (anti-spam)
+            const postJoinDelay = randDelay(
               CAMPAIGN_ACCOUNT_LIMITS.joinDelayMinMs * 2,
               CAMPAIGN_ACCOUNT_LIMITS.joinDelayMaxMs * 2,
-            ))
+            )
+            console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} waiting ${Math.round(postJoinDelay / 1000)}s before send`)
+            await sleep(postJoinDelay)
+
           } catch (joinErr) {
-            const reason    = joinErr instanceof Error ? joinErr.message : String(joinErr)
-            const floodSec  = extractFloodWaitSeconds(reason)
+            const reason   = joinErr instanceof Error ? joinErr.message : String(joinErr)
+            const floodSec = extractFloodWaitSeconds(reason)
 
             if (floodSec !== null) {
               console.warn(`[dispatch] account:${account.phoneNumber} FLOOD_WAIT_${floodSec}s on join`)
@@ -387,7 +470,7 @@ async function dispatchAccountSlice(
                 errorReason: `FloodWait ${floodSec}с при спробі вступу — акаунт зупинено`,
               })
               res.skipped++
-              break
+              break // Abort all remaining channels for this account
             }
 
             if (reason.includes('CHANNELS_TOO_MUCH')) {
@@ -399,9 +482,11 @@ async function dispatchAccountSlice(
                 errorReason: 'Акаунт перевищив ліміт 500 каналів Telegram',
               })
               res.skipped++
-              break
+              break // Abort all remaining channels for this account
             }
 
+            // Other join error — log and continue to next channel
+            console.error(`[dispatch] account:${account.phoneNumber} channel:${peer} join_failed: ${reason}`)
             await saveCampaignMessage({
               campaignId, channelId, channelTitle: ch.title,
               telegramAccountId: account.id, accountPhone: account.phoneNumber,
@@ -411,20 +496,10 @@ async function dispatchAccountSlice(
             })
             res.failedJoin++
             await incrementCampaignCounters(campaignId, 'failed_count')
-            continue
+            continue // Try next channel
           }
-        } else if (membership === 'approval_pending') {
-          await saveCampaignMessage({
-            campaignId, channelId, channelTitle: ch.title,
-            telegramAccountId: account.id, accountPhone: account.phoneNumber,
-            joinStatus: 'approval_pending', membershipStatus: 'approval_pending',
-            status: 'waiting_approval',
-            errorReason: 'Запит на вступ вже надіслано раніше — очікується підтвердження',
-          })
-          res.waitingApproval++
-          continue
         }
-        // else: already_member — joinStatus stays 'already_member'
+        // else: already_member — joinStatus = 'already_member', fall through to send
 
       } catch (memberErr) {
         const reason   = memberErr instanceof Error ? memberErr.message : String(memberErr)
@@ -454,13 +529,56 @@ async function dispatchAccountSlice(
         continue
       }
 
-      // ── 3c. Send message ──────────────────────────────────────────────────────
+      // ─────────────────────────────────────────────────────────────────────────
+      // ── 3d. Check broadcast post rights BEFORE sending ────────────────────────
+      // ─────────────────────────────────────────────────────────────────────────
+      try {
+        const { canPost, isBroadcast } = await canPostToEntity(client, entity)
+        if (!canPost) {
+          console.warn(`[dispatch] account:${account.phoneNumber} channel:${peer} CHAT_WRITE_FORBIDDEN (broadcast channel, not an admin)`)
+          await saveCampaignMessage({
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus,
+            status: 'failed',
+            telegramErrorCode: 'CHAT_WRITE_FORBIDDEN',
+            errorReason: `Немає прав на відправку в канал "${ch.title ?? peer}" — акаунт не є адміністратором broadcast-каналу`,
+          })
+          res.failedSend++
+          await incrementCampaignCounters(campaignId, 'failed_count')
+          continue
+        }
+        if (isBroadcast) {
+          console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} is broadcast channel, account has post rights`)
+        }
+      } catch (rightsErr) {
+        const reason   = rightsErr instanceof Error ? rightsErr.message : String(rightsErr)
+        const floodSec = extractFloodWaitSeconds(reason)
+        if (floodSec !== null) {
+          res.floodWait    = true
+          res.floodWaitSec = floodSec
+          await saveCampaignMessage({
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus, status: 'skipped',
+            telegramErrorCode: `FLOOD_WAIT_${floodSec}`,
+            errorReason: `FloodWait ${floodSec}с при перевірці прав — акаунт зупинено`,
+          })
+          res.skipped++
+          break
+        }
+        // Non-fatal rights check error — proceed with send attempt
+        console.warn(`[dispatch] account:${account.phoneNumber} channel:${peer} rights check error (non-fatal): ${reason}`)
+      }
+
+      // ─────────────────────────────────────────────────────────────────────────
+      // ── 3e. Send message ───────────────────────────────────────────────────────
+      // ─────────────────────────────────────────────────────────────────────────
       if (sendsThisRun >= CAMPAIGN_ACCOUNT_LIMITS.maxSendsPerCampaign) {
         await saveCampaignMessage({
           campaignId, channelId, channelTitle: ch.title,
           telegramAccountId: account.id, accountPhone: account.phoneNumber,
-          joinStatus,
-          status: 'skipped',
+          joinStatus, status: 'skipped',
           telegramErrorCode: 'SEND_LIMIT_REACHED',
           errorReason: `Акаунт досяг ліміту відправок (${CAMPAIGN_ACCOUNT_LIMITS.maxSendsPerCampaign}) за одну кампанію`,
         })
@@ -468,43 +586,34 @@ async function dispatchAccountSlice(
         continue
       }
 
+      // Small delay before each send
       await sleep(randDelay(
         CAMPAIGN_ACCOUNT_LIMITS.sendDelayMinMs,
         CAMPAIGN_ACCOUNT_LIMITS.sendDelayMaxMs,
       ))
 
-      try {
-        // After joining, the GramJS entity cache may not yet know about the
-        // channel, so sendMessage(string peer) can silently fail or throw
-        // PEER_ID_INVALID. We re-resolve the entity fresh before every send.
-        // If re-resolution fails we fall back to the original peer string.
-        let sendPeer: Parameters<typeof client.sendMessage>[0] = peer
-        try {
-          const freshEntity = await client.getInputEntity(peer)
-          if (freshEntity) sendPeer = freshEntity as Parameters<typeof client.sendMessage>[0]
-        } catch {
-          // fall back to string peer — sendMessage will try to resolve it
-        }
+      console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} send_started`)
 
-        const sendResult = await client.sendMessage(sendPeer, {
-          message:   messageText,
+      try {
+        // Use the re-resolved entity for send — avoids PEER_ID_INVALID after join.
+        // sendMessage() is the GramJS high-level API; it handles peer resolution
+        // internally but giving it an already-resolved entity is more reliable.
+        const sendResult = await client.sendMessage(entity as Parameters<typeof client.sendMessage>[0], {
+          message:   trimmedText,
           parseMode: undefined,
         })
 
         const messageId = typeof sendResult?.id === 'number' ? sendResult.id : undefined
-        console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} SENT msgId:${messageId ?? '?'}`)
+        console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} send_success msgId:${messageId ?? '?'}`)
 
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
           messageId,
           joinStatus,
-          membershipStatus:  'member',
-          status:            'sent',
-          sentAt:            new Date().toISOString(),
+          membershipStatus: 'member',
+          status:           'sent',
+          sentAt:           new Date().toISOString(),
         })
         await incrementCampaignCounters(campaignId, 'sent_count')
         sendsThisRun++
@@ -515,7 +624,7 @@ async function dispatchAccountSlice(
         const floodSec = extractFloodWaitSeconds(reason)
 
         if (floodSec !== null) {
-          console.warn(`[dispatch] account:${account.phoneNumber} FLOOD_WAIT_${floodSec}s on send`)
+          console.warn(`[dispatch] account:${account.phoneNumber} FLOOD_WAIT_${floodSec}s on send to ${peer}`)
           res.floodWait    = true
           res.floodWaitSec = floodSec
           await saveCampaignMessage({
@@ -526,17 +635,30 @@ async function dispatchAccountSlice(
             errorReason: `FloodWait ${floodSec}с при відправці до ${peer} — акаунт зупинено`,
           })
           res.skipped++
-          break
+          break // Abort remaining channels for this account
+        }
+
+        // CHAT_WRITE_FORBIDDEN at send time (might have been missed in rights check)
+        if (reason.includes('CHAT_WRITE_FORBIDDEN')) {
+          console.error(`[dispatch] account:${account.phoneNumber} channel:${peer} send_failed CHAT_WRITE_FORBIDDEN`)
+          await saveCampaignMessage({
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus, status: 'failed',
+            telegramErrorCode: 'CHAT_WRITE_FORBIDDEN',
+            errorReason: `Немає прав на відправку в канал "${ch.title ?? peer}"`,
+          })
+          await incrementCampaignCounters(campaignId, 'failed_count')
+          res.failedSend++
+          continue
         }
 
         const isInvalid =
           reason.includes('USERNAME_INVALID') ||
-          reason.includes('CHANNEL_INVALID') ||
-          reason.includes('PEER_ID_INVALID') ||
-          reason.includes('CHAT_WRITE_FORBIDDEN')
+          reason.includes('CHANNEL_INVALID')  ||
+          reason.includes('PEER_ID_INVALID')
 
-        console.error(`[dispatch] account:${account.phoneNumber} channel:${peer} SEND_FAILED: ${reason}`)
-
+        console.error(`[dispatch] account:${account.phoneNumber} channel:${peer} send_failed: ${reason}`)
         await saveCampaignMessage({
           campaignId, channelId, channelTitle: ch.title,
           telegramAccountId: account.id, accountPhone: account.phoneNumber,
@@ -549,12 +671,12 @@ async function dispatchAccountSlice(
         if (isInvalid) res.invalidChannel++
         else res.failedSend++
       }
-    }
+    } // end per-channel loop
   } finally {
     try { await client.disconnect() } catch { /* ignore */ }
   }
 
-  console.log(`[dispatch] account:${account.phoneNumber} done — sent:${res.sent} joined:${res.joined} failed:${res.failedSend} skipped:${res.skipped}`)
+  console.log(`[dispatch] account:${account.phoneNumber} DONE — sent:${res.sent} joined:${res.joined} failedSend:${res.failedSend} failedJoin:${res.failedJoin} skipped:${res.skipped}`)
   return res
 }
 
@@ -575,15 +697,16 @@ export async function dispatchCampaign(campaignId: string): Promise<{
 
   await updateCampaignStatus(campaignId, 'joining')
 
-  // ── Resolve sender accounts ────────��───────────────────────────────────────
+  // ── Resolve sender accounts ───────────────────────────────────────────────
   const allUserAccounts = await getTelegramAccounts(campaign.userId)
   console.log(`[dispatch] all user accounts: ${allUserAccounts.length} (userId:${campaign.userId})`)
 
+  const now = new Date()
   const activeAll = allUserAccounts.filter(
     (a) => a.status === 'active' &&
-           (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
+           (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= now)
   )
-  console.log(`[dispatch] active accounts: ${activeAll.length}`)
+  console.log(`[dispatch] active accounts available: ${activeAll.length}`)
 
   let activeAccounts = activeAll
   if (campaign.accountIds && campaign.accountIds.length > 0) {
@@ -601,8 +724,8 @@ export async function dispatchCampaign(campaignId: string): Promise<{
     throw new Error('Немає активного Telegram-акаунту для відправки. Перевірте авторизацію акаунтів.')
   }
 
-  // ── Load only the channels selected in this campaign ──────────────────────
-  const targetIds  = campaign.targetChannelIds ?? []
+  // ── Load channels selected in this campaign ───────────────────────────────
+  const targetIds = campaign.targetChannelIds ?? []
   console.log(`[dispatch] target channels: ${targetIds.length}`)
 
   if (targetIds.length === 0) {
@@ -622,7 +745,7 @@ export async function dispatchCampaign(campaignId: string): Promise<{
 
   await updateCampaignStatus(campaignId, 'sending')
 
-  // ── Sequential per-account dispatch (avoids parallel rate limiting) ───────
+  // ── Sequential per-account dispatch ──────────────────────────────────────
   const totals = { sent: 0, failedSend: 0, joined: 0, failedJoin: 0, skipped: 0, waitingApproval: 0, invalidChannel: 0 }
   const allFloodResults: boolean[] = []
 
@@ -648,12 +771,12 @@ export async function dispatchCampaign(campaignId: string): Promise<{
       totals.invalidChannel  += r.invalidChannel
       allFloodResults.push(r.floodWait)
     } catch (err) {
-      console.error(`[dispatch] account:${account.phoneNumber} unhandled:`, err)
+      console.error(`[dispatch] account:${account.phoneNumber} unhandled error:`, err)
       allFloodResults.push(false)
     }
   }
 
-  // ── Determine final status ────────────────────────────────────────────────
+  // ── Determine final status ─────────────────────────────────────────────────
   const allFlood    = allFloodResults.length > 0 && allFloodResults.every(Boolean)
   const totalFailed = totals.failedSend + totals.failedJoin + totals.invalidChannel
 
