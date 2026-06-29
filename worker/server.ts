@@ -1126,8 +1126,8 @@ const server = http.createServer(async (req, res) => {
         const { dispatchCampaign } = await import('../services/campaign-dispatch.service')
         // Fire-and-forget — return 202 immediately; dispatch runs async
         dispatchCampaign(campaignId)
-          .then(({ sent, failed, skipped }) => {
-            addLog({ level: 'success', message: `[Campaign] ${campaignId}: sent=${sent} failed=${failed} skipped=${skipped}` })
+          .then(({ sent, failedSend, failedJoin, joined, skipped }) => {
+            addLog({ level: 'success', message: `[Campaign] ${campaignId}: sent=${sent} joined=${joined} failedSend=${failedSend} failedJoin=${failedJoin} skipped=${skipped}` })
           })
           .catch((err: unknown) => {
             addLog({ level: 'error', message: `[Campaign] ${campaignId} error: ${(err as Error)?.message ?? err}` })

@@ -1025,8 +1025,10 @@ export async function saveCampaignMessage(
       account_phone:        msg.accountPhone        ?? null,
       message_id:           msg.messageId           ?? null,
       membership_status:    msg.membershipStatus    ?? null,
+      join_status:          msg.joinStatus          ?? null,
       status:               msg.status,
       error_reason:         msg.errorReason         ?? null,
+      telegram_error_code:  msg.telegramErrorCode   ?? null,
       sent_at:              msg.sentAt              ?? null,
       created_at:           new Date().toISOString(),
     });
@@ -1095,8 +1097,10 @@ function mapCampaignMessage(r: Record<string, unknown>): CampaignMessage {
     accountPhone:       r.account_phone as string | undefined,
     messageId:          r.message_id != null ? Number(r.message_id) : undefined,
     membershipStatus:   r.membership_status as CampaignMessage['membershipStatus'] | undefined,
+    joinStatus:         r.join_status as CampaignMessage['joinStatus'] | undefined,
     status:             (r.status as CampaignMessage['status']) ?? 'pending',
     errorReason:        r.error_reason as string | undefined,
+    telegramErrorCode:  r.telegram_error_code as string | undefined,
     sentAt:             r.sent_at as string | undefined,
     createdAt:          r.created_at as string,
   };

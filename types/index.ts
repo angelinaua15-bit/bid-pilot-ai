@@ -427,7 +427,18 @@ export interface TelegramBot {
 
 // ─── Campaign ─────────────────────────────────────────────────────────────────
 
-export type CampaignStatus = 'draft' | 'scheduled' | 'running' | 'paused' | 'completed' | 'failed';
+export type CampaignStatus =
+  | 'draft'
+  | 'scheduled'
+  | 'running'
+  | 'joining'       // actively joining channels before sending
+  | 'sending'       // actively sending messages
+  | 'paused'
+  | 'completed'
+  | 'partially_completed' // some sent, some failed
+  | 'failed'
+  | 'flood_wait'    // all accounts are in FloodWait
+  | 'no_accounts';  // no valid/active accounts available
 export type ScheduleType = 'now' | 'scheduled' | 'interval' | 'daily';
 
 export interface Campaign {
@@ -465,6 +476,13 @@ export type CampaignMessageStatus =
 
 export type CampaignMembershipStatus = 'member' | 'not_member' | 'approval_pending';
 
+/** Granular join outcome saved per log row */
+export type CampaignJoinStatus =
+  | 'already_member'  // was already a member before campaign
+  | 'joined'          // successfully joined during campaign
+  | 'join_failed'     // join attempt failed
+  | 'approval_pending'; // join request sent, awaiting admin approval
+
 export interface CampaignMessage {
   id: string;
   campaignId: string;
@@ -474,11 +492,24 @@ export interface CampaignMessage {
   accountPhone?: string;
   messageId?: number;
   membershipStatus?: CampaignMembershipStatus;
+  /** Granular join outcome — populated by campaign-dispatch */
+  joinStatus?: CampaignJoinStatus;
   status: CampaignMessageStatus;
   errorReason?: string;
+  telegramErrorCode?: string;
   sentAt?: string;
   createdAt: string;
 }
+
+/** Per-account dispatch limits — prevents bans */
+export const CAMPAIGN_ACCOUNT_LIMITS = {
+  maxJoinsPerCampaign:    30,   // max channels to join per account per campaign run
+  maxSendsPerCampaign:    50,   // max messages to send per account per campaign run
+  joinDelayMinMs:       3_000,  // min delay between joins (ms)
+  joinDelayMaxMs:      10_000,  // max delay between joins (ms)
+  sendDelayMinMs:       2_000,  // min delay between sends (ms)
+  sendDelayMaxMs:       8_000,  // max delay between sends (ms)
+} as const;
 
 // ─── Dashboard Stats (SaaS) ───────────────────────────────────────────────────
 
@@ -503,7 +534,7 @@ export const PLAN_LIMITS: Record<SubscriptionPlanSaaS, {
   campaigns: boolean;
   adminAccess: boolean;
 }> = {
-  // free: дуже обмежений доступ
+  // free: дуже ��бмежений доступ
   free:      { applicationsPerMonth: 5,       telegramAccounts: 1,   channels: 0,       campaigns: false, adminAccess: false },
   // basic: базовий план — 100 каналів
   basic:     { applicationsPerMonth: 10,      telegramAccounts: 1,   channels: 100,     campaigns: true,  adminAccess: false },

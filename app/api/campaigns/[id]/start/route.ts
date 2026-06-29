@@ -1,5 +1,5 @@
 import { NextRequest, NextResponse } from 'next/server';
-import { getCampaignById, getTelegramAccountById, getTelegramAccounts, updateCampaignStatus } from '@/lib/db';
+import { getCampaignById, getTelegramAccounts, updateCampaignStatus } from '@/lib/db';
 import { dispatchCampaign } from '@/services/campaign-dispatch.service';
 
 export async function POST(
@@ -13,33 +13,51 @@ export async function POST(
     if (!campaign) {
       return NextResponse.json({ ok: false, error: 'Campaign not found' }, { status: 404 });
     }
-    if (campaign.status === 'running') {
+    if (campaign.status === 'running' || campaign.status === 'joining' || campaign.status === 'sending') {
       return NextResponse.json({ ok: false, error: 'Campaign is already running' }, { status: 409 });
     }
 
-    // Verify there is at least one active Telegram account available
-    let account = campaign.accountId ? await getTelegramAccountById(campaign.accountId) : null;
-    if (!account || account.status !== 'active' || !account.sessionString) {
-      const all = await getTelegramAccounts(campaign.userId);
-      account = all.find((a) => a.status === 'active' && a.sessionString) ?? null;
+    // Verify there is at least one active Telegram account available for this campaign.
+    // Prefer campaign.accountIds, fall back to accountId, then any active account for the user.
+    const allUserAccounts = await getTelegramAccounts(campaign.userId);
+    const activeAll = allUserAccounts.filter(
+      (a) => a.status === 'active' && a.sessionString &&
+      (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
+    );
+
+    let usableAccounts = activeAll;
+    if (campaign.accountIds && campaign.accountIds.length > 0) {
+      const idSet = new Set(campaign.accountIds);
+      const sel = activeAll.filter((a) => idSet.has(a.id));
+      if (sel.length > 0) usableAccounts = sel;
+    } else if (campaign.accountId) {
+      const primary = activeAll.find((a) => a.id === campaign.accountId);
+      if (primary) usableAccounts = [primary];
     }
-    if (!account) {
+
+    if (usableAccounts.length === 0) {
+      await updateCampaignStatus(id, 'no_accounts');
       return NextResponse.json(
-        { ok: false, error: 'Немає активного Telegram-акаунту. Додайте та авторизуйте акаунт у налаштуваннях.' },
+        { ok: false, error: 'Немає активного Telegram-акаунту. Додайте та авторизуйте акаунт у налаштуваннях, або дочекайтесь закінчення FloodWait.' },
         { status: 422 }
       );
     }
 
-    // Mark running immediately so the UI reflects state change
-    await updateCampaignStatus(id, 'running');
+    // Mark as joining immediately so the UI reflects state change before the async work begins
+    await updateCampaignStatus(id, 'joining');
 
     // Dispatch in the background — don't await so the HTTP response returns fast.
-    // The worker updates the campaign status to 'completed'/'failed' when done.
+    // The worker updates the campaign status to 'completed'/'failed'/'partially_completed'/etc. when done.
     dispatchCampaign(id).catch((err) => {
       console.error('[campaign/start] dispatchCampaign error:', err);
     });
 
-    return NextResponse.json({ ok: true, status: 'running', accountPhone: account.phoneNumber });
+    return NextResponse.json({
+      ok: true,
+      status: 'joining',
+      accountCount: usableAccounts.length,
+      accountPhones: usableAccounts.map((a) => a.phoneNumber),
+    });
   } catch (err) {
     console.error('[campaign/start] error:', err);
     return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });
