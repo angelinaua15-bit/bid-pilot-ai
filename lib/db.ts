@@ -790,6 +790,19 @@ export async function getTelegramChannels(options?: { status?: string; limit?: n
   } catch (err) { console.error('[db] getTelegramChannels error:', err); return []; }
 }
 
+/** Fetch a specific set of channels by their IDs (for campaign dispatch). */
+export async function getTelegramChannelsByIds(ids: string[]): Promise<TelegramChannel[]> {
+  if (!isSupabaseConfigured || ids.length === 0) return [];
+  try {
+    const db = getDb(); if (!db) return [];
+    const { data } = await db
+      .from('telegram_channels')
+      .select('*')
+      .in('id', ids);
+    return (data ?? []).map(mapChannel);
+  } catch (err) { console.error('[db] getTelegramChannelsByIds error:', err); return []; }
+}
+
 /** Paginated channel query with optional full-text search and category filter. */
 export async function getTelegramChannelsPaginated(options: {
   page?: number;
