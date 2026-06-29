@@ -474,8 +474,19 @@ async function dispatchAccountSlice(
       ))
 
       try {
-        // Use high-level sendMessage — it resolves the peer correctly
-        const sendResult = await client.sendMessage(peer, {
+        // After joining, the GramJS entity cache may not yet know about the
+        // channel, so sendMessage(string peer) can silently fail or throw
+        // PEER_ID_INVALID. We re-resolve the entity fresh before every send.
+        // If re-resolution fails we fall back to the original peer string.
+        let sendPeer: Parameters<typeof client.sendMessage>[0] = peer
+        try {
+          const freshEntity = await client.getInputEntity(peer)
+          if (freshEntity) sendPeer = freshEntity as Parameters<typeof client.sendMessage>[0]
+        } catch {
+          // fall back to string peer — sendMessage will try to resolve it
+        }
+
+        const sendResult = await client.sendMessage(sendPeer, {
           message:   messageText,
           parseMode: undefined,
         })
@@ -564,7 +575,7 @@ export async function dispatchCampaign(campaignId: string): Promise<{
 
   await updateCampaignStatus(campaignId, 'joining')
 
-  // ── Resolve sender accounts ────────────────────────────────────────────────
+  // ── Resolve sender accounts ────────��───────────────────────────────────────
   const allUserAccounts = await getTelegramAccounts(campaign.userId)
   console.log(`[dispatch] all user accounts: ${allUserAccounts.length} (userId:${campaign.userId})`)
 

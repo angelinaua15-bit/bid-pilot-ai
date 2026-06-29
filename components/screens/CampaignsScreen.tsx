@@ -792,10 +792,12 @@ function CreateCampaignForm({ userId, user, onCreated }: {
   const [accounts, setAccounts]             = useState<TelegramAccount[]>([]);
   const [acLoading, setAcLoading]           = useState(true);
 
-  // Load active channels up to the plan limit (max 5000 rows for the picker)
+  // Load active channels up to the plan limit.
+  // For Unlimited plans (channelCap === Infinity) we fetch up to 10 000 rows
+  // (the new API cap) so every available channel appears in the picker.
   useEffect(() => {
     setChLoading(true);
-    const cap = channelCap === Infinity ? 5000 : Math.min(channelCap, 5000);
+    const cap = channelCap === Infinity ? 10_000 : Math.min(channelCap, 10_000);
     fetch(`/api/channels?pageSize=${cap}&status=active`)
       .then((r) => r.json())
       .then((res) => { if (res?.ok) setActiveChannels(res.channels ?? []); })
@@ -1061,7 +1063,12 @@ function CreateCampaignForm({ userId, user, onCreated }: {
       <div className="glass-card p-4 rounded-2xl flex flex-col gap-3">
         <div className="flex items-center justify-between">
           <p className="text-xs font-semibold">
-            Канали ({form.selectedChannels.length}{' / '}{channelCap === Infinity ? activeChannels.length.toLocaleString('uk-UA') : channelCap})
+            Канали ({form.selectedChannels.length}
+            {' / '}
+            {channelCap === Infinity
+              ? (activeChannels.length > 0 ? activeChannels.length.toLocaleString('uk-UA') : '∞')
+              : channelCap.toLocaleString('uk-UA')}
+            )
           </p>
           {form.selectedChannels.length > 0 && (
             <button onClick={() => setForm((f) => ({ ...f, selectedChannels: [] }))}
@@ -1100,7 +1107,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
             </div>
             <div className="flex items-center justify-between">
               <button onClick={handleSelectAllChannels} className="text-[10px] text-primary font-medium">
-                Вибрати всі ({channelCap === Infinity ? activeChannels.length : Math.min(channelCap, activeChannels.length)})
+                Вибрати всі ({activeChannels.length.toLocaleString('uk-UA')})
               </button>
               {atChannelCap && (
                 <span className="text-[10px] text-yellow-400 flex items-center gap-1">
