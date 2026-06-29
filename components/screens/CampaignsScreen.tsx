@@ -131,12 +131,15 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
     if (res?.ok) setMessages((m) => ({ ...m, [id]: res.messages ?? [] }));
   }, []);
 
-  // Auto-poll logs + parent list while any campaign is running
+  // Active statuses that require continuous polling
+  const ACTIVE_STATUSES = new Set(['running', 'joining', 'sending']);
+
+  // Auto-poll logs + parent list while any campaign is active
   useEffect(() => {
-    const hasRunning = campaigns.some((c) => c.status === 'running');
-    if (hasRunning) {
+    const hasActive = campaigns.some((c) => ACTIVE_STATUSES.has(c.status));
+    if (hasActive) {
       pollRef.current = setInterval(() => {
-        campaigns.filter((c) => c.status === 'running').forEach((c) => {
+        campaigns.filter((c) => ACTIVE_STATUSES.has(c.status)).forEach((c) => {
           if (expanded === c.id) loadMessages(c.id);
         });
         onRefresh();
@@ -145,6 +148,7 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
       if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; }
     }
     return () => { if (pollRef.current) { clearInterval(pollRef.current); pollRef.current = null; } };
+  // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [campaigns, expanded, loadMessages, onRefresh]);
 
   const handleExpand = (id: string) => {
@@ -178,14 +182,35 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
   return (
     <div className="flex flex-col gap-3">
       {campaigns.map((c) => {
-        const statusColor = c.status === 'completed' ? 'text-green-400' :
-          c.status === 'running' ? 'text-primary' :
-          c.status === 'failed'  ? 'text-red-400' :
-          c.status === 'paused'  ? 'text-yellow-400' : 'text-muted-foreground';
-        const statusLabel = {
-          draft: 'Чернетка', scheduled: 'Запланована', running: 'Виконується',
-          paused: 'Призупинена', completed: 'Завершена', failed: 'Помилка',
-        }[c.status] ?? c.status;
+        const STATUS_COLOR: Record<string, string> = {
+          draft:               'text-muted-foreground',
+          scheduled:           'text-blue-400',
+          running:             'text-primary',
+          joining:             'text-blue-400',
+          sending:             'text-primary',
+          paused:              'text-yellow-400',
+          completed:           'text-green-400',
+          partially_completed: 'text-yellow-400',
+          failed:              'text-red-400',
+          flood_wait:          'text-orange-400',
+          no_accounts:         'text-red-400',
+        };
+        const STATUS_LABEL: Record<string, string> = {
+          draft:               'Чернетка',
+          scheduled:           'Запланована',
+          running:             'Виконується',
+          joining:             'Вступ до каналів',
+          sending:             'Надсилання',
+          paused:              'Призупинена',
+          completed:           'Завершена',
+          partially_completed: 'Частково завершена',
+          failed:              'Помилка',
+          flood_wait:          'FloodWait',
+          no_accounts:         'Немає акаунтів',
+        };
+        const statusColor = STATUS_COLOR[c.status] ?? 'text-muted-foreground';
+        const statusLabel = STATUS_LABEL[c.status] ?? c.status;
+        const isActive    = ACTIVE_STATUSES.has(c.status);
 
         return (
           <div key={c.id} className="glass-card rounded-2xl overflow-hidden">
@@ -202,7 +227,7 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                   {c.failedCount > 0 && <span className="text-[10px] text-red-400">{c.failedCount} помилок</span>}
                 </div>
                 {/* progress bar */}
-                {c.totalCount > 0 && (c.status === 'running' || c.status === 'completed') && (
+                {c.totalCount > 0 && (isActive || c.status === 'completed' || c.status === 'partially_completed') && (
                   <div className="h-1 rounded-full bg-secondary mt-2 overflow-hidden">
                     <div className="h-full bg-primary rounded-full transition-all"
                       style={{ width: `${Math.min(100, ((c.sentCount + c.failedCount) / c.totalCount) * 100)}%` }} />
@@ -218,13 +243,14 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                 {/* Action buttons */}
                 <div className="flex flex-col gap-1.5">
                   <div className="flex gap-2">
-                    {(c.status === 'draft' || c.status === 'paused' || c.status === 'failed') && (
+                    {(c.status === 'draft' || c.status === 'paused' || c.status === 'failed' ||
+                      c.status === 'partially_completed' || c.status === 'flood_wait' || c.status === 'no_accounts') && (
                       <button onClick={() => handleAction(c.id, 'start')}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-green-500/15 text-green-400 text-[11px] font-semibold active:scale-95 transition-all">
                         <Play size={11} /> Запустити
                       </button>
                     )}
-                    {c.status === 'running' && (
+                    {isActive && (
                       <button onClick={() => handleAction(c.id, 'pause')}
                         className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg bg-yellow-500/15 text-yellow-400 text-[11px] font-semibold active:scale-95 transition-all">
                         <Pause size={11} /> Пауза
@@ -242,11 +268,12 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                     <BarChart2 size={11} className="text-muted-foreground" />
                     <p className="text-[10px] font-semibold text-muted-foreground uppercase tracking-wide">Статистика</p>
                   </div>
+                  {/* Primary counters */}
                   <div className="grid grid-cols-3 gap-2">
                     {[
-                      { label: 'Всього',    value: c.totalCount,  color: 'text-foreground' },
-                      { label: 'Надіслано', value: c.sentCount,   color: 'text-green-400' },
-                      { label: 'Помилки',   value: c.failedCount, color: 'text-red-400' },
+                      { label: 'Всього цілей',  value: c.totalCount,  color: 'text-foreground' },
+                      { label: 'Надіслано',      value: c.sentCount,   color: 'text-green-400' },
+                      { label: 'Помилок відпр.', value: c.failedCount, color: 'text-red-400' },
                     ].map(({ label, value, color }) => (
                       <div key={label} className="bg-secondary/50 rounded-xl px-2.5 py-2 text-center">
                         <p className={cn('text-sm font-bold', color)}>{value}</p>
@@ -254,28 +281,42 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                       </div>
                     ))}
                   </div>
-                  {/* Additional stats from messages */}
+                  {/* Detailed join/send breakdown from message logs */}
                   {(messages[c.id] ?? []).length > 0 && (() => {
-                    const msgs = messages[c.id]!;
-                    const waiting   = msgs.filter((m) => m.status === 'waiting_approval').length;
-                    const invalid   = msgs.filter((m) => m.status === 'invalid_channel').length;
-                    const skipped   = msgs.filter((m) => m.status === 'skipped').length;
-                    const accounts  = [...new Set(msgs.filter((m) => m.accountPhone).map((m) => m.accountPhone))];
-                    const firstSent = msgs.find((m) => m.sentAt)?.sentAt;
-                    const lastSent  = [...msgs].reverse().find((m) => m.sentAt)?.sentAt;
+                    const msgs        = messages[c.id]!;
+                    const joined      = msgs.filter((m) => m.joinStatus === 'joined').length;
+                    const failedJoin  = msgs.filter((m) => m.joinStatus === 'join_failed').length;
+                    const waiting     = msgs.filter((m) => m.status === 'waiting_approval').length;
+                    const invalid     = msgs.filter((m) => m.status === 'invalid_channel').length;
+                    const skipped     = msgs.filter((m) => m.status === 'skipped').length;
+                    const accs        = [...new Set(msgs.filter((m) => m.accountPhone).map((m) => m.accountPhone))];
+                    const firstSent   = msgs.find((m) => m.sentAt)?.sentAt;
+                    const lastSent    = [...msgs].reverse().find((m) => m.sentAt)?.sentAt;
                     return (
-                      <div className="mt-2 flex flex-col gap-1">
-                        {(waiting > 0 || invalid > 0 || skipped > 0) && (
-                          <div className="flex gap-3 flex-wrap mt-1">
-                            {waiting > 0  && <span className="text-[10px] text-blue-400">{waiting} очікує підтв.</span>}
-                            {invalid > 0  && <span className="text-[10px] text-orange-400">{invalid} не знайдено</span>}
-                            {skipped > 0  && <span className="text-[10px] text-yellow-400">{skipped} пропущено</span>}
+                      <div className="mt-2 flex flex-col gap-1.5">
+                        {/* Secondary counters */}
+                        <div className="grid grid-cols-3 gap-1.5">
+                          {[
+                            { label: 'Вступів',       value: joined,     color: 'text-blue-400' },
+                            { label: 'Помилок вступу',value: failedJoin, color: 'text-orange-400' },
+                            { label: 'Пропущено',     value: skipped,    color: 'text-yellow-400' },
+                          ].map(({ label, value, color }) => (
+                            <div key={label} className="bg-secondary/30 rounded-lg px-2 py-1.5 text-center">
+                              <p className={cn('text-xs font-bold', color)}>{value}</p>
+                              <p className="text-[9px] text-muted-foreground mt-0.5">{label}</p>
+                            </div>
+                          ))}
+                        </div>
+                        {(waiting > 0 || invalid > 0) && (
+                          <div className="flex gap-3 flex-wrap">
+                            {waiting > 0 && <span className="text-[10px] text-blue-400">{waiting} очікує підтв. адміна</span>}
+                            {invalid > 0 && <span className="text-[10px] text-orange-400">{invalid} канал(ів) не знайдено</span>}
                           </div>
                         )}
-                        {accounts.length > 0 && (
+                        {accs.length > 0 && (
                           <div className="flex items-center gap-1 flex-wrap">
                             <Smartphone size={9} className="text-muted-foreground" />
-                            <span className="text-[10px] text-muted-foreground">{accounts.join(', ')}</span>
+                            <span className="text-[10px] text-muted-foreground">{accs.join(', ')}</span>
                           </div>
                         )}
                         {firstSent && (
@@ -289,8 +330,8 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                   })()}
                 </div>
 
-                {/* Progress bar when running */}
-                {c.status === 'running' && c.totalCount > 0 && (
+                {/* Progress bar when active */}
+                {isActive && c.totalCount > 0 && (
                   <div className="flex flex-col gap-1">
                     <div className="flex justify-between">
                       <span className="text-[10px] text-muted-foreground">Прогрес</span>
@@ -347,41 +388,65 @@ function CampaignsList({ campaigns, userId, onRefresh }: {
                       <p className="text-[11px] text-muted-foreground">Немає записів за фільтром</p>
                     );
                     return (
-                      <div className="flex flex-col gap-1.5 max-h-64 overflow-y-auto">
+                      <div className="flex flex-col gap-1.5 max-h-72 overflow-y-auto">
                         {filtered.map((msg) => (
-                          <div key={msg.id} className="flex items-center gap-2 py-0.5">
-                            {msg.status === 'sent'             && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
-                            {msg.status === 'failed'           && <XCircle      size={11} className="text-red-400 flex-shrink-0" />}
-                            {msg.status === 'pending'          && <Clock        size={11} className="text-muted-foreground flex-shrink-0" />}
-                            {msg.status === 'skipped'          && <Clock        size={11} className="text-yellow-400 flex-shrink-0" />}
-                            {msg.status === 'waiting_approval' && <Clock        size={11} className="text-blue-400 flex-shrink-0" />}
-                            {msg.status === 'invalid_channel'  && <XCircle      size={11} className="text-orange-400 flex-shrink-0" />}
+                          <div key={msg.id} className="flex flex-col gap-0.5 py-1 border-b border-border/30 last:border-0">
+                            <div className="flex items-center gap-2">
+                              {/* Send status icon */}
+                              {msg.status === 'sent'             && <CheckCircle2 size={11} className="text-green-400 flex-shrink-0" />}
+                              {msg.status === 'failed'           && <XCircle      size={11} className="text-red-400 flex-shrink-0" />}
+                              {msg.status === 'pending'          && <Clock        size={11} className="text-muted-foreground flex-shrink-0" />}
+                              {msg.status === 'skipped'          && <Clock        size={11} className="text-yellow-400 flex-shrink-0" />}
+                              {msg.status === 'waiting_approval' && <Clock        size={11} className="text-blue-400 flex-shrink-0" />}
+                              {msg.status === 'invalid_channel'  && <XCircle      size={11} className="text-orange-400 flex-shrink-0" />}
 
-                            <span className="text-[11px] flex-1 truncate min-w-0">
-                              {msg.channelTitle ?? msg.channelId}
-                            </span>
+                              <span className="text-[11px] font-medium flex-1 truncate min-w-0">
+                                {msg.channelTitle ?? msg.channelId}
+                              </span>
 
-                            {msg.status === 'waiting_approval' && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">очікує</span>
-                            )}
-                            {msg.status === 'invalid_channel' && (
-                              <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">не знайдено</span>
-                            )}
+                              {/* Join status badge */}
+                              {msg.joinStatus === 'joined' && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">вступ</span>
+                              )}
+                              {msg.joinStatus === 'already_member' && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-secondary text-muted-foreground flex-shrink-0 whitespace-nowrap">вже учасник</span>
+                              )}
+                              {msg.joinStatus === 'approval_pending' && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-blue-500/15 text-blue-400 flex-shrink-0 whitespace-nowrap">очікує підтв.</span>
+                              )}
+                              {msg.joinStatus === 'join_failed' && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">вступ не вдався</span>
+                              )}
 
-                            {msg.accountPhone && (
-                              <span className="text-[10px] text-muted-foreground flex-shrink-0 flex items-center gap-0.5">
-                                <Smartphone size={9} />{msg.accountPhone}
-                              </span>
-                            )}
-                            {msg.errorReason && msg.status === 'failed' && (
-                              <span className="text-[10px] text-red-400 truncate max-w-[90px]" title={msg.errorReason}>
-                                {msg.errorReason.slice(0, 30)}
-                              </span>
-                            )}
-                            {msg.sentAt && (
-                              <span className="text-[10px] text-muted-foreground flex-shrink-0 whitespace-nowrap">
-                                {format(new Date(msg.sentAt), 'HH:mm', { locale: uk })}
-                              </span>
+                              {/* Send status badge for non-sent */}
+                              {msg.status === 'invalid_channel' && !msg.joinStatus && (
+                                <span className="text-[9px] font-semibold px-1.5 py-0.5 rounded-full bg-orange-500/15 text-orange-400 flex-shrink-0 whitespace-nowrap">не знайдено</span>
+                              )}
+
+                              {/* Time */}
+                              {msg.sentAt && (
+                                <span className="text-[10px] text-muted-foreground flex-shrink-0 whitespace-nowrap">
+                                  {format(new Date(msg.sentAt), 'HH:mm', { locale: uk })}
+                                </span>
+                              )}
+                            </div>
+                            {/* Second line: account + error */}
+                            {(msg.accountPhone || msg.errorReason || msg.telegramErrorCode) && (
+                              <div className="flex items-center gap-2 pl-[18px]">
+                                {msg.accountPhone && (
+                                  <span className="text-[10px] text-muted-foreground flex items-center gap-0.5 flex-shrink-0">
+                                    <Smartphone size={8} />{msg.accountPhone}
+                                  </span>
+                                )}
+                                {msg.telegramErrorCode && msg.status !== 'sent' && (
+                                  <span className="text-[9px] font-mono text-muted-foreground/60 flex-shrink-0">{msg.telegramErrorCode}</span>
+                                )}
+                                {msg.errorReason && msg.status !== 'sent' && (
+                                  <span className="text-[10px] text-red-400/80 truncate" title={msg.errorReason}>
+                                    {msg.errorReason.slice(0, 55)}{msg.errorReason.length > 55 ? '…' : ''}
+                                  </span>
+                                )}
+                              </div>
                             )}
                           </div>
                         ))}
