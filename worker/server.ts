@@ -259,6 +259,71 @@ const STEALTH_INIT =
   "Object.defineProperty(navigator,'plugins',{get:()=>[1,2,3,4,5]});" +
   "window.chrome=window.chrome||{runtime:{}};"
 
+// ─── Scheduled campaign loop ──────────────────────────────────────────────────
+
+const CAMPAIGN_LOOP_INTERVAL_MS = Number(process.env.CAMPAIGN_LOOP_INTERVAL_MS || 60_000) // 60s
+let campaignLoopTimer: ReturnType<typeof setInterval> | null = null
+// Track campaigns that are currently being dispatched to avoid double-start
+const campaignsInFlight = new Set<string>()
+
+async function runScheduledCampaigns() {
+  try {
+    const { getCampaignsDue, updateCampaignStatus } = await import('../lib/db')
+    const { dispatchCampaign }                      = await import('../services/campaign-dispatch.service')
+
+    const due = await getCampaignsDue()
+    if (due.length === 0) return
+
+    addLog({ level: 'info', message: `[CampaignLoop] Found ${due.length} due campaign(s)` })
+
+    for (const campaign of due) {
+      if (campaignsInFlight.has(campaign.id)) {
+        addLog({ level: 'info', message: `[CampaignLoop] Campaign ${campaign.id} already in-flight, skipping` })
+        continue
+      }
+      campaignsInFlight.add(campaign.id)
+      addLog({ level: 'info', message: `[CampaignLoop] Starting campaign "${campaign.title}" (${campaign.id})` })
+
+      // Fire-and-forget per campaign so multiple campaigns can run in parallel
+      // (the in-flight set prevents re-entry)
+      dispatchCampaign(campaign.id)
+        .then(({ sent, failedSend, joined, skipped }) => {
+          addLog({
+            level: sent > 0 ? 'success' : 'warning',
+            message: `[CampaignLoop] Campaign ${campaign.id} done — sent:${sent} joined:${joined} failed:${failedSend} skipped:${skipped}`,
+          })
+        })
+        .catch((err: unknown) => {
+          const msg = err instanceof Error ? err.message : String(err)
+          addLog({ level: 'error', message: `[CampaignLoop] Campaign ${campaign.id} error: ${msg}` })
+          // Mark as failed so it doesn't loop indefinitely
+          updateCampaignStatus(campaign.id, 'failed').catch(() => {})
+        })
+        .finally(() => {
+          campaignsInFlight.delete(campaign.id)
+        })
+    }
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    addLog({ level: 'error', message: `[CampaignLoop] Scheduler error: ${msg}` })
+  }
+}
+
+function startCampaignLoop() {
+  if (campaignLoopTimer) return
+  addLog({ level: 'info', message: `[CampaignLoop] Started — interval ${CAMPAIGN_LOOP_INTERVAL_MS / 1000}s` })
+  runScheduledCampaigns()
+  campaignLoopTimer = setInterval(runScheduledCampaigns, CAMPAIGN_LOOP_INTERVAL_MS)
+}
+
+function stopCampaignLoop() {
+  if (campaignLoopTimer) {
+    clearInterval(campaignLoopTimer)
+    campaignLoopTimer = null
+  }
+  addLog({ level: 'info', message: '[CampaignLoop] Stopped' })
+}
+
 // ─── Auto-loop ────────────────────────────────────────────────────────────────
 
 async function runAutoLoop() {
@@ -699,6 +764,12 @@ async function handleStatus(res: http.ServerResponse) {
       lastCheckedAt: lastCheckedAt ?? null,
       lastError:     lastLoopError ?? null,
     },
+    campaignLoop: {
+      enabled:      campaignLoopTimer !== null,
+      intervalMs:   CAMPAIGN_LOOP_INTERVAL_MS,
+      inFlightCount: campaignsInFlight.size,
+      inFlight:     Array.from(campaignsInFlight),
+    },
     freelancehunt: {
       connected:   sessionFound,
       authMode:    'playwright_session',
@@ -1117,6 +1188,22 @@ const server = http.createServer(async (req, res) => {
       return json(res, 200, { ok: true, message: 'Auto-loop stopped' })
     }
 
+    // ── Campaign scheduler loop control ──────────────────────────────────────
+    if (method === 'POST' && pathname === '/campaign-loop/start') {
+      startCampaignLoop()
+      return json(res, 200, { ok: true, message: 'Campaign scheduler loop started' })
+    }
+
+    if (method === 'POST' && pathname === '/campaign-loop/stop') {
+      stopCampaignLoop()
+      return json(res, 200, { ok: true, message: 'Campaign scheduler loop stopped' })
+    }
+
+    if (method === 'POST' && pathname === '/campaign-loop/run-now') {
+      runScheduledCampaigns().catch(() => {})
+      return json(res, 202, { ok: true, message: 'Campaign scheduler triggered manually' })
+    }
+
     // ── Campaign dispatch ─────────────────────────────────────────────────────
     if (method === 'POST' && pathname === '/campaigns/dispatch') {
       try {
@@ -1341,6 +1428,10 @@ server.listen(PORT, '0.0.0.0', () => {
       }).catch(() => startAutoLoop())
     }
   }).catch(() => {})
+
+  // Always start the campaign scheduler — it polls for due/scheduled campaigns
+  // independently of the Freelancehunt auto-bid loop.
+  startCampaignLoop()
 
   if (!process.env.OPENAI_API_KEY) {
     addLog({ level: 'warning', message: 'OPENAI_API_KEY not set — will use template bids' })

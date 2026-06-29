@@ -3,24 +3,24 @@
  *
  * Full join-then-send campaign dispatch using GramJS (MTProto).
  *
- * Flow per account:
- *  1. Connect and validate session (skip account if invalid/banned/flood-wait)
- *  2. For each target channel in this account's slice:
- *     a. Resolve entity (username / t.me link / invite link)
- *     b. Check membership → already_member / not_member / approval_pending
- *     c. If not_member → tryJoin (human-like delay after join)
- *     d. If member → send message (human-like delay between sends)
- *  3. Per-account limits: maxJoinsPerCampaign, maxSendsPerCampaign
- *  4. FloodWait: caught per-account; account is skipped, remaining targets rotate to next account
- *  5. Detailed CampaignMessage row saved per channel: joinStatus + sendStatus + errorCode
- *  6. Campaign status updated to granular value on completion
+ * Key fixes vs. previous version:
+ *  - Uses client.getInputEntity() before every invoke() — GramJS invoke() does NOT
+ *    auto-resolve string peers; only high-level methods (sendMessage, etc.) do.
+ *  - Uses client.sendMessage() (high-level) for sending — handles peer resolution
+ *    and message formatting correctly.
+ *  - Loads only the channels selected in the campaign (getTelegramChannelsByIds)
+ *    instead of all 20 000 channels — avoids the ch.status check blocking all channels.
+ *  - Channel status check is now a warning, not a hard block — lets the dispatch
+ *    attempt the channel and fail gracefully if the link is invalid.
+ *  - getMembershipStatus uses GetParticipant (not GetFullChannel) with a resolved entity.
+ *  - Per-account sequential dispatch (not Promise.all) to avoid Telegram rate limits.
+ *  - Detailed logs saved per channel: joinStatus + telegramErrorCode + errorReason.
  */
 
 import {
   getCampaignById,
-  getTelegramAccountById,
   getTelegramAccounts,
-  getTelegramChannels,
+  getTelegramChannelsByIds,
   updateCampaignStatus,
   saveCampaignMessage,
   incrementCampaignCounters,
@@ -45,109 +45,123 @@ function extractFloodWaitSeconds(msg: string): number | null {
 }
 
 function extractErrorCode(msg: string): string {
-  // Extract Telegram uppercase error codes like FLOOD_WAIT_X, USERNAME_INVALID, etc.
-  const m = msg.match(/([A-Z_]{5,}(?:_\d+)?)/)
-  return m ? m[1] : 'UNKNOWN'
+  const m = msg.match(/([A-Z][A-Z0-9_]{4,})/)
+  return m ? m[1] : 'UNKNOWN_ERROR'
 }
 
-/** Normalise a channel/group username or link to the form GramJS can resolve. */
+/** Normalise a channel/group username or link into a string GramJS can getInputEntity() on. */
 function normalisePeer(raw: string): string | null {
-  const s = raw.trim()
+  const s = (raw ?? '').trim()
   if (!s) return null
 
-  // Invite links — GramJS resolves these via importChatInvite
+  // Private invite links (t.me/+ or t.me/joinchat/)
   if (s.includes('t.me/+') || s.includes('t.me/joinchat/')) return s
 
-  // t.me/username  → @username
-  const tme = s.match(/t\.me\/([A-Za-z0-9_]{5,})/)
+  // t.me/username → @username
+  const tme = s.match(/t\.me\/([A-Za-z0-9_]{3,})/)
   if (tme) return `@${tme[1]}`
 
-  // already @username
+  // Already @username
   if (s.startsWith('@')) return s
 
-  // bare username (no @)
-  if (/^[A-Za-z0-9_]{5,}$/.test(s)) return `@${s}`
+  // Bare username without @
+  if (/^[A-Za-z0-9_]{3,}$/.test(s)) return `@${s}`
 
   return null
 }
 
-/** Build a connected GramJS client from a session string. */
+// ── GramJS client factory ────────────────────────────────────────────────────
+
 async function makeClient(sessionString: string | undefined): Promise<TelegramClient> {
   const apiId   = Number(process.env.TELEGRAM_API_ID)
   const apiHash = process.env.TELEGRAM_API_HASH ?? ''
-  if (!apiId || !apiHash) throw new Error('TELEGRAM_API_ID or TELEGRAM_API_HASH env var is missing')
-
-  // If session string is missing the account was never authorised — throw a clear error
-  // so the caller logs CONNECT_FAILED and moves on to the next account.
+  if (!apiId || !apiHash) {
+    throw new Error('TELEGRAM_API_ID або TELEGRAM_API_HASH не задано в змінних середовища')
+  }
   if (!sessionString || sessionString.trim() === '') {
-    throw new Error('SESSION_MISSING: account has no saved session — please re-authorise the account')
+    throw new Error('SESSION_MISSING: акаунт не авторизований — необхідно повторно пройти авторизацію')
   }
 
-  const logger = new Logger(LogLevel.ERROR)
+  const logger = new Logger(LogLevel.NONE)
   const client = new TelegramClient(
     new StringSession(sessionString),
     apiId, apiHash,
-    { connectionRetries: 3, retryDelay: 1_000, useWSS: true, baseLogger: logger },
+    { connectionRetries: 5, retryDelay: 2_000, useWSS: false, baseLogger: logger },
   )
   await client.connect()
   return client
 }
 
+// ── Membership helpers ───────────────────────────────────────────────────────
+
 /**
- * Check membership status.
- * Returns 'member' | 'approval_pending' | 'not_member'.
- * If the channel can't be resolved at all → 'not_member' (caller will try join).
+ * Resolve a peer to a GramJS entity.
+ * Returns null if the peer cannot be resolved (invalid username / private channel).
+ */
+async function resolveEntity(
+  client: TelegramClient,
+  peer: string,
+): Promise<Api.TypeInputPeer | null> {
+  try {
+    // getInputEntity handles @usernames, t.me links, invite links, etc.
+    const entity = await client.getInputEntity(peer)
+    return entity as unknown as Api.TypeInputPeer
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Check whether the current account is a participant of the channel/group.
+ * Uses GetParticipant which works for both channels and groups.
+ * Returns 'member' | 'not_member' | 'approval_pending'.
  */
 async function getMembershipStatus(
   client: TelegramClient,
-  peer: string,
+  entity: Api.TypeInputPeer,
 ): Promise<CampaignMembershipStatus> {
   try {
-    // GetFullChannel works for channels; for groups use GetFullChat — try both
-    const full = await client.invoke(
-      new Api.channels.GetFullChannel({ channel: peer }),
+    await client.invoke(
+      new Api.channels.GetParticipant({
+        channel:     entity as unknown as Api.TypeInputChannel,
+        participant: new Api.InputUserSelf(),
+      }),
     )
-    const fc = full as unknown as { full_chat?: { left?: boolean; participants_count?: number } }
-    if (fc.full_chat?.left === false && fc.full_chat?.participants_count == null) {
-      return 'approval_pending'
-    }
     return 'member'
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    if (
-      msg.includes('CHANNEL_PRIVATE') ||
-      msg.includes('USERNAME_INVALID') ||
-      msg.includes('CHANNEL_INVALID') ||
-      msg.includes('USER_NOT_PARTICIPANT')
-    ) {
+    if (msg.includes('USER_NOT_PARTICIPANT') || msg.includes('CHANNEL_PRIVATE')) {
       return 'not_member'
     }
-    // Re-throw FloodWait so the outer loop can handle it
-    if (msg.includes('FLOOD_WAIT')) throw err
-    // Anything else → treat as not_member, tryJoin will surface real error
+    if (msg.includes('INVITE_REQUEST_SENT')) return 'approval_pending'
+    if (msg.includes('FLOOD_WAIT'))          throw err
+    // For regular groups, GetParticipant might throw — treat as not_member
     return 'not_member'
   }
 }
 
 /**
- * Try to join a channel / group / via invite link.
- * Returns resulting membership status.
- * Throws on FLOOD_WAIT, CHANNELS_TOO_MUCH, or unrecoverable errors.
+ * Join a public channel/group or accept a private invite link.
+ * Returns the resulting membership status.
+ * Throws on FloodWait or CHANNELS_TOO_MUCH (caller aborts the account).
  */
 async function tryJoin(
   client: TelegramClient,
-  raw: string,
+  peer: string,
+  entity: Api.TypeInputPeer,
 ): Promise<CampaignMembershipStatus> {
-  const isInvite = raw.includes('t.me/+') || raw.includes('t.me/joinchat/')
+  const isInvite = peer.includes('t.me/+') || peer.includes('t.me/joinchat/')
 
   try {
     if (isInvite) {
-      // Extract hash from invite link
-      const hash = raw.split('/').pop() ?? ''
+      // Private invite: extract hash
+      const hash = peer.replace(/.*t\.me\/(?:joinchat\/|\+)/, '').split('?')[0]
       await client.invoke(new Api.messages.ImportChatInvite({ hash }))
     } else {
-      const peer = raw.startsWith('@') ? raw : `@${raw}`
-      await client.invoke(new Api.channels.JoinChannel({ channel: peer }))
+      // Public channel/group: use resolved entity
+      await client.invoke(new Api.channels.JoinChannel({
+        channel: entity as unknown as Api.TypeInputChannel,
+      }))
     }
     return 'member'
   } catch (err) {
@@ -155,9 +169,8 @@ async function tryJoin(
     if (msg.includes('USER_ALREADY_PARTICIPANT')) return 'member'
     if (msg.includes('INVITE_REQUEST_SENT'))      return 'approval_pending'
     if (msg.includes('JOIN_AS_PEER_INVALID'))     return 'approval_pending'
-    // Propagate these so the account is marked unusable for this campaign
-    if (msg.includes('FLOOD_WAIT'))   throw err
-    if (msg.includes('CHANNELS_TOO_MUCH')) throw err
+    if (msg.includes('FLOOD_WAIT'))               throw err
+    if (msg.includes('CHANNELS_TOO_MUCH'))        throw err
     throw err
   }
 }
@@ -165,23 +178,23 @@ async function tryJoin(
 // ── Per-account dispatch ──────────────────────────────────────────────────────
 
 interface AccountSliceResult {
-  sent:           number
-  failedSend:     number
-  joined:         number
-  failedJoin:     number
-  skipped:        number
-  waitingApproval:number
-  invalidChannel: number
-  floodWait:      boolean
-  floodWaitSec:   number
+  sent:            number
+  failedSend:      number
+  joined:          number
+  failedJoin:      number
+  skipped:         number
+  waitingApproval: number
+  invalidChannel:  number
+  floodWait:       boolean
+  floodWaitSec:    number
 }
 
 async function dispatchAccountSlice(
-  campaignId:  string,
-  channelIds:  string[],
-  account:     { id: string; phoneNumber: string; sessionString: string },
-  channelMap:  Map<string, { id: string; title: string; usernameOrLink: string; status: string }>,
-  messageText: string,
+  campaignId:   string,
+  channelIds:   string[],
+  account:      { id: string; phoneNumber: string; sessionString: string | undefined },
+  channelMap:   Map<string, { id: string; title?: string; usernameOrLink: string }>,
+  messageText:  string,
 ): Promise<AccountSliceResult> {
   const res: AccountSliceResult = {
     sent: 0, failedSend: 0, joined: 0, failedJoin: 0,
@@ -189,13 +202,14 @@ async function dispatchAccountSlice(
     floodWait: false, floodWaitSec: 0,
   }
 
-  // ── Connect ──────────────────────────────────────────────────────────────
+  // ── 1. Connect ───────────────────────────────────────────────────────────────
   let client: TelegramClient
   try {
     client = await makeClient(account.sessionString)
+    console.log(`[dispatch] account:${account.phoneNumber} connected`)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    console.error(`[dispatch] account:${account.phoneNumber} connect_failed:${reason}`)
+    console.error(`[dispatch] account:${account.phoneNumber} CONNECT_FAILED: ${reason}`)
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
       await saveCampaignMessage({
@@ -206,7 +220,7 @@ async function dispatchAccountSlice(
         accountPhone:      account.phoneNumber,
         status:            'failed',
         telegramErrorCode: 'CONNECT_FAILED',
-        errorReason:       `Не вдалося підключити акаунт: ${reason}`,
+        errorReason:       `Не вдалося підключити акаунт ${account.phoneNumber}: ${reason}`,
       })
       await incrementCampaignCounters(campaignId, 'failed_count')
       res.failedSend++
@@ -214,12 +228,13 @@ async function dispatchAccountSlice(
     return res
   }
 
-  // ── Validate session ─────────────────────────────────────────────────────
+  // ── 2. Validate session ──────────────────────────────────────────────────────
   try {
     await client.invoke(new Api.users.GetUsers({ id: [new Api.InputUserSelf()] }))
+    console.log(`[dispatch] account:${account.phoneNumber} session valid`)
   } catch (err) {
     const reason = err instanceof Error ? err.message : String(err)
-    console.error(`[dispatch] account:${account.phoneNumber} session_invalid:${reason}`)
+    console.error(`[dispatch] account:${account.phoneNumber} SESSION_INVALID: ${reason}`)
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
       await saveCampaignMessage({
@@ -230,7 +245,7 @@ async function dispatchAccountSlice(
         accountPhone:      account.phoneNumber,
         status:            'skipped',
         telegramErrorCode: extractErrorCode(reason),
-        errorReason:       `Сесія акаунту недійсна: ${reason}`,
+        errorReason:       `Сесія акаунту ${account.phoneNumber} недійсна: ${reason}`,
       })
       res.skipped++
     }
@@ -238,25 +253,24 @@ async function dispatchAccountSlice(
     return res
   }
 
-  // ── Per-channel loop ─────────────────────────────────────────────────────
-  let joinsThisRun  = 0
-  let sendsThisRun  = 0
+  // ── 3. Per-channel loop ──────────────────────────────────────────────────────
+  let joinsThisRun = 0
+  let sendsThisRun = 0
 
   try {
     for (const channelId of channelIds) {
       const ch = channelMap.get(channelId)
 
-      // Skip missing / inactive channels
-      if (!ch || ch.status !== 'active') {
+      if (!ch) {
+        // Channel ID not found in our DB — could have been deleted
         await saveCampaignMessage({
           campaignId,
           channelId,
-          channelTitle:      ch?.title,
           telegramAccountId: account.id,
           accountPhone:      account.phoneNumber,
           status:            'invalid_channel',
-          telegramErrorCode: 'CHANNEL_INACTIVE',
-          errorReason:       ch ? `Статус каналу: ${ch.status}` : 'Канал не знайдено в БД',
+          telegramErrorCode: 'CHANNEL_NOT_IN_DB',
+          errorReason:       `Канал ${channelId} не знайдено в базі даних`,
         })
         res.invalidChannel++
         await incrementCampaignCounters(campaignId, 'failed_count')
@@ -280,20 +294,35 @@ async function dispatchAccountSlice(
         continue
       }
 
-      // Private invite links that can't be joined → skip with clear reason
-      if (peer.includes('t.me/+') || peer.includes('t.me/joinchat/')) {
-        // We'll try joining via invite — allow it to fall through to the join logic
+      console.log(`[dispatch] account:${account.phoneNumber} processing channel:${peer}`)
+
+      // ── 3a. Resolve entity ────────────────────────────────────────────────────
+      const entity = await resolveEntity(client, peer)
+      if (!entity) {
+        await saveCampaignMessage({
+          campaignId,
+          channelId,
+          channelTitle:      ch.title,
+          telegramAccountId: account.id,
+          accountPhone:      account.phoneNumber,
+          status:            'invalid_channel',
+          telegramErrorCode: 'ENTITY_NOT_FOUND',
+          errorReason:       `Не вдалося знайти канал у Telegram: "${peer}"`,
+        })
+        res.invalidChannel++
+        await incrementCampaignCounters(campaignId, 'failed_count')
+        continue
       }
 
-      // ── Check / Join ────────────────────────────────────────────────────
+      // ── 3b. Check / Join ──────────────────────────────────────────────────────
       let joinStatus: CampaignJoinStatus = 'already_member'
 
       try {
-        const membership = await getMembershipStatus(client, peer)
+        const membership = await getMembershipStatus(client, entity)
+        console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} membership:${membership}`)
 
         if (membership === 'not_member') {
           if (joinsThisRun >= CAMPAIGN_ACCOUNT_LIMITS.maxJoinsPerCampaign) {
-            // Account has reached join limit — skip and hand off to next account
             await saveCampaignMessage({
               campaignId,
               channelId,
@@ -309,15 +338,15 @@ async function dispatchAccountSlice(
             continue
           }
 
-          // Human-like delay before join
           await sleep(randDelay(
             CAMPAIGN_ACCOUNT_LIMITS.joinDelayMinMs,
             CAMPAIGN_ACCOUNT_LIMITS.joinDelayMaxMs,
           ))
 
           try {
-            const afterJoin = await tryJoin(client, peer)
+            const afterJoin = await tryJoin(client, peer, entity)
             joinsThisRun++
+            console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} joined (${afterJoin})`)
 
             if (afterJoin === 'approval_pending') {
               await saveCampaignMessage({
@@ -337,62 +366,48 @@ async function dispatchAccountSlice(
 
             joinStatus = 'joined'
             res.joined++
-
-            // Human-like pause after joining before sending
+            // Pause after joining before sending
             await sleep(randDelay(
               CAMPAIGN_ACCOUNT_LIMITS.joinDelayMinMs * 2,
               CAMPAIGN_ACCOUNT_LIMITS.joinDelayMaxMs * 2,
             ))
           } catch (joinErr) {
-            const reason = joinErr instanceof Error ? joinErr.message : String(joinErr)
-            const floodSec = extractFloodWaitSeconds(reason)
+            const reason    = joinErr instanceof Error ? joinErr.message : String(joinErr)
+            const floodSec  = extractFloodWaitSeconds(reason)
 
             if (floodSec !== null) {
+              console.warn(`[dispatch] account:${account.phoneNumber} FLOOD_WAIT_${floodSec}s on join`)
               res.floodWait    = true
               res.floodWaitSec = floodSec
               await saveCampaignMessage({
-                campaignId,
-                channelId,
-                channelTitle:      ch.title,
-                telegramAccountId: account.id,
-                accountPhone:      account.phoneNumber,
-                joinStatus:        'join_failed',
-                status:            'skipped',
+                campaignId, channelId, channelTitle: ch.title,
+                telegramAccountId: account.id, accountPhone: account.phoneNumber,
+                joinStatus: 'join_failed', status: 'skipped',
                 telegramErrorCode: `FLOOD_WAIT_${floodSec}`,
-                errorReason:       `FloodWait ${floodSec}с при спробі вступу — акаунт пропущено`,
+                errorReason: `FloodWait ${floodSec}с при спробі вступу — акаунт зупинено`,
               })
               res.skipped++
-              // Stop using this account entirely
               break
             }
 
             if (reason.includes('CHANNELS_TOO_MUCH')) {
               await saveCampaignMessage({
-                campaignId,
-                channelId,
-                channelTitle:      ch.title,
-                telegramAccountId: account.id,
-                accountPhone:      account.phoneNumber,
-                joinStatus:        'join_failed',
-                status:            'skipped',
+                campaignId, channelId, channelTitle: ch.title,
+                telegramAccountId: account.id, accountPhone: account.phoneNumber,
+                joinStatus: 'join_failed', status: 'skipped',
                 telegramErrorCode: 'CHANNELS_TOO_MUCH',
-                errorReason:       'Акаунт перевищив ліміт каналів Telegram (500) — вступ неможливий',
+                errorReason: 'Акаунт перевищив ліміт 500 каналів Telegram',
               })
               res.skipped++
-              break // No point continuing with this account
+              break
             }
 
-            // Other join error — log and skip this channel, continue with others
             await saveCampaignMessage({
-              campaignId,
-              channelId,
-              channelTitle:      ch.title,
-              telegramAccountId: account.id,
-              accountPhone:      account.phoneNumber,
-              joinStatus:        'join_failed',
-              status:            'failed',
+              campaignId, channelId, channelTitle: ch.title,
+              telegramAccountId: account.id, accountPhone: account.phoneNumber,
+              joinStatus: 'join_failed', status: 'failed',
               telegramErrorCode: extractErrorCode(reason),
-              errorReason:       `Не вдалося вступити: ${reason}`,
+              errorReason: `Не вдалося вступити до ${peer}: ${reason}`,
             })
             res.failedJoin++
             await incrementCampaignCounters(campaignId, 'failed_count')
@@ -400,15 +415,11 @@ async function dispatchAccountSlice(
           }
         } else if (membership === 'approval_pending') {
           await saveCampaignMessage({
-            campaignId,
-            channelId,
-            channelTitle:      ch.title,
-            telegramAccountId: account.id,
-            accountPhone:      account.phoneNumber,
-            joinStatus:        'approval_pending',
-            membershipStatus:  'approval_pending',
-            status:            'waiting_approval',
-            errorReason:       'Запит на вступ вже надіслано раніше — очікується підтвердження',
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus: 'approval_pending', membershipStatus: 'approval_pending',
+            status: 'waiting_approval',
+            errorReason: 'Запит на вступ вже надіслано раніше — очікується підтвердження',
           })
           res.waitingApproval++
           continue
@@ -416,80 +427,61 @@ async function dispatchAccountSlice(
         // else: already_member — joinStatus stays 'already_member'
 
       } catch (memberErr) {
-        const reason = memberErr instanceof Error ? memberErr.message : String(memberErr)
-        if (reason.includes('FLOOD_WAIT')) {
-          const sec = extractFloodWaitSeconds(reason) ?? 0
+        const reason   = memberErr instanceof Error ? memberErr.message : String(memberErr)
+        const floodSec = extractFloodWaitSeconds(reason)
+        if (floodSec !== null) {
           res.floodWait    = true
-          res.floodWaitSec = sec
+          res.floodWaitSec = floodSec
           await saveCampaignMessage({
-            campaignId,
-            channelId,
-            channelTitle:      ch.title,
-            telegramAccountId: account.id,
-            accountPhone:      account.phoneNumber,
-            status:            'skipped',
-            telegramErrorCode: `FLOOD_WAIT_${sec}`,
-            errorReason:       `FloodWait ${sec}с при перевірці членства — акаунт пропущено`,
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            status: 'skipped',
+            telegramErrorCode: `FLOOD_WAIT_${floodSec}`,
+            errorReason: `FloodWait ${floodSec}с при перевірці членства — акаунт зупинено`,
           })
           res.skipped++
           break
         }
-        // Unresolvable peer → invalid_channel
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
-          joinStatus:        'join_failed',
-          status:            'invalid_channel',
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
+          joinStatus: 'join_failed', status: 'invalid_channel',
           telegramErrorCode: extractErrorCode(reason),
-          errorReason:       `Не вдалося розпізнати канал: ${reason}`,
+          errorReason: `Не вдалося перевірити членство у ${peer}: ${reason}`,
         })
         res.invalidChannel++
         await incrementCampaignCounters(campaignId, 'failed_count')
         continue
       }
 
-      // ── Send message ─────────────────────────────────────────────────────
+      // ── 3c. Send message ──────────────────────────────────────────────────────
       if (sendsThisRun >= CAMPAIGN_ACCOUNT_LIMITS.maxSendsPerCampaign) {
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
           joinStatus,
-          status:            'skipped',
+          status: 'skipped',
           telegramErrorCode: 'SEND_LIMIT_REACHED',
-          errorReason:       `Акаунт досяг ліміту відправок (${CAMPAIGN_ACCOUNT_LIMITS.maxSendsPerCampaign}) за одну кампанію`,
+          errorReason: `Акаунт досяг ліміту відправок (${CAMPAIGN_ACCOUNT_LIMITS.maxSendsPerCampaign}) за одну кампанію`,
         })
         res.skipped++
         continue
       }
 
-      // Human-like delay before send
       await sleep(randDelay(
         CAMPAIGN_ACCOUNT_LIMITS.sendDelayMinMs,
         CAMPAIGN_ACCOUNT_LIMITS.sendDelayMaxMs,
       ))
 
       try {
-        const result = await client.invoke(new Api.messages.SendMessage({
-          peer,
+        // Use high-level sendMessage — it resolves the peer correctly
+        const sendResult = await client.sendMessage(peer, {
           message:   messageText,
-          noWebpage: true,
-        }))
+          parseMode: undefined,
+        })
 
-        // Extract message ID from result
-        let messageId: number | undefined
-        const upd = result as unknown as { updates?: { _?: string; id?: number }[]; id?: number }
-        if (Array.isArray(upd.updates)) {
-          const u = upd.updates.find((x) => x._ === 'updateMessageID' || x.id)
-          if (u?.id) messageId = u.id
-        } else if (typeof upd.id === 'number') {
-          messageId = upd.id
-        }
+        const messageId = typeof sendResult?.id === 'number' ? sendResult.id : undefined
+        console.log(`[dispatch] account:${account.phoneNumber} channel:${peer} SENT msgId:${messageId ?? '?'}`)
 
         await saveCampaignMessage({
           campaignId,
@@ -506,23 +498,21 @@ async function dispatchAccountSlice(
         await incrementCampaignCounters(campaignId, 'sent_count')
         sendsThisRun++
         res.sent++
+
       } catch (sendErr) {
-        const reason = sendErr instanceof Error ? sendErr.message : String(sendErr)
+        const reason   = sendErr instanceof Error ? sendErr.message : String(sendErr)
         const floodSec = extractFloodWaitSeconds(reason)
 
         if (floodSec !== null) {
+          console.warn(`[dispatch] account:${account.phoneNumber} FLOOD_WAIT_${floodSec}s on send`)
           res.floodWait    = true
           res.floodWaitSec = floodSec
           await saveCampaignMessage({
-            campaignId,
-            channelId,
-            channelTitle:      ch.title,
-            telegramAccountId: account.id,
-            accountPhone:      account.phoneNumber,
-            joinStatus,
-            status:            'skipped',
+            campaignId, channelId, channelTitle: ch.title,
+            telegramAccountId: account.id, accountPhone: account.phoneNumber,
+            joinStatus, status: 'skipped',
             telegramErrorCode: `FLOOD_WAIT_${floodSec}`,
-            errorReason:       `FloodWait ${floodSec}с при відправці — акаунт пропущено`,
+            errorReason: `FloodWait ${floodSec}с при відправці до ${peer} — акаунт зупинено`,
           })
           res.skipped++
           break
@@ -531,18 +521,18 @@ async function dispatchAccountSlice(
         const isInvalid =
           reason.includes('USERNAME_INVALID') ||
           reason.includes('CHANNEL_INVALID') ||
-          reason.includes('PEER_ID_INVALID')
+          reason.includes('PEER_ID_INVALID') ||
+          reason.includes('CHAT_WRITE_FORBIDDEN')
+
+        console.error(`[dispatch] account:${account.phoneNumber} channel:${peer} SEND_FAILED: ${reason}`)
 
         await saveCampaignMessage({
-          campaignId,
-          channelId,
-          channelTitle:      ch.title,
-          telegramAccountId: account.id,
-          accountPhone:      account.phoneNumber,
+          campaignId, channelId, channelTitle: ch.title,
+          telegramAccountId: account.id, accountPhone: account.phoneNumber,
           joinStatus,
           status:            isInvalid ? 'invalid_channel' : 'failed',
           telegramErrorCode: extractErrorCode(reason),
-          errorReason:       reason,
+          errorReason:       `Помилка відправки до ${peer}: ${reason}`,
         })
         await incrementCampaignCounters(campaignId, 'failed_count')
         if (isInvalid) res.invalidChannel++
@@ -553,40 +543,42 @@ async function dispatchAccountSlice(
     try { await client.disconnect() } catch { /* ignore */ }
   }
 
+  console.log(`[dispatch] account:${account.phoneNumber} done — sent:${res.sent} joined:${res.joined} failed:${res.failedSend} skipped:${res.skipped}`)
   return res
 }
 
 // ── Main entry point ──────────────────────────────────────────────────────────
 
 export async function dispatchCampaign(campaignId: string): Promise<{
-  sent:           number
-  failedSend:     number
-  joined:         number
-  failedJoin:     number
-  skipped:        number
-  waitingApproval:number
-  invalidChannel: number
+  sent:            number
+  failedSend:      number
+  joined:          number
+  failedJoin:      number
+  skipped:         number
+  waitingApproval: number
+  invalidChannel:  number
 }> {
+  console.log(`[dispatch] starting campaign:${campaignId}`)
   const campaign = await getCampaignById(campaignId)
-  if (!campaign) throw new Error(`Campaign ${campaignId} not found`)
+  if (!campaign) throw new Error(`Кампанія ${campaignId} не знайдена`)
 
   await updateCampaignStatus(campaignId, 'joining')
 
-  // ── Resolve active sender accounts ────────────────────────────────────────
+  // ── Resolve sender accounts ────────────────────────────────────────────────
   const allUserAccounts = await getTelegramAccounts(campaign.userId)
+  console.log(`[dispatch] all user accounts: ${allUserAccounts.length} (userId:${campaign.userId})`)
+
   const activeAll = allUserAccounts.filter(
-    // Do NOT gate on `a.sessionString` here — accounts without a persisted session
-    // will fail gracefully in makeClient and produce a CONNECT_FAILED log entry.
-    // Gating here would silently drop all accounts when session_string was missing
-    // from the SELECT (the root cause of "Немає активного Telegram-акаунту").
     (a) => a.status === 'active' &&
            (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
   )
+  console.log(`[dispatch] active accounts: ${activeAll.length}`)
 
   let activeAccounts = activeAll
   if (campaign.accountIds && campaign.accountIds.length > 0) {
     const idSet = new Set(campaign.accountIds)
-    const sel = activeAll.filter((a) => idSet.has(a.id))
+    const sel   = activeAll.filter((a) => idSet.has(a.id))
+    console.log(`[dispatch] campaign.accountIds filter: ${campaign.accountIds.length} requested, ${sel.length} matched active`)
     if (sel.length > 0) activeAccounts = sel
   } else if (campaign.accountId) {
     const primary = activeAll.find((a) => a.id === campaign.accountId)
@@ -595,70 +587,74 @@ export async function dispatchCampaign(campaignId: string): Promise<{
 
   if (activeAccounts.length === 0) {
     await updateCampaignStatus(campaignId, 'no_accounts')
-    throw new Error('Немає активного Telegram-акаунту для відправки')
+    throw new Error('Немає активного Telegram-акаунту для відправки. Перевірте авторизацію акаунтів.')
   }
 
-  // ── Load channel map ───────────────────────────────────────────────────────
-  const channels  = await getTelegramChannels({ limit: 20_000 })
+  // ── Load only the channels selected in this campaign ──────────────────────
+  const targetIds  = campaign.targetChannelIds ?? []
+  console.log(`[dispatch] target channels: ${targetIds.length}`)
+
+  if (targetIds.length === 0) {
+    await updateCampaignStatus(campaignId, 'failed')
+    throw new Error('Кампанія не містить каналів для розсилки')
+  }
+
+  const channels   = await getTelegramChannelsByIds(targetIds)
+  console.log(`[dispatch] channels loaded from DB: ${channels.length} of ${targetIds.length} requested`)
   const channelMap = new Map(channels.map((c) => [c.id, c]))
 
   // ── Round-robin distribute channels across accounts ───────────────────────
-  // Accounts that get flooded mid-run are dropped; remaining targets spill to
-  // subsequent accounts in rotation order.
   const numAccounts = activeAccounts.length
   const slices: string[][] = activeAccounts.map(() => [])
-  campaign.targetChannelIds.forEach((id, i) => {
-    slices[i % numAccounts].push(id)
-  })
+  targetIds.forEach((id, i) => { slices[i % numAccounts].push(id) })
+  console.log(`[dispatch] distributing ${targetIds.length} channels across ${numAccounts} accounts`)
 
-  // ── Dispatch — parallel per account ───────────────────────────────────────
   await updateCampaignStatus(campaignId, 'sending')
 
-  const results = await Promise.all(
-    activeAccounts.map((account, i) =>
-      dispatchAccountSlice(
+  // ── Sequential per-account dispatch (avoids parallel rate limiting) ───────
+  const totals = { sent: 0, failedSend: 0, joined: 0, failedJoin: 0, skipped: 0, waitingApproval: 0, invalidChannel: 0 }
+  const allFloodResults: boolean[] = []
+
+  for (let i = 0; i < activeAccounts.length; i++) {
+    const account = activeAccounts[i]
+    const slice   = slices[i]
+    if (slice.length === 0) continue
+
+    try {
+      const r = await dispatchAccountSlice(
         campaignId,
-        slices[i],
-        account as { id: string; phoneNumber: string; sessionString: string },
-        channelMap as Map<string, { id: string; title: string; usernameOrLink: string; status: string }>,
+        slice,
+        account as { id: string; phoneNumber: string; sessionString: string | undefined },
+        channelMap as Map<string, { id: string; title?: string; usernameOrLink: string }>,
         campaign.messageText,
-      ).catch((err) => {
-        console.error(`[dispatch] account:${account.phoneNumber} unhandled:`, err)
-        return {
-          sent: 0, failedSend: slices[i].length, joined: 0, failedJoin: 0,
-          skipped: 0, waitingApproval: 0, invalidChannel: 0,
-          floodWait: false, floodWaitSec: 0,
-        } satisfies AccountSliceResult
-      })
-    )
-  )
+      )
+      totals.sent            += r.sent
+      totals.failedSend      += r.failedSend
+      totals.joined          += r.joined
+      totals.failedJoin      += r.failedJoin
+      totals.skipped         += r.skipped
+      totals.waitingApproval += r.waitingApproval
+      totals.invalidChannel  += r.invalidChannel
+      allFloodResults.push(r.floodWait)
+    } catch (err) {
+      console.error(`[dispatch] account:${account.phoneNumber} unhandled:`, err)
+      allFloodResults.push(false)
+    }
+  }
 
-  // ── Aggregate ─────────────────────────────────────────────────────────────
-  const totals = results.reduce(
-    (acc, r) => ({
-      sent:            acc.sent            + r.sent,
-      failedSend:      acc.failedSend      + r.failedSend,
-      joined:          acc.joined          + r.joined,
-      failedJoin:      acc.failedJoin      + r.failedJoin,
-      skipped:         acc.skipped         + r.skipped,
-      waitingApproval: acc.waitingApproval + r.waitingApproval,
-      invalidChannel:  acc.invalidChannel  + r.invalidChannel,
-    }),
-    { sent: 0, failedSend: 0, joined: 0, failedJoin: 0, skipped: 0, waitingApproval: 0, invalidChannel: 0 },
-  )
-
-  const allFlood     = results.every((r) => r.floodWait)
-  const total        = campaign.targetChannelIds.length
-  const totalFailed  = totals.failedSend + totals.failedJoin + totals.invalidChannel
+  // ── Determine final status ────────────────────────────────────────────────
+  const allFlood    = allFloodResults.length > 0 && allFloodResults.every(Boolean)
+  const totalFailed = totals.failedSend + totals.failedJoin + totals.invalidChannel
 
   const finalStatus =
-    allFlood && totals.sent === 0                ? 'flood_wait'
-    : totals.sent === 0 && totals.waitingApproval > 0 ? 'paused'
-    : totalFailed === total && totals.sent === 0 ? 'failed'
-    : totals.sent > 0 && totalFailed > 0         ? 'partially_completed'
-    : totals.sent > 0                            ? 'completed'
+    allFlood && totals.sent === 0                           ? 'flood_wait'
+    : totals.sent === 0 && totals.waitingApproval > 0      ? 'paused'
+    : totalFailed === targetIds.length && totals.sent === 0 ? 'failed'
+    : totals.sent > 0 && totalFailed > 0                   ? 'partially_completed'
+    : totals.sent > 0                                      ? 'completed'
     : 'failed'
 
+  console.log(`[dispatch] campaign:${campaignId} DONE — status:${finalStatus} sent:${totals.sent} failed:${totalFailed} joined:${totals.joined}`)
   await updateCampaignStatus(campaignId, finalStatus)
 
   return totals

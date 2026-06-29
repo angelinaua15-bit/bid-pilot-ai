@@ -2,27 +2,39 @@ import { NextRequest, NextResponse } from 'next/server';
 import { getCampaignById, getTelegramAccounts, updateCampaignStatus } from '@/lib/db';
 import { dispatchCampaign } from '@/services/campaign-dispatch.service';
 
+/**
+ * maxDuration = 300 seconds (5 minutes).
+ * Without this, Vercel kills the function after the HTTP response is sent,
+ * which terminates fire-and-forget background dispatch before it completes.
+ * With this we await the full dispatch before responding.
+ */
+export const maxDuration = 300;
+
 export async function POST(
   _req: NextRequest,
   { params }: { params: Promise<{ id: string }> }
 ) {
+  const startedAt = new Date().toISOString();
+
   try {
     const { id } = await params;
 
     const campaign = await getCampaignById(id);
     if (!campaign) {
-      return NextResponse.json({ ok: false, error: 'Campaign not found' }, { status: 404 });
-    }
-    if (campaign.status === 'running' || campaign.status === 'joining' || campaign.status === 'sending') {
-      return NextResponse.json({ ok: false, error: 'Campaign is already running' }, { status: 409 });
+      return NextResponse.json({ ok: false, error: 'Кампанію не знайдено' }, { status: 404 });
     }
 
-    // Verify there is at least one active Telegram account available for this campaign.
-    // Prefer campaign.accountIds, fall back to accountId, then any active account for the user.
+    // Prevent double-start
+    if (campaign.status === 'running' || campaign.status === 'joining' || campaign.status === 'sending') {
+      return NextResponse.json(
+        { ok: false, error: `Кампанія вже виконується (статус: ${campaign.status})` },
+        { status: 409 }
+      );
+    }
+
+    // Pre-flight: verify at least one usable account exists
     const allUserAccounts = await getTelegramAccounts(campaign.userId);
     const activeAll = allUserAccounts.filter(
-      // Do NOT gate on sessionString — getTelegramAccounts now includes session_string
-      // in the SELECT, so this was previously always undefined and filtered everyone out.
       (a) => a.status === 'active' &&
              (!a.floodWaitUntil || new Date(a.floodWaitUntil) <= new Date())
     );
@@ -30,7 +42,7 @@ export async function POST(
     let usableAccounts = activeAll;
     if (campaign.accountIds && campaign.accountIds.length > 0) {
       const idSet = new Set(campaign.accountIds);
-      const sel = activeAll.filter((a) => idSet.has(a.id));
+      const sel   = activeAll.filter((a) => idSet.has(a.id));
       if (sel.length > 0) usableAccounts = sel;
     } else if (campaign.accountId) {
       const primary = activeAll.find((a) => a.id === campaign.accountId);
@@ -40,28 +52,43 @@ export async function POST(
     if (usableAccounts.length === 0) {
       await updateCampaignStatus(id, 'no_accounts');
       return NextResponse.json(
-        { ok: false, error: 'Немає активного Telegram-акаунту. Додайте та авторизуйте акаунт у налаштуваннях, або дочекайтесь закінчення FloodWait.' },
+        {
+          ok: false,
+          error: 'Немає активного Telegram-акаунту. Додайте та авторизуйте акаунт у налаштуваннях.',
+          status: 'no_accounts',
+        },
         { status: 422 }
       );
     }
 
-    // Mark as joining immediately so the UI reflects state change before the async work begins
+    if (!campaign.targetChannelIds || campaign.targetChannelIds.length === 0) {
+      return NextResponse.json(
+        { ok: false, error: 'Кампанія не містить каналів для розсилки. Додайте канали перед запуском.' },
+        { status: 422 }
+      );
+    }
+
+    // Set status to 'joining' immediately so UI reflects the state change
     await updateCampaignStatus(id, 'joining');
 
-    // Dispatch in the background — don't await so the HTTP response returns fast.
-    // The worker updates the campaign status to 'completed'/'failed'/'partially_completed'/etc. when done.
-    dispatchCampaign(id).catch((err) => {
-      console.error('[campaign/start] dispatchCampaign error:', err);
-    });
+    // Await the full dispatch — maxDuration=300 keeps the function alive
+    const result = await dispatchCampaign(id);
 
     return NextResponse.json({
       ok: true,
-      status: 'joining',
+      startedAt,
+      finishedAt:   new Date().toISOString(),
       accountCount: usableAccounts.length,
       accountPhones: usableAccounts.map((a) => a.phoneNumber),
+      ...result,
     });
+
   } catch (err) {
-    console.error('[campaign/start] error:', err);
-    return NextResponse.json({ ok: false, error: err instanceof Error ? err.message : 'error' }, { status: 500 });
+    const message = err instanceof Error ? err.message : String(err);
+    console.error('[campaign/start] error:', message);
+    return NextResponse.json(
+      { ok: false, error: message, startedAt },
+      { status: 500 }
+    );
   }
 }
