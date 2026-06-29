@@ -725,6 +725,7 @@ function CreateCampaignForm({ userId, user, onCreated }: {
   const [chLoading, setChLoading]           = useState(true);
   const [chSearch, setChSearch]             = useState('');
   const [accounts, setAccounts]             = useState<TelegramAccount[]>([]);
+  const [acLoading, setAcLoading]           = useState(true);
 
   // Load active channels up to the plan limit (max 5000 rows for the picker)
   useEffect(() => {
@@ -738,15 +739,25 @@ function CreateCampaignForm({ userId, user, onCreated }: {
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [plan]);
 
-  // Load active Telegram accounts for sender picker
-  useEffect(() => {
-    fetch('/api/telegram/accounts')
+  // Load active Telegram accounts for sender picker.
+  // Uses the /active sub-route (no admin guard) — passes userId so it only
+  // returns accounts that belong to this user and have status === 'active'.
+  const loadAccounts = () => {
+    if (!userId) return;
+    setAcLoading(true);
+    fetch(`/api/telegram/accounts/active?userId=${encodeURIComponent(userId)}`)
       .then((r) => r.json())
       .then((res) => {
-        if (res?.ok) setAccounts((res.accounts as TelegramAccount[]).filter((a) => a.status === 'active'));
+        if (res?.ok) setAccounts(res.accounts as TelegramAccount[]);
       })
-      .catch(() => {});
-  }, []);
+      .catch(() => {})
+      .finally(() => setAcLoading(false));
+  };
+
+  useEffect(() => {
+    loadAccounts();
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [userId]);
 
   const [form, setForm] = useState({
     title:              '',
@@ -857,21 +868,41 @@ function CreateCampaignForm({ userId, user, onCreated }: {
             <label className="text-[10px] text-muted-foreground flex items-center gap-1">
               <Users size={10} />
               Акаунти-відправники
-              <span className="text-muted-foreground/60">
-                ({form.selectedAccountIds.length}/{accountCap === Infinity ? '∞' : accountCap})
-              </span>
+              {/* Show X/Y only when accounts are loaded and there are some available */}
+              {!acLoading && accounts.length > 0 && (
+                <span className="text-muted-foreground/60">
+                  ({form.selectedAccountIds.length}/{accountCap === Infinity ? accounts.length : Math.min(accounts.length, accountCap)})
+                </span>
+              )}
             </label>
-            {form.selectedAccountIds.length > 0 && (
-              <button onClick={() => setForm((f) => ({ ...f, selectedAccountIds: [] }))}
-                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
-                Скинути
+            <div className="flex items-center gap-2">
+              {/* Refresh button — lets user reload without full page reload */}
+              <button onClick={loadAccounts} disabled={acLoading}
+                className="text-[10px] text-muted-foreground hover:text-foreground transition-colors disabled:opacity-40">
+                <RefreshCw size={10} className={acLoading ? 'animate-spin' : ''} />
               </button>
-            )}
+              {form.selectedAccountIds.length > 0 && (
+                <button onClick={() => setForm((f) => ({ ...f, selectedAccountIds: [] }))}
+                  className="text-[10px] text-muted-foreground hover:text-foreground transition-colors">
+                  Скинути
+                </button>
+              )}
+            </div>
           </div>
-          {accounts.length === 0 ? (
+          {acLoading ? (
             <div className="flex items-center gap-2 bg-secondary rounded-lg px-3 py-2">
-              <Smartphone size={12} className="text-muted-foreground flex-shrink-0" />
-              <p className="text-[11px] text-muted-foreground">Немає активних акаунтів. Підключіть MTProto-акаунт у налаштуваннях.</p>
+              <RefreshCw size={12} className="text-muted-foreground flex-shrink-0 animate-spin" />
+              <p className="text-[11px] text-muted-foreground">Завантаження акаунтів...</p>
+            </div>
+          ) : accounts.length === 0 ? (
+            <div className="flex items-start gap-2.5 px-3 py-2.5 rounded-xl border border-yellow-500/30 bg-yellow-500/10">
+              <AlertTriangle size={13} className="text-yellow-400 flex-shrink-0 mt-0.5" />
+              <div className="flex flex-col gap-0.5">
+                <p className="text-[11px] font-medium text-yellow-400">Немає активних акаунтів</p>
+                <p className="text-[11px] text-muted-foreground leading-relaxed">
+                  Підключіть MTProto-акаунт у розділі «Адмін → TG Акаунти», після чого натисніть кнопку оновлення вище.
+                </p>
+              </div>
             </div>
           ) : (
             <>
@@ -1054,10 +1085,13 @@ function CreateCampaignForm({ userId, user, onCreated }: {
 
       {error && <p className="text-xs text-red-400">{error}</p>}
 
-      <button onClick={handleCreate} disabled={saving}
-        className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50">
+      <button
+        onClick={handleCreate}
+        disabled={saving || accounts.length === 0}
+        title={accounts.length === 0 ? 'Спочатку підключіть хоча б один MTProto-акаунт' : undefined}
+        className="py-3 rounded-xl bg-primary text-primary-foreground text-xs font-semibold flex items-center justify-center gap-2 active:scale-95 transition-all disabled:opacity-50 disabled:cursor-not-allowed">
         {saving ? <RefreshCw size={13} className="animate-spin" /> : <Send size={13} />}
-        {saving ? 'Створення...' : 'Створити кампанію'}
+        {saving ? 'Створення...' : accounts.length === 0 ? 'Потрібен акаунт-відправник' : 'Створити кампанію'}
       </button>
     </div>
   );
