@@ -814,8 +814,10 @@ export async function getTelegramChannelsPaginated(options: {
   if (!isSupabaseConfigured) return { channels: [], total: 0 };
   try {
     const db = getDb(); if (!db) return { channels: [], total: 0 };
-    const page     = Math.max(1, options.page     ?? 1);
-    const pageSize = Math.min(100, options.pageSize ?? 50);
+    const page     = Math.max(1, options.page ?? 1);
+    // Cap raised to 10 000 — Unlimited-plan users need to load all channels
+    // for the campaign picker. API route already validates the incoming value.
+    const pageSize = Math.min(10_000, options.pageSize ?? 50);
     const from     = (page - 1) * pageSize;
     const to       = from + pageSize - 1;
 
